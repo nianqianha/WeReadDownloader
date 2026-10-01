@@ -149,6 +149,33 @@ def test_logging_out_with_nothing_stored_is_harmless():
 
 
 @test
+def test_logout_is_offered_for_a_session_that_has_no_api_key():
+    """The reported case: signed in, working downloads, button greyed out.
+
+    A session written by an older build (or one where the api_key was never
+    persisted) carries cookies only. has_credentials() demands an api_key too, so
+    the button never enabled -- on the machines that were actually logged in, the
+    only way to clear the session was deleting the file by hand.
+    """
+    root, instance = _make_gui()
+    try:
+        _CRED.write_text(json.dumps({
+            "cookies": {"wr_skey": "s", "wr_vid": "425340025"},
+            "wr_ticket": "", "wr_wrpa": "",
+        }), encoding="utf-8")
+        instance._refresh_logout_button()
+        assert instance.logout_button.cget("state") == "normal", (
+            "a working cookie session still signs the user in, so 退出登录 must be "
+            "offered; the api_key is not what this button deletes")
+        # And it must actually work, not just look clickable.
+        instance.logout_button.invoke()
+        root.update()
+        assert not _CRED.exists(), "logout did nothing for an api_key-less session"
+    finally:
+        root.destroy()
+
+
+@test
 def test_logout_is_refused_while_a_job_is_running():
     root, instance = _make_gui()
     try:
