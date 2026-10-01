@@ -1,0 +1,23 @@
+# PyInstaller output (2.7 GB of build/release snapshots - never version these)
+build*/
+release*/
+debug*/
+dist/
+*.manifest
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local scratch
+*.log
+*.bak
+*.tmp
+Thumbs.db
+desktop.ini
+
+# NOTE: these ARE tracked on purpose:
+#   *.spec / installer\*.iss / installer\*.isl  - reproducible build + installer definition
+#   assets\ (icons) / design\ (reference captures + NOTES.md)
+#   *.py / *.lua / *.html / *.md                 - source and its tests
