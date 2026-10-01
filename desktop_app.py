@@ -819,9 +819,10 @@ class DesktopApp:
                 # A dialog is up and the main loop is inside its nested loop on
                 # purpose; the stack would only show messagebox internals.
                 continue
-            if time.perf_counter() - self._last_tick_end < 2.0:
-                continue
+            last_end = self._last_tick_end
             now = time.perf_counter()
+            if now - last_end < 2.0:
+                continue
             if now - reported < 5.0:
                 continue  # one report per stall, not one per sample
             reported = now
@@ -829,7 +830,7 @@ class DesktopApp:
             self._persist_log(
                 "[STALL_STACK] %s stuck %.0fms action=%s\n    %s"
                 % (time.strftime("%H:%M:%S"),
-                   (now - self._last_tick_end) * 1000.0,
+                   (now - last_end) * 1000.0,
                    self.current_action or "-", stack))
 
     def _stack_of(self, thread_id) -> str:

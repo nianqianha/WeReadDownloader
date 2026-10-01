@@ -158,6 +158,62 @@ def test_building_the_window_is_not_logged_as_a_stall():
         root.destroy()
 
 
+@test
+def test_a_stall_never_reports_a_negative_duration():
+    """The duration is read once, so a tick landing mid-report cannot invert it.
+
+    The real log contains "[STALL_STACK] 01:30:06 stuck -4124ms". The guard read
+    _last_tick_end, then the log line read it again; a _poll() in between set it
+    past the sampler's own clock and the subtraction went negative. This is the
+    one line used to tell a suspend from a freeze, so a negative value there
+    makes a real stall look like a broken clock.
+    """
+    root, instance = _make_gui()
+    captured = []
+    real_persist = instance._persist_log
+    real_stack_of = instance._stack_of
+
+    def racing_stack_of(thread_id):
+        # This runs between the ">2 s stale" guard and the log line, which is
+        # exactly where a real _poll() can land. Stand in for that tick.
+        instance._last_tick_end = time.perf_counter() + 30.0
+        return real_stack_of(thread_id)
+
+    def racing_persist(msg):
+        captured.append(msg)
+
+    def _block():
+        # The watchdog only fires when the Tk thread genuinely stops ticking, so
+        # the freeze has to be real rather than simulated by idling the loop.
+        time.sleep(7.0)
+
+    try:
+        instance._modal_depth = 0
+        instance._stack_of = racing_stack_of
+        instance._persist_log = racing_persist
+        root.after(200, _block)
+        deadline = time.time() + 20.0
+        while not captured and time.time() < deadline:
+            try:
+                root.update()
+            except Exception:
+                pass
+            time.sleep(0.1)
+        stuck_lines = [m for m in captured if m.startswith("[STALL_STACK]")]
+        assert stuck_lines, (
+            "the sampler never reported, so the race was not exercised:\n"
+            + "\n".join(captured))
+        for msg in stuck_lines:
+            stuck = float(msg.split("stuck ", 1)[1].split("ms", 1)[0])
+            assert stuck >= 0, (
+                "reported a negative stall duration, so the record is junk: "
+                + msg.splitlines()[0])
+    finally:
+        instance._stack_of = real_stack_of
+        instance._persist_log = real_persist
+        root.destroy()
+
+
 if __name__ == "__main__":
     for case in ALL_TESTS:
         case()
