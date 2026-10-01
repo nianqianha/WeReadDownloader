@@ -79,6 +79,12 @@ MAX_EVENTS_PER_TICK = 200
 # "(未响应)" at roughly five seconds, so 1200 ms catches the tail end of it.
 STALL_LOG_MS = 1200.0
 
+# Wall time this process was not on the CPU before we call the gap a sleep. The
+# machine suspending itself is not a defect and shows up in the log as gaps of
+# 26-96 s with blocked=0ms and an empty queue, which is what a real freeze does
+# not look like.
+RESUME_MIN_MS = 2000.0
+
 # Result cards per page. Repainting a CTkScrollableFrame costs roughly 80 ms per
 # child widget on the main thread, so keeping a page small is what stops a long
 # result list from freezing the window.
@@ -264,9 +270,16 @@ class DesktopApp:
         self.login_otp = ""
         self._pending_otp = ""
         self._log_buffer: list[str] = []
-        self._last_tick_end = time.perf_counter()
+        # Set by the sampler thread when its own sleep comes back late, which is
+        # how a machine suspend is told apart from a wedged Tk thread. Consumed
+        # by the next tick so it is reported exactly once.
+        self._resume_mark = 0.0
         self._build()
         self._restore_login_identity()
+        # After the build, not before: building the window costs over a second,
+        # and charging that to the first tick logged a 1.3 s [STALL] on every
+        # single launch. The loop starts here.
+        self._last_tick_end = time.perf_counter()
         self._stall_watcher = threading.Thread(
             target=self._watch_for_stalls, name="stall-watch", daemon=True)
         self._stall_watcher.start()
@@ -711,11 +724,15 @@ class DesktopApp:
             self._handle_callback_exception(*sys.exc_info())
         finally:
             blocked_ms = (time.perf_counter() - started) * 1000.0
-            # A modal dialog holds the main loop on purpose until it is
-            # answered, so that time is the user's, not a defect. Logging it as a
-            # stall buried the real ones: a dialog left open for 87 s produced an
-            # entry indistinguishable from a frozen thread.
-            if self._modal_depth > 0:
+            if self._consume_resume():
+                # The machine suspended us. The gap is wall time the Tk loop
+                # never got a chance to run for, not a blocked thread.
+                self._note_resume(gap_ms)
+            elif self._modal_depth > 0:
+                # A modal dialog holds the main loop on purpose until it is
+                # answered, so that time is the user's, not a defect. Logging it
+                # as a stall buried the real ones: a dialog left open for 87 s
+                # produced an entry indistinguishable from a frozen thread.
                 if gap_ms > STALL_LOG_MS or blocked_ms > STALL_LOG_MS:
                     self._persist_log(
                         "[STALL-MODAL] %s gap=%.0fms blocked=%.0fms action=%s "
@@ -734,6 +751,45 @@ class DesktopApp:
             except Exception:
                 pass
 
+    def _consume_resume(self):
+        """True once if the sampler saw the process get suspended since last tick.
+
+        The sampler asks for time.sleep(0.2) and measures what it really got. A
+        machine that suspends makes that return tens of seconds late; a thread
+        that is merely wedged anywhere in the process does not, because the
+        sampler keeps running. That is what separates "the OS took the CPU away"
+        from "the Tk thread is stuck", which the wall clock cannot tell apart.
+        The mark is only ever set on a real overrun, so it is consumed as-is.
+        """
+        if not self._resume_mark:
+            return False
+        self._resume_mark = 0.0
+        return True
+
+    def _note_resume(self, gap_ms):
+        """Record a sleep as one, and repaint, because that is the real need.
+
+        Windows marks a window "(未响应)" from the message pump going quiet, and a
+        machine that suspends for a minute stops the pump without the app being at
+        fault. The window also comes back holding whatever was on screen before
+        the suspend, so the redraw is what the user actually needs.
+        """
+        self._persist_log(
+            "[RESUME] %s gap=%.0fms action=%s "
+            "(the OS suspended this process; the Tk loop was not blocked)"
+            % (time.strftime("%H:%M:%S"), gap_ms, self.current_action or "-"))
+        try:
+            self.root.after(0, self._redraw_after_resume)
+        except Exception:
+            pass
+
+    def _redraw_after_resume(self):
+        try:
+            self.root.update_idletasks()
+            self._flush_log_panel()
+        except Exception:
+            self._handle_callback_exception(*sys.exc_info())
+
     def _watch_for_stalls(self):
         """Sample the Tk thread while it is stuck, because _poll cannot.
 
@@ -748,7 +804,17 @@ class DesktopApp:
         main_id = threading.main_thread().ident
         reported = 0.0
         while True:
+            # Measure the sleep instead of trusting the argument: this thread is
+            # not blocked by whatever wedges the Tk thread, so a sleep that comes
+            # back far later than it was asked for means the OS suspended the
+            # whole process, not that the app is stuck.
+            asked = time.perf_counter()
             time.sleep(0.2)
+            overran_ms = (time.perf_counter() - asked - 0.2) * 1000.0
+            if overran_ms > RESUME_MIN_MS:
+                # Only mark it; the next tick reports it once, with the gap.
+                self._resume_mark = time.perf_counter()
+                continue
             if self._modal_depth > 0:
                 # A dialog is up and the main loop is inside its nested loop on
                 # purpose; the stack would only show messagebox internals.
