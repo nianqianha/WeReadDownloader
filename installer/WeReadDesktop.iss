@@ -66,12 +66,7 @@ Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 ; 注意：[Types] 的名字故意不叫 graphics/web —— 它们若与 [Components] 的组件
 ; 同名，Inno Setup 在解析 /COMPONENTS 过滤与组件选择时会歧义，导致未选中的
 ; 组件也被安装（已实测踩过：只选 graphics 仍装上了 web 的 56 个文件）。
-[Types]
-Name: "custom"; Description: "自定义选择要安装的版本"
-Name: "full"; Description: "完整安装（图形版 + 网页版）"
-Name: "onlygraphics"; Description: "仅图形版（二维码登录）"
-Name: "onlyweb"; Description: "仅网页版（0.6s 启动）"
-
+;
 ; 用「安装类型」页而不是「组件勾选」页。原因是 [Components] 没有"默认勾选"这个
 ; flag（只支持 fixed/exclusive/dontinheritcheckboxes 等），custom 类型下实测三个
 ; 组件全是未勾选（BM_GETCHECK 读清单框确认），装出来是空壳。类型页则完全确定：
