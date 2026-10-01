@@ -32,6 +32,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from lxml import etree, html as lxml_html
 from lupa.luajit21 import LuaRuntime
+import weread_login
 
 if getattr(sys, "frozen", False):
     ROOT = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "kindle_data"
@@ -181,15 +182,21 @@ def load_credentials() -> dict[str, Any]:
             result["cookies"] = {k.decode(): v.decode() for k, v in value.items()}
         else:
             result[key.decode()] = value.decode() if value else ""
-    if COOKIE_STATE.is_file():
-        try:
-            state = json.loads(COOKIE_STATE.read_text(encoding="utf-8"))
-            if isinstance(state, dict) and isinstance(state.get("cookies"), dict):
-                result["cookies"].update({str(k): str(v) for k, v in state["cookies"].items()})
-                for key in ("wr_ticket", "wr_wrpa"):
-                    if isinstance(state.get(key), str): result[key] = state[key]
-        except (OSError, ValueError):
-            pass
+    # The session overlay is owned by weread_login: it is the only writer that
+    # knows the file may be DPAPI-sealed. Reading it here as plain JSON raised
+    # UnicodeDecodeError at import time once it was encrypted, and persisting it
+    # as plain JSON silently undid the sealing on every cookie refresh -- two
+    # owners, two formats, one file.
+    stored = weread_login.load_saved_credentials(COOKIE_STATE)
+    if stored:
+        overlay_cookies = stored.get("cookies")
+        if isinstance(overlay_cookies, dict):
+            result["cookies"].update({str(k): str(v) for k, v in overlay_cookies.items()})
+        for key in ("wr_ticket", "wr_wrpa"):
+            if isinstance(stored.get(key), str) and stored[key]:
+                result[key] = stored[key]
+        # api_key deliberately not taken from the overlay: it stays the Lua
+        # base's value, exactly as before this file was ever sealed.
     if not result["api_key"] or not result["cookies"].get("wr_skey"):
         raise RuntimeError("Private credentials need an API key and WeRead session")
     return result
@@ -294,26 +301,26 @@ class WeRead:
             return
         secure_output_directory(PRIVATE)
         with COOKIE_STATE_LOCK:
-            merged = {"cookies": {}, "wr_ticket": self.auth.get("wr_ticket", ""),
-                      "wr_wrpa": self.auth.get("wr_wrpa", "")}
-            if COOKIE_STATE.is_file():
-                try:
-                    previous = json.loads(COOKIE_STATE.read_text(encoding="utf-8"))
-                    if isinstance(previous.get("cookies"), dict): merged["cookies"].update(previous["cookies"])
-                    for key in ("wr_ticket", "wr_wrpa"):
-                        if previous.get(key): merged[key] = previous[key]
-                except (OSError, ValueError):
-                    pass
-            merged["cookies"].update(changed)
-            temp = COOKIE_STATE.with_name(COOKIE_STATE.name + f".{threading.get_ident()}.tmp")
-            temp.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+            # Read/merge/write through weread_login so the sealed format is
+            # preserved. Keep the stored api_key: persist_cookies only refreshes
+            # the jar, and dropping the key here would make the next download
+            # refuse to start.
+            previous = weread_login.load_saved_credentials(COOKIE_STATE)
+            merged_cookies = dict(previous.get("cookies") or {})
+            merged_cookies.update(changed)
+            payload = {
+                "cookies": merged_cookies,
+                "api_key": previous.get("api_key", ""),
+                "wr_ticket": self.auth.get("wr_ticket") or previous.get("wr_ticket") or "",
+                "wr_wrpa": self.auth.get("wr_wrpa") or previous.get("wr_wrpa") or "",
+            }
+            if previous.get("account"):
+                payload["account"] = previous["account"]
             try:
-                _set_private_acl(temp, False)
-                os.replace(temp, COOKIE_STATE)
-                _set_private_acl(COOKIE_STATE, False)
+                weread_login.save_credentials(payload, COOKIE_STATE)
                 self._initial_cookies.update(changed)
-            except (OSError, subprocess.CalledProcessError):
-                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def gateway(self, name: str, params: dict[str, Any],
                 timeout: tuple[float, float] = (10, 45)) -> dict[str, Any]:
@@ -464,13 +471,28 @@ class WeRead:
         # Nothing on the line above raises when sanitize_css returns several
         # values, so the tuple reached write_text() intact and failed the whole
         # chapter with "TypeError: data must be str, not tuple" -- one optional
-        # stylesheet cost a book that had already downloaded. CSS is
-        # presentation, so anything that is not text is simply no CSS.
+        # stylesheet cost a book that had already downloaded.
+        #
+        # lupa hands a multi-value Lua result back as a tuple whose FIRST element
+        # is the sanitized stylesheet; the rest are trailing values nobody reads.
+        # Dropping the tuple threw away real CSS on every chapter of a finished
+        # book, so take the first usable string and only degrade when there is
+        # genuinely no text in there.
         if not isinstance(css, str):
-            print(f"[CSS] chapter {chapter['chapterUid']} stylesheet decoded to "
-                  f"{type(css).__name__}, not text; continuing without it",
-                  file=sys.stderr, flush=True)
-            css = ""
+            recovered = ""
+            if isinstance(css, (tuple, list)):
+                recovered = next((item for item in css
+                                  if isinstance(item, str) and item.strip()), "")
+            if recovered:
+                print(f"[CSS] chapter {chapter['chapterUid']} stylesheet arrived as "
+                      f"{type(css).__name__} of {len(css)} values; kept the first "
+                      f"({len(recovered)} chars)", file=sys.stderr, flush=True)
+                css = recovered
+            else:
+                print(f"[CSS] chapter {chapter['chapterUid']} stylesheet decoded to "
+                      f"{type(css).__name__}, not text; continuing without it",
+                      file=sys.stderr, flush=True)
+                css = ""
         return xhtml, css
 
     def annotations(self, book_id: str, chapter_uid: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -1376,8 +1398,13 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         "underline_marker_spans": annotation_coverage["embedded_markers"],
         "underlines_not_placed": annotation_coverage["dropped_underline_ranges"],
         "chapters_with_unplaced_underlines": annotation_coverage["chapters_with_dropped_underlines"],
-        # Kept under the old key too: an older GUI build may still read it.
+        # Kept under the old keys too: an older GUI build may still read them.
+        # underline_ranges_dropped alone was not enough -- describe_omissions()
+        # also asks for chapters_with_dropped_underlines, and omitting that one
+        # made every finished book claim the underlines were missing from 0
+        # chapters while the log said 8.
         "underline_ranges_dropped": annotation_coverage["dropped_underline_ranges"],
+        "chapters_with_dropped_underlines": annotation_coverage["chapters_with_dropped_underlines"],
         "missing_underline_examples": missing_underline_samples,
         "images_dropped": dropped_images,
         "chapters_with_dropped_images": chapters_with_dropped_images,

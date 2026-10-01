@@ -679,9 +679,14 @@ def test_login_manual_entry_saves_credentials_and_updates_status():
         instance.manual_skey.insert(0, "manual-skey")
         instance._save_manual_credentials()
 
-        saved = json.loads(Path(app.weread_login.CREDENTIAL_STATE).read_text(encoding="utf-8"))
+        # Read back through the loader, not as raw JSON: the session file is
+        # DPAPI-sealed, so parsing it here is what used to pin the credential
+        # store to cleartext.
+        saved = app.weread_login.load_saved_credentials()
         assert saved["api_key"] == "wrk-manual-key"
         assert saved["cookies"]["wr_skey"] == "manual-skey"
+        raw = Path(app.weread_login.CREDENTIAL_STATE).read_bytes()
+        assert b"manual-skey" not in raw, "the session cookie was stored in cleartext"
         assert app.weread_login.has_credentials()
         assert instance.auth_badge.cget("text") == "登录有效"
         assert instance.login_dialog is None, "a successful save closes the window"
@@ -703,8 +708,10 @@ def test_login_success_event_persists_credentials_and_closes_the_window():
         instance.events.put(("login", ("done", credentials)))
         instance._drain_events()
 
-        saved = json.loads(Path(app.weread_login.CREDENTIAL_STATE).read_text(encoding="utf-8"))
+        # Loader, not raw JSON: the session file is sealed at rest.
+        saved = app.weread_login.load_saved_credentials()
         assert saved["cookies"]["wr_skey"] == "scanned-skey"
+        assert saved["cookies"]["wr_vid"] == "VID"
         assert "齐佩甲" in instance.status.get()
         assert instance.login_dialog is None
     finally:

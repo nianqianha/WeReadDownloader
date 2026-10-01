@@ -18,8 +18,10 @@ scratch instead of being merged into whatever was there before.
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -234,8 +236,95 @@ def complete_login(session: requests.Session, jar: dict, login_result: dict) -> 
 
 # ----------------------------------------------------------------- persistence
 
+# A saved session is a bearer token for the account: anything that can read this
+# file can act as the user. It used to be written as plain JSON, and the only
+# thing guarding it was os.chmod(0o600) -- which on Windows cannot restrict
+# access at all; it only toggles the read-only attribute. The session therefore
+# sat in cleartext for any process running as the user, and the manual-login form
+# pre-filled it into a visible text box, so a screenshot or a screen recording
+# captured the live cookie.
+#
+# Now: the payload is sealed with DPAPI (CryptProtectData, user scope) so only
+# this Windows user can read it back, and the ACL is actually restricted rather
+# than pretended. Plaintext files written by earlier builds still load, and are
+# re-sealed the next time credentials are saved.
+_PROTECTED_MAGIC = b"WRDPA1\x00"
+_CRYPTPROTECT_UI_FORBIDDEN = 0x01
+
+
+class _DataBlob(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+def _dpapi_available() -> bool:
+    return os.name == "nt" and hasattr(ctypes, "windll") and hasattr(ctypes.windll, "crypt32")
+
+
+def _seal(plain: bytes) -> bytes:
+    """DPAPI-encrypt with user scope; raise if unavailable rather than fake it."""
+    if not _dpapi_available():
+        raise OSError("DPAPI is not available on this platform")
+    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    source = ctypes.create_string_buffer(plain, len(plain))
+    blob_in = _DataBlob(len(plain), ctypes.cast(source, ctypes.POINTER(ctypes.c_char)))
+    blob_out = _DataBlob()
+    if not crypt32.CryptProtectData(
+            ctypes.byref(blob_in), "WereReadDesktop", None, None, None,
+            _CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(blob_out)):
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        kernel32.LocalFree(blob_out.pbData)
+
+
+def _unseal(blob: bytes) -> bytes:
+    if not _dpapi_available():
+        raise OSError("DPAPI is not available on this platform")
+    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    source = ctypes.create_string_buffer(blob, len(blob))
+    blob_in = _DataBlob(len(blob), ctypes.cast(source, ctypes.POINTER(ctypes.c_char)))
+    blob_out = _DataBlob()
+    if not crypt32.CryptUnprotectData(
+            ctypes.byref(blob_in), None, None, None, None,
+            _CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(blob_out)):
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        kernel32.LocalFree(blob_out.pbData)
+
+
+def _restrict_to_current_user(path: Path) -> None:
+    """Actually lock the file down to this user.
+
+    Same approach the download engine already uses for its export lock
+    (_set_private_acl in weread_desktop): drop inheritance and grant this
+    account full control. os.chmod is not a substitute on Windows.
+    """
+    try:
+        if os.name == "nt":
+            user = subprocess.check_output(["whoami"], text=True).strip()
+            subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", user + ":F"],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            os.chmod(path, 0o600)
+    except (OSError, subprocess.CalledProcessError):
+        # The payload is DPAPI-sealed regardless, so a failed ACL is not a
+        # plaintext exposure; it only widens who can delete the file.
+        pass
+
+
 def save_credentials(credentials: dict, path: Path | None = None) -> Path:
-    """Write the credential set where load_credentials() already looks for it."""
+    """Write the credential set where load_credentials() already looks for it.
+
+    Sealed with DPAPI on Windows. If sealing fails the write is abandoned rather
+    than falling back to cleartext: a session file that cannot be protected
+    should not be created, because the next thing that would happen is somebody
+    assuming it was.
+    """
     target = Path(path) if path is not None else CREDENTIAL_STATE
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -247,13 +336,22 @@ def save_credentials(credentials: dict, path: Path | None = None) -> Path:
     account = credentials.get("account")
     if account:
         payload["account"] = account
+    raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    if _dpapi_available():
+        stored = _PROTECTED_MAGIC + _seal(raw)
+    elif os.name == "nt":
+        raise OSError("cannot seal the session file on Windows without DPAPI")
+    else:
+        # Off Windows there is no DPAPI; the 0600 mode is the only guard there is.
+        stored = raw
     temp = target.with_suffix(target.suffix + ".tmp")
-    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    with temp.open("wb") as stream:
+        stream.write(stored)
+        stream.flush()
+        os.fsync(stream.fileno())
+    _restrict_to_current_user(temp)
     os.replace(temp, target)
-    try:
-        os.chmod(target, 0o600)
-    except OSError:
-        pass
+    _restrict_to_current_user(target)
     return target
 
 
@@ -261,8 +359,18 @@ def load_saved_credentials(path: Path | None = None) -> dict:
     """Read back what save_credentials() stored; {} when there is nothing usable."""
     target = Path(path) if path is not None else CREDENTIAL_STATE
     try:
-        state = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        blob = target.read_bytes()
+    except OSError:
+        return {}
+    try:
+        if blob.startswith(_PROTECTED_MAGIC):
+            blob = _unseal(blob[len(_PROTECTED_MAGIC):])
+        state = json.loads(blob.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    except Exception:
+        # A DPAPI failure (different user, changed profile) must read as "no
+        # session", not as a crash on the GUI thread.
         return {}
     if not isinstance(state, dict):
         return {}
@@ -282,6 +390,25 @@ def has_credentials(path: Path | None = None) -> bool:
     """True when both halves the engine insists on are present."""
     stored = load_saved_credentials(path)
     return bool(stored.get("api_key")) and bool(stored.get("cookies", {}).get("wr_skey"))
+
+
+def has_saved_session(path: Path | None = None) -> bool:
+    """True when there is a saved session file to log out of.
+
+    Deliberately not has_credentials(): that one requires an api_key as well, and
+    a session saved by an older build (or one whose api_key never got written)
+    still works for search, details and downloads. Gating the 退出登录 button on it
+    left the button permanently greyed out on exactly the machines that were
+    signed in -- there was no way to clear the session from the window.
+
+    Based on the file existing rather than on parsing it, so a corrupt or
+    half-written session is still something the user can delete.
+    """
+    target = Path(path) if path is not None else CREDENTIAL_STATE
+    try:
+        return target.is_file()
+    except OSError:
+        return False
 
 
 def credentials_status(path: Path | None = None) -> dict[str, Any]:

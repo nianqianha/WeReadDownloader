@@ -226,7 +226,19 @@ def test_credentials_round_trip_through_the_session_state_file():
         assert loaded["api_key"] == "wrk-1"
         assert loaded["cookies"]["wr_skey"] == "S"
         assert loaded["account"]["login_method"] == "qr"
-        assert json.loads(target.read_text(encoding="utf-8"))["cookies"]["wr_vid"] == "V"
+
+        # The file itself used to be asserted readable here, which is what kept
+        # the session in cleartext. A saved session is a bearer token, so the
+        # contract is now: still loadable through the helpers, and NOT readable
+        # as JSON by anything else.
+        blob = target.read_bytes()
+        assert b'"wr_skey"' not in blob, "the session cookie is stored in cleartext"
+        assert b'"S"' not in blob, "a cookie value is recoverable from the raw file"
+        assert b"wrk-1" not in blob, "the api key is stored in cleartext"
+        if os.name == "nt":
+            assert blob.startswith(login._PROTECTED_MAGIC), (
+                "on Windows the session file must be DPAPI-sealed")
+        assert login.load_saved_credentials(target)["cookies"]["wr_vid"] == "V"
 
         assert login.has_credentials(target) is True
         assert login.credentials_status(target)["ready"] is True

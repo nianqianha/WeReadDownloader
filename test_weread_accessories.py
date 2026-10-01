@@ -263,12 +263,28 @@ def _fetch_css(api, book=None, chapter=None):
 
 @test
 def test_a_tuple_from_the_stylesheet_does_not_fail_the_chapter():
-    """The regression: a malformed stylesheet cost a whole finished book."""
+    """The regression: a malformed stylesheet cost a whole finished book.
+
+    It also used to throw the CSS away. lupa returns multi-value Lua results as a
+    tuple whose first element is the sanitized stylesheet, so keeping that first
+    string recovers the chapter styling instead of shipping a book whose only
+    stylesheet is the shared one. The chapter must still survive either way.
+    """
     api = _CssApi("p{color:red}", ("p{color:red}", "extra"))
     xhtml, css = _fetch_css(api)
     assert isinstance(css, str), type(css)
-    assert css == "", css
+    assert css == "p{color:red}", css
     # The text still came through: the whole point of degrading the stylesheet.
+    assert "<body" in xhtml, xhtml
+
+
+@test
+def test_a_tuple_with_no_usable_string_still_degrades_to_no_css():
+    """A multi-value answer with no text in it is still just no CSS."""
+    api = _CssApi("p{color:red}", (None, 7, "   "))
+    xhtml, css = _fetch_css(api)
+    assert isinstance(css, str), type(css)
+    assert css == "", css
     assert "<body" in xhtml, xhtml
 
 

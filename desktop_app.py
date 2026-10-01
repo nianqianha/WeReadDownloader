@@ -122,13 +122,20 @@ def _covers_box(image, box) -> bool:
     return max(image.size) >= max(box)
 
 
-def describe_omissions(report) -> str:
+def describe_omissions(report, compact: bool = False) -> str:
     """Plain-language statement of what a finished book is missing.
 
     The downloader keeps the prose when an accessory is unavailable, so the
     book is usable -- but a reader who is never told that images or highlights
     went missing will assume the book is whole. Returns "" only when nothing
     was actually lost.
+
+    `compact` is the one-line form for the status bar. The full paragraph is
+    three wrapped lines, and the status bar sits directly above the task buttons
+    in a packed column: at the default window height that growth pushed 退出登录 /
+    查看技术日志 / 打开下载目录 below the bottom of the window, where they were
+    laid out at full size but could not be clicked. The dialog and the log file
+    still carry the whole statement.
     """
     if not isinstance(report, dict):
         return ""
@@ -140,11 +147,22 @@ def describe_omissions(report) -> str:
                      % (images, chapters))
     dropped = int(report.get("underline_ranges_dropped") or 0)
     if dropped:
-        chapters = int(report.get("chapters_with_dropped_underlines") or 0)
+        # The worker emits chapters_with_unplaced_underlines and keeps
+        # chapters_with_dropped_underlines only for older builds. Read the new
+        # name first and fall back, so the window agrees with the log instead of
+        # reporting the underlines as missing from 0 chapters.
+        chapters = int(
+            report.get("chapters_with_unplaced_underlines")
+            or report.get("chapters_with_dropped_underlines") or 0)
         lines.append("划线：%d 条（分布在 %d 章）在原文里没有位置标记，为避免标错句子已略去。"
                      % (dropped, chapters))
     if not lines:
         return ""
+    if compact:
+        # One line, no embedded newlines, so the status label cannot grow the
+        # packed column and push the buttons out of the window.
+        summary = "；".join(line.split("：", 1)[-1].rstrip("。") for line in lines)
+        return "正文完整，但有附带内容取不回：%s。完整说明见完成提示与技术日志。" % summary
     return ("正文完整，但有部分附带内容无法取回：\n\n"
             + "\n".join("· " + line for line in lines)
             + "\n\n这些都没有补全：微信读书那边已无数据，或原文没有可用的位置标记，"
@@ -237,6 +255,9 @@ class DesktopApp:
         self.page_index = 0
         self.jobs = tk.StringVar(value="1")
         self.status = tk.StringVar(value="准备就绪。第一步：检查登录状态。")
+        # Non-zero while a modal dialog owns the main loop, so the stall
+        # watchdog can tell a waiting dialog from a wedged thread.
+        self._modal_depth = 0
         self.login_dialog = None
         self.login_thread = None
         self.login_cancel = threading.Event()
@@ -312,12 +333,21 @@ class DesktopApp:
         and raises instead of hiding behind the window), and writing a marker
         line to the log so a stall that *was* a dialog is provable afterwards
         rather than guessed at.
+
+        It also raises self._modal_depth for the duration. The stall watchdog
+        cannot otherwise tell "the user has not answered a dialog yet" from
+        "the main thread is wedged": during a GUI pass, dialog waits produced
+        87 s and 78 s entries that looked exactly like the real 95 s startup
+        stall, and the genuine one was buried in that noise.
         """
         self._persist_log("[MODAL:%s] %s | %s" % (kind, title, message.splitlines()[0]))
+        self._modal_depth += 1
         try:
             return getattr(messagebox, kind)(title, message, parent=self.root, **kwargs)
         except Exception:
             return "no"
+        finally:
+            self._modal_depth -= 1
 
     def _quiet_button(self, parent, text: str, width: int, command, **kwargs):
         """Secondary action: outlined on the paper surface, never a filled slab."""
@@ -482,6 +512,7 @@ class DesktopApp:
             dropdown_text_color=self.INK, button_color=self.HAIRLINE,
             button_hover_color=self.ACCENT_TINT, variable=self.jobs, state="readonly")
         self.jobs_box.grid(row=0, column=2, sticky="e", padx=(6, 18), pady=(12, 0))
+        self._make_combo_keyboard_reachable(self.jobs_box)
         export.grid_columnconfigure(2, weight=0)
         self.probe_button = ctk.CTkButton(
             export, text="先检查第一章", command=self.probe, height=36,
@@ -523,6 +554,36 @@ class DesktopApp:
         # No log panel in the window: it duplicated the "查看技术日志" button
         # and cost the space the book introduction actually needs. Worker lines
         # still go to the log file via _log()/_persist_log().
+
+    @staticmethod
+    def _make_combo_keyboard_reachable(box):
+        """Let the 并发 box be driven from the keyboard, not just the arrow.
+
+        CTkComboBox binds its own click handling to the "dropdown_arrow" /
+        "right_parts" canvas tags, which is what opens the list, and that part
+        works. What it never does is move keyboard focus to the inner ttk
+        combobox, so after opening the list the arrow keys still did nothing.
+
+        So this only takes focus; it deliberately does not open the dropdown
+        itself. Opening it here would fire a second, competing open on every
+        arrow click and would grab the pointer from a control that already
+        handles its own clicks. Guarded because it reaches into customtkinter
+        internals: a different layout must keep the stock behaviour, not raise.
+        """
+        canvas = getattr(box, "_canvas", None)
+        if canvas is None:
+            return
+
+        def _take_focus(_event=None):
+            try:
+                box.focus_set()      # CTkComboBox forwards this to its entry
+            except Exception:
+                pass
+
+        try:
+            canvas.bind("<Button-1>", _take_focus, add="+")
+        except Exception:
+            pass
 
     def _handle_callback_exception(self, exc_type, exc_value, exc_traceback):
         """Must never raise: an exception escaping a Tk callback closes the app."""
@@ -650,7 +711,18 @@ class DesktopApp:
             self._handle_callback_exception(*sys.exc_info())
         finally:
             blocked_ms = (time.perf_counter() - started) * 1000.0
-            if gap_ms > STALL_LOG_MS or blocked_ms > STALL_LOG_MS:
+            # A modal dialog holds the main loop on purpose until it is
+            # answered, so that time is the user's, not a defect. Logging it as a
+            # stall buried the real ones: a dialog left open for 87 s produced an
+            # entry indistinguishable from a frozen thread.
+            if self._modal_depth > 0:
+                if gap_ms > STALL_LOG_MS or blocked_ms > STALL_LOG_MS:
+                    self._persist_log(
+                        "[STALL-MODAL] %s gap=%.0fms blocked=%.0fms action=%s "
+                        "(a dialog is waiting for an answer)"
+                        % (time.strftime("%H:%M:%S"), gap_ms, blocked_ms,
+                           self.current_action or "-"))
+            elif gap_ms > STALL_LOG_MS or blocked_ms > STALL_LOG_MS:
                 # Timestamped, because a stall has to be correlated with the
                 # sampler's own output to be worth anything.
                 self._persist_log(
@@ -677,6 +749,10 @@ class DesktopApp:
         reported = 0.0
         while True:
             time.sleep(0.2)
+            if self._modal_depth > 0:
+                # A dialog is up and the main loop is inside its nested loop on
+                # purpose; the stack would only show messagebox internals.
+                continue
             if time.perf_counter() - self._last_tick_end < 2.0:
                 continue
             now = time.perf_counter()
@@ -885,7 +961,10 @@ class DesktopApp:
                     if notice:
                         # Degrading instead of failing is only an improvement if
                         # the reader is told what the finished book is missing.
-                        self.status.set(notice)
+                        # The bar gets the one-line form: the full paragraph
+                        # grew the packed column past the window bottom and took
+                        # the task buttons with it.
+                        self.status.set(describe_omissions(self.omissions, compact=True))
                         self._ask("showinfo", "下载完成，但有内容缺失", notice)
                     else:
                         self.status.set("下载和文件校验完成。")
@@ -1372,7 +1451,8 @@ class DesktopApp:
         self.manual_skey = ctk.CTkEntry(manual_box, placeholder_text="wr_skey 的值", height=36,
                                         corner_radius=8, fg_color=self.SUNKEN,
                                         border_color=self.HAIRLINE,
-                                        text_color=self.INK, font=_font(13))
+                                        text_color=self.INK, font=_font(13),
+                                        show="•")
         self.manual_skey.pack(fill="x", padx=20, pady=(8, 12))
         self.login_manual_status = ctk.CTkLabel(manual_box, text="", text_color=self.MUTED,
                                                 font=_font(12), wraplength=470,
@@ -1386,11 +1466,20 @@ class DesktopApp:
                       font=_font(13),
                       command=self._save_manual_credentials).pack(side="left")
 
+        # Deliberately does NOT pre-fill the saved session cookie. It used to, in
+        # cleartext: the dialog promises "扫码后凭证只保存在本机", and then wrote
+        # that cookie straight into a visible box, so any screenshot or screen
+        # recording of this window captured a live account token. The field is
+        # masked now, and an existing session is announced instead of shown. The
+        # api_key is left alone -- it is not a session token, and re-entering it
+        # is a normal thing to do while switching accounts.
         stored = weread_login.load_saved_credentials()
         if stored.get("api_key"):
             self.manual_api_key.insert(0, stored["api_key"])
         if stored.get("cookies", {}).get("wr_skey"):
-            self.manual_skey.insert(0, stored["cookies"]["wr_skey"])
+            self.login_manual_status.configure(
+                text="本机已保存一份登录会话。为安全起见不再回显，如需更换请直接粘贴新的 wr_skey。",
+                text_color=self.MUTED)
 
         self.login_qr_worker = None
         self.login_otp_ready = threading.Event()
@@ -1664,9 +1753,15 @@ class DesktopApp:
             "refresh reset rather than a full sign-out")
 
     def _refresh_logout_button(self):
-        """Only offer 退出登录 when there is actually something to log out of."""
+        """Only offer 退出登录 when there is actually something to log out of.
+
+        Keyed on has_saved_session() rather than has_credentials(): the session
+        this button deletes is a cookie jar, and a jar without an api_key still
+        signs the user in. Requiring the api_key meant the button stayed greyed
+        out on a working login, leaving no way to sign out from the window.
+        """
         try:
-            ready = weread_login.has_credentials()
+            ready = weread_login.has_saved_session()
         except Exception:
             ready = False
         self.logout_button.configure(state="normal" if ready else "disabled")

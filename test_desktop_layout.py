@@ -136,6 +136,45 @@ def test_the_rows_below_the_introduction_are_never_squeezed_to_nothing():
             root.destroy()
 
 
+@test
+def test_the_task_buttons_are_inside_the_window_not_merely_sized():
+    """The gap the squeeze test leaves open.
+
+    "not squeezed to nothing" only proves the widget still has height. When the
+    status bar grew to the three-line omission notice, pack placed the task row
+    *below the bottom of the window*: full height, laid out, invisible and
+    unclickable. Only a bounds check catches that, so assert the row's bottom
+    edge is inside the window, with the real omission text in place.
+    """
+    report = {
+        "underline_ranges_dropped": 442,
+        # The name the worker actually emits. Reading the legacy name here is
+        # what used to report 0 chapters.
+        "chapters_with_unplaced_underlines": 8,
+        "images_dropped": 0,
+    }
+    full = app.describe_omissions(report)
+    compact = app.describe_omissions(report, compact=True)
+    assert "\n" not in compact, "the compact status form must be one line:\n%r" % compact
+    assert "8 章" in compact, "compact form lost the chapter count: %r" % compact
+    assert "8 章" in full, "full form lost the chapter count: %r" % full
+
+    for height in (SCREEN_FIT_HEIGHT, 760, TALL_HEIGHT):
+        root, instance = _make_gui(height)
+        try:
+            instance.status.set(compact)
+            root.update()
+            root.update_idletasks()
+            row = instance.open_button.master
+            row_bottom = row.winfo_rooty() - root.winfo_rooty() + row.winfo_height()
+            assert row_bottom <= root.winfo_height() + 1, (
+                "task button row ends at %d px but the window is only %d px tall "
+                "(height=%d) -- it is laid out but off-screen"
+                % (row_bottom, root.winfo_height(), height))
+        finally:
+            root.destroy()
+
+
 if __name__ == "__main__":
     for test_case in ALL_TESTS:
         test_case()
