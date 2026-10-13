@@ -935,7 +935,51 @@ def test_login_button_keeps_the_name_when_only_the_session_expired():
         _blank_credentials_file()
 
 
+def test_the_program_actually_runs_when_executed_as_a_script():
+    """desktop_app.py must have an `if __name__ == "__main__"` block.
+
+    Without it the module defines main() and stops. Running the file as a script
+    exits 0 immediately with no window, no log line, and no traceback -- there is
+    nothing to report, because nothing raised. PyInstaller executes the entry
+    script as __main__ too, so the frozen GUI was equally dead.
+
+    That is not hypothetical: moving the modules into weread/ dropped this guard,
+    and the whole 35-file suite still passed, because every test imports
+    desktop_app and calls into it directly. Nothing ran it as a program.
+
+    Parsed, not grepped: a commented-out `# if __name__ == "__main__":` would
+    satisfy a substring search.
+    """
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "weread" / "desktop_app.py")
+    tree = ast.parse(src.read_text(encoding="utf-8", errors="replace"))
+
+    guards = [node for node in tree.body
+              if isinstance(node, ast.If)
+              and isinstance(node.test, ast.Compare)
+              and isinstance(node.test.left, ast.Name)
+              and node.test.left.id == "__name__"]
+    assert guards, (
+        "desktop_app.py has no top-level `if __name__ == \"__main__\":` block, so "
+        "running it -- directly or as the frozen exe -- defines main() and exits "
+        "without ever starting the window")
+
+    # The guard is useless unless it actually reaches main().
+    called_main = any(
+        isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Name)
+        and child.func.id == "main"
+        for guard in guards for child in ast.walk(guard)
+    )
+    assert called_main, (
+        "the __main__ guard exists but never calls main(), so the program still "
+        "does nothing when run")
+
+
 ALL_TESTS = [
+    test_the_program_actually_runs_when_executed_as_a_script,
     test_wechat_rating_scale_formats_as_ten_point_score,
     test_common_errors_are_translated_to_actionable_chinese,
     test_book_details_are_safe_to_display_when_optional_fields_are_missing,
