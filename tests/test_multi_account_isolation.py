@@ -637,14 +637,64 @@ def test_desktop_graphics_key_constant() -> None:
     assert SINGLE_INSTANCE_KEY == "WeReadDownloader-Graphics"
 
 
+def _web_instance_key() -> str:
+    """Pull the web mode's mutex name out of weread_web.py.
+
+    Parsed rather than imported: weread_web.py starts a local HTTP server, and a
+    test that imports it inherits that side effect.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "weread" / "weread_web.py")
+    text = src.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r'is_first_instance\(\s*"([^"]+)"', text)
+    assert match, "no is_first_instance(\"...\") call found in weread_web.py"
+    return match.group(1)
+
+
 def test_web_mode_single_instance_key() -> None:
-    """Verify web mode uses different mutex key."""
-    # weread_web.py line 1246: is_first_instance("WeReadDesktop-Web")
-    # This is a different key from GUI's "WeReadDesktop-Graphics"
-    # So GUI and Web can run simultaneously
-    gui_key = "WeReadDesktop-Graphics"
-    web_key = "WeReadDesktop-Web"
-    assert gui_key != web_key
+    """Web mode must use a different mutex than the GUI, so both can run at once.
+
+    Read out of the source instead of written out here. The old version compared
+    two string literals that were both spelled in the test, so it passed no matter
+    what the program did -- it could not have caught the rename.
+    """
+    from desktop_app import SINGLE_INSTANCE_KEY
+
+    assert SINGLE_INSTANCE_KEY != _web_instance_key(), (
+        "GUI and web share a mutex, so starting one refuses to start the other")
+
+
+def test_installer_closes_the_running_apps() -> None:
+    """AppMutex must name the mutexes the programs actually create.
+
+    CloseApplications=yes works by looking for a running process holding one of
+    these mutexes. When desktop_app.py was renamed to WeReadDownloader-Graphics
+    and this list kept WeReadDesktop-Graphics, the installer stopped recognising
+    a running GUI: it tried to overwrite a locked exe and failed with "access is
+    denied" instead of offering to close it. The names live in three separate
+    files, so nothing keeps them together except this test.
+    """
+    import re
+    from pathlib import Path
+
+    from desktop_app import SINGLE_INSTANCE_KEY
+
+    web_key = _web_instance_key()
+    iss = Path(__file__).resolve().parent.parent / "installer" / "WeReadDesktop.iss"
+    text = iss.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"^AppMutex=(.+)$", text, re.MULTILINE)
+    assert match, "AppMutex is missing from the installer script"
+
+    listed = {name.strip() for name in match.group(1).split(",") if name.strip()}
+    assert SINGLE_INSTANCE_KEY in listed, (
+        "installer AppMutex does not list the GUI mutex %r (it has %s), so "
+        "CloseApplications cannot find a running GUI"
+        % (SINGLE_INSTANCE_KEY, sorted(listed)))
+    assert web_key in listed, (
+        "installer AppMutex does not list the web mutex %r (it has %s)"
+        % (web_key, sorted(listed)))
 
 
 # -----------------------------------------------------------------------------
@@ -790,6 +840,7 @@ TESTS = [
     test_single_instance_brings_window_forward,
     test_desktop_graphics_key_constant,
     test_web_mode_single_instance_key,
+    test_installer_closes_the_running_apps,
     
     # Integration
     test_concurrent_session_writes_with_dpapi,

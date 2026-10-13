@@ -1261,7 +1261,7 @@ def _already_running_notice() -> None:
 def main() -> int:
     if getattr(sys, "frozen", False) and len(sys.argv) > 1:
         raise SystemExit("The web-mode executable does not accept worker commands.")
-    if not is_first_instance("WeReadDesktop-Web"):
+    if not is_first_instance("WeReadDownloader-Web"):
         # A second server would mean another random port, another browser tab
         # and another writer for the same session file. Deliberately does not
         # read the running instance's web-session-*.txt to reuse its token.

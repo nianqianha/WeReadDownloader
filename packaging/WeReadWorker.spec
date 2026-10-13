@@ -19,8 +19,10 @@ if not os.path.isfile(ICON):
     raise SystemExit("icon not found: " + ICON)
 # The Lua plugin lives beside the Kindle project, two levels above the repo
 # root: <Kindle>/05_补丁与其他/桌面端WeRead下载器 -> <Kindle>/03_插件源码与解压文件
+# Both dirnames are needed: ROOT is the repo root itself, so one dirname only
+# reaches <Kindle>/05_补丁与其他 and the build dies with "plugin dir not found".
 PLUGIN_DIR = os.path.join(
-    os.path.dirname(ROOT),
+    os.path.dirname(os.path.dirname(ROOT)),
     "03_插件源码与解压文件",
     "weread.koplugin",
 )
