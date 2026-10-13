@@ -10,6 +10,9 @@ import os
 from PyInstaller.utils.hooks import collect_all
 
 HERE = SPECPATH
+ICON = os.path.join(HERE, "assets", "weread-app.ico")
+if not os.path.isfile(ICON):
+    raise SystemExit("icon not found: " + ICON)
 
 datas = []
 binaries = []
@@ -62,6 +65,11 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
+    # The exe carries its own icon: this is what Explorer shows for the file,
+    # the taskbar button and the title bar. Leaving it unset shipped the
+    # PyInstaller default Python icon, which is why the window never matched
+    # the desktop shortcut.
+    icon=ICON,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

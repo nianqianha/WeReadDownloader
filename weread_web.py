@@ -105,6 +105,10 @@ class WebController:
         self.auth = "尚未检查"
         self.progress = 0.0
         self.jobs = 1
+        # Ideas are off by default: on a heavily annotated book the readreviews
+        # batches are the single slowest part of an export, and most readers only
+        # open them occasionally. Underlines are never affected by this switch.
+        self.want_thoughts = False
         # (seq, text) newest last, so the page can ask for only what it has not
         # seen instead of re-downloading the whole panel on every poll.
         self.log_lines: collections.deque = collections.deque(maxlen=LOG_LIMIT)
@@ -787,8 +791,9 @@ class WebController:
         if self._is_busy():
             self.status = "当前有任务正在运行，等它结束再检查第一章。"
             return
-        self._start_worker(["--probe-book", self.selected["bookId"]], "probe",
-                           "正在检查这本书的第一章、划线和想法…")
+        self._start_worker(["--probe-book", self.selected["bookId"]] + ([] if self.want_thoughts else ["--no-thoughts"]),
+                           "probe",
+                           "正在检查这本书的第一章、划线" + ("和想法…" if self.want_thoughts else "…（已跳过想法）"))
 
     def export(self) -> None:
         if not self.selected["bookId"]:
@@ -798,8 +803,11 @@ class WebController:
             self.status = "当前有任务正在运行，等它结束再开始下载。"
             return
         self.progress = 0.0
-        if not self._start_worker([self.selected["bookId"], "--jobs", str(self.jobs)],
-                                  "export", "正在准备下载并检查本地断点…"):
+        args = [self.selected["bookId"], "--jobs", str(self.jobs)]
+        if not self.want_thoughts:
+            args.append("--no-thoughts")
+        if not self._start_worker(args, "export",
+                                  "正在准备下载并检查本地断点…"):
             self.status = "下载没有启动。请检查程序目录后重试。"
 
     def pause(self) -> None:
@@ -815,6 +823,12 @@ class WebController:
         except (TypeError, ValueError):
             return
         self.jobs = max(1, min(MAX_JOBS, value))
+
+    def set_thoughts(self, enabled) -> None:
+        """Only meaningful while idle: a running worker already carries its flag."""
+        if self._is_busy():
+            return
+        self.want_thoughts = bool(enabled)
 
     def reveal(self, target: str) -> None:
         """Open one of the two directories this program owns.
@@ -859,6 +873,7 @@ class WebController:
                 "detail": dict(self.selected),
                 "progress": self.progress,
                 "jobs": self.jobs,
+                "wantThoughts": self.want_thoughts,
                 "logSeq": self.log_seq,
                 "account": self.account,
                 "hasCredentials": self.has_credentials(),
@@ -1107,6 +1122,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self.controller.pause()
             elif path == "/api/jobs":
                 self.controller.set_jobs(payload.get("jobs", 1))
+            elif path == "/api/thoughts":
+                self.controller.set_thoughts(payload.get("enabled", False))
             elif path == "/api/reveal":
                 self.controller.reveal(payload.get("target", ""))
             elif path == "/api/login/begin":

@@ -10,6 +10,9 @@ import os
 from PyInstaller.utils.hooks import collect_all
 
 HERE = SPECPATH
+ICON = os.path.join(HERE, "assets", "weread-app.ico")
+if not os.path.isfile(ICON):
+    raise SystemExit("icon not found: " + ICON)
 PLUGIN_DIR = os.path.join(
     os.path.dirname(os.path.dirname(HERE)),
     "03_插件源码与解压文件",
@@ -70,6 +73,10 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,
+    # The worker is launched hidden, so nothing ever looks at this icon in
+    # normal use. It is set anyway: an unset icon means the default Python
+    # one, which shows up in Task Manager and in any crash report dialog.
+    icon=ICON,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

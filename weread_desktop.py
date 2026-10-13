@@ -57,6 +57,12 @@ SEARCH_FIELDS = ("bookId", "title", "author", "cover", "newRating", "newRatingCo
 # is the only exact way to tell which underlines were actually placed.
 _UNDERLINE_ID_RE = re.compile(r"\d+-\d+")
 _UNDERLINE_HREF_RE = re.compile(r"wrthought-\d+-\d+-(\d+-\d+)")
+# A checkpoint is written for every chapter of a book and every chapter's row is
+# copied into reviews.jsonl, so audit samples are evidence, not archive: a handful
+# is enough to eyeball a disagreement, and 200 characters is enough text to see
+# where one stops matching the other.
+_AUDIT_SAMPLE_LIMIT = 10
+_AUDIT_TEXT_LIMIT = 200
 
 
 def force_utf8_stdio() -> None:
@@ -144,6 +150,14 @@ _EXPORT = {
   txt_to_xhtml=function(text) return C.txt_to_xhtml(text) end,
   reader_state=function(text) return R.extract(text, function(v) return require("json").decode(v) end) end,
   inject=function(xhtml, ul, reviews, book) return A.process(xhtml, ul, reviews, book) end,
+  -- audit runs the SAME placement pass as inject and keeps only its accounting,
+  -- because Annotations.audit() and Annotations.injectUnderlines() both go
+  -- through injectUnderlinesCore(): the audit's verdict is therefore the
+  -- injection's verdict, not a second opinion that could drift from it.
+  -- Guarded here because only this scope can tell that an installed plugin copy
+  -- predates Annotations.audit; nil is the answer a Lua table lookup would give
+  -- a missing key, and it lets an older plugin keep exporting.
+  audit=function(xhtml, ul, reviews, book) if not A.audit then return nil end return A.audit(xhtml, ul, reviews, book) end,
   urlencode=function(v) return W.urlencode(v) end,
   reader_url=function(b,c) return W.reader_url(b,c) end,
 }
@@ -152,13 +166,45 @@ _EXPORT = {
 
 
 def _set_private_acl(path: Path, directory: bool) -> None:
+    """Restrict a path to the current user; never fail the job over this.
+
+    This is hardening, not a precondition: the directory was just created and is
+    already reachable, and losing an export because a discretionary ACL could
+    not be rewritten would be a far worse outcome than a directory that keeps
+    its inherited permissions.
+
+    MEASURED 2026-10-12: from the frozen worker exe the identical icacls call
+    returns exit status 5 (ERROR_ACCESS_DENIED) on a directory the very same
+    call succeeds on when run from the source interpreter, with asInvoker in
+    both manifests and no shim on PATH. The cause is environmental and was not
+    chased further; what matters here is that it must not abort the download.
+
+    Any failure is reported on stderr with the account that was asked for, so a
+    genuine permissions problem is still visible in the log.
+    """
     if os.name != "nt":
-        os.chmod(path, 0o700 if directory else 0o600)
+        try:
+            os.chmod(path, 0o700 if directory else 0o600)
+        except OSError as exc:
+            print(f"[ACL] chmod failed for {path} ({type(exc).__name__}); "
+                  f"continuing with existing permissions", file=sys.stderr, flush=True)
         return
-    user = subprocess.check_output(["whoami"], text=True).strip()
+    # Use explicit encoding to avoid UnicodeDecodeError on Chinese Windows
+    try:
+        user = subprocess.check_output(["whoami"], encoding="utf-8", errors="replace").strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"[ACL] could not resolve the current account for {path} "
+              f"({type(exc).__name__}); continuing with existing permissions",
+              file=sys.stderr, flush=True)
+        return
     grant = user + (":(OI)(CI)F" if directory else ":F")
-    subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", grant],
-                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", grant],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"[ACL] could not restrict {path} to {user} "
+              f"({type(exc).__name__}); continuing with existing permissions",
+              file=sys.stderr, flush=True)
 
 
 def secure_output_directory(path: Path) -> None:
@@ -223,6 +269,181 @@ def py_value(value: Any) -> Any:
             return [py_value(v) for _, v in sorted(items)]
         return {(k.decode("utf-8") if isinstance(k, bytes) else k): py_value(v) for k, v in items}
     return value.decode("utf-8") if isinstance(value, bytes) else value
+
+
+def strip_thought_bodies(reviews: list[Any]) -> list[Any]:
+    """Reduce review rows to the placement data, dropping note text and padding.
+
+    Two things are removed, and the split matters:
+
+      * review.content -- the note body. Free to drop: annotations.lua reads it
+        only to fill the tap popup.
+
+      * everything the placement pass never reads. Each pageReview carries a full
+        author profile, a book record, topics, follow flags and timing; on the
+        measured corpus that padding is ~95% of the JSON, so dropping content
+        alone saved only 4.3% and was not worth a switch. What is kept is
+        review.range, review.abstract, review.contextAbstract, review.markText,
+        review.author.nick and review.likesCount -- the fields quoteCandidate,
+        buildThoughtPopupItems and the [n] badge actually touch.
+
+    abstract is NOT decoration and is never dropped: it is the only selected-text
+    quote WeRead serves, so it is what underline placement and
+    annotation_source.calibrate() both depend on. A mode that removed it would
+    place no highlights at all, which is why --no-thoughts still fetches
+    readreviews in full and prunes only afterwards.
+
+    Rows of an unexpected shape are returned untouched, so an API change costs
+    verbosity, never a silently emptied export.
+    """
+    if not isinstance(reviews, list):
+        return reviews
+    stripped: list[Any] = []
+    for row in reviews:
+        if not isinstance(row, dict):
+            stripped.append(row)
+            continue
+        pages = row.get("pageReviews")
+        if not isinstance(pages, list):
+            stripped.append(row)
+            continue
+        new_pages: list[Any] = []
+        for page in pages:
+            if not isinstance(page, dict):
+                new_pages.append(page)
+                continue
+            inner = page.get("review")
+            if not isinstance(inner, dict):
+                new_pages.append(page)
+                continue
+            author = inner.get("author")
+            nick = None
+            if isinstance(author, dict):
+                nick = author.get("nick") or author.get("name")
+            trimmed = {}
+            # Only copy what the API actually returned: writing None into a key
+            # that was absent fabricates a field, and quoteCandidate treats a
+            # present-but-empty abstract as a real (failing) candidate rather
+            # than as no candidate at all.
+            for key in ("range", "abstract", "contextAbstract", "markText"):
+                if key in inner:
+                    trimmed[key] = inner[key]
+            if "likesCount" in inner or "likesCount" in page:
+                trimmed["likesCount"] = inner.get("likesCount", page.get("likesCount", 0))
+            trimmed["author"] = {"nick": nick or "匿名"}
+            new_pages.append({"reviewId": page.get("reviewId"), "review": trimmed})
+        stripped.append({
+            "range": row.get("range"),
+            "totalCount": row.get("totalCount"),
+            "pageReviews": new_pages,
+        })
+    return stripped
+
+
+def summarize_underline_audit(lua: LuaRuntime, xhtml: str, underlines: dict[str, Any],
+                              reviews: list[dict[str, Any]], book_id: str,
+                              chapter_uid: Any) -> dict[str, Any]:
+    """Ask the plugin where each underline landed, and grade the landing by TEXT.
+
+    The identity measurement can only prove that an underline's authoritative id
+    reached the page. It is blind to the defect this exists for: a highlight
+    painted a stable few characters off still carries its own id, so it counted
+    as fully placed. 94 highlights in one real book were off by exactly 4
+    characters and nothing above could see them.
+
+    Returns the five audit-derived checkpoint keys. Each is null when the audit
+    did not run, because "not measured" and "measured, nothing wrong" are
+    different facts and only the second one may ever read as a zero.
+
+    Nothing in here may raise. A plugin copy without Annotations.audit, a Lua
+    error inside it, or a table that does not decode into records must cost the
+    measurement, never the chapter and never the export.
+    """
+    unmeasured: dict[str, Any] = {
+        "verified_underlines": None, "unverified_underlines": None,
+        "refused_underlines": None, "refused_underline_reasons": None,
+        "quote_mismatch_samples": None,
+    }
+    audit = lua.globals()[b"_EXPORT"][b"audit"]
+    if audit is None:
+        return unmeasured
+    rows = underlines.get("underlines")
+    rows = rows if isinstance(rows, list) else []
+    # The rows identity already accepted as ranged. Reused as the contract check
+    # on the answer below rather than recomputed differently.
+    expected = len({str(row.get("range")).strip() for row in rows
+                    if row.get("range") and _UNDERLINE_ID_RE.fullmatch(
+                        str(row.get("range")).strip())})
+    # Annotations.audit() takes the underline LIST plus a reviews MAP keyed by
+    # range; Annotations.process() -- the inject entry above -- takes the wrapper
+    # object plus the reviews LIST and builds that map itself. Handing audit
+    # inject's arguments does not fail: the shared core iterates the argument as a
+    # list, finds it empty, and returns an empty record list, which would then be
+    # filed as a chapter measured clean. So both shapes are built here, on
+    # purpose, and the answer is checked against `expected` before it is believed.
+    thought_map = {str(review.get("range")): review for review in reviews
+                   if isinstance(review, dict) and review.get("range")}
+    try:
+        records = py_value(audit(xhtml.encode("utf-8"), lua_table(lua, rows),
+                                 lua_table(lua, thought_map), book_id.encode("utf-8")))
+    except Exception as exc:
+        print(f"[ANNOTATION] chapter UID {chapter_uid}: text audit failed "
+              f"({type(exc).__name__}); highlight placement left unverified",
+              file=sys.stderr, flush=True)
+        return unmeasured
+    if not isinstance(records, list):
+        print(f"[ANNOTATION] chapter UID {chapter_uid}: text audit returned "
+              f"{type(records).__name__}, not a record list; highlight placement "
+              f"left unverified", file=sys.stderr, flush=True)
+        return unmeasured
+    if len(records) < expected:
+        # The audit owes an answer for every ranged row, refusals included, so a
+        # shorter answer means it was handed something it did not recognise and
+        # measured nothing. That is the one failure that would otherwise be
+        # indistinguishable from a chapter that had nothing wrong in it.
+        print(f"[ANNOTATION] chapter UID {chapter_uid}: text audit answered "
+              f"{len(records)} record(s) for {expected} ranged underline(s); "
+              f"highlight placement left unmeasured", file=sys.stderr, flush=True)
+        return unmeasured
+    verified = unverified = refused = 0
+    refused_reasons: dict[str, int] = {}
+    mismatch_samples: list[dict[str, str]] = []
+    for item in records:
+        # A row that is not a record is dropped rather than guessed at: reading a
+        # broken row as placed would manufacture a "verified" count, which is
+        # the same class of lie this audit exists to remove.
+        if not isinstance(item, dict):
+            continue
+        placed = item.get("placed")
+        # Lua answers with a real boolean. Accept a numeric 1 as well, because
+        # the costly misreading is a placement counted as a refusal.
+        placed = placed is True or placed == 1
+        reason = str(item.get("reason") or "")
+        if placed:
+            if reason == "ok":
+                verified += 1
+            else:
+                # Landed, but the text it landed on is not proven to be the
+                # quote. Counted on its own, never folded into `verified`: this
+                # is precisely the case the identity measurement cannot see.
+                unverified += 1
+                # Only a highlight that BOTH landed and disagrees can be
+                # eyeballed against its quote. Once the plugin refuses a
+                # mismatched underline instead of placing it, the same mismatch
+                # is a refusal and shows up as refused_underline_reasons
+                # ["text_mismatch"], so widening this to refusals would
+                # double-count one defect under two keys.
+                if reason == "text_mismatch" and len(mismatch_samples) < _AUDIT_SAMPLE_LIMIT:
+                    mismatch_samples.append(
+                        {"range": str(item.get("range") or ""),
+                         "quote": str(item.get("quote") or "")[:_AUDIT_TEXT_LIMIT],
+                         "marked": str(item.get("marked") or "")[:_AUDIT_TEXT_LIMIT]})
+        else:
+            refused += 1
+            refused_reasons[reason] = refused_reasons.get(reason, 0) + 1
+    return {"verified_underlines": verified, "unverified_underlines": unverified,
+            "refused_underlines": refused, "refused_underline_reasons": refused_reasons,
+            "quote_mismatch_samples": mismatch_samples}
 
 
 def normalize_chapter_xhtml(xhtml: str, lua: LuaRuntime) -> str:
@@ -495,13 +716,31 @@ class WeRead:
                 css = ""
         return xhtml, css
 
-    def annotations(self, book_id: str, chapter_uid: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    def annotations(self, book_id: str, chapter_uid: Any,
+                    want_thoughts: bool = True) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Fetch underlines and reviews. Neither is required for the chapter.
 
         Underlines and reviews are annotations layered on top of the text, so a
         failure here must cost the annotation, not the prose. Previously one bad
         batch of readreviews raised and discarded the chapter along with the
         batches that had already succeeded.
+
+        want_thoughts=False drops the NOTE TEXT but keeps the readreviews call.
+        That call cannot be skipped, and this is the reason:
+
+        /book/underlines returns only range, count, score and type -- no selected
+        text of any kind. The plugin places a highlight by requiring a candidate
+        quote to equal the landing text character for character, and the only
+        quote it can get is the review's abstract. annotation_source.calibrate()
+        likewise learns the chapter's API-to-XHTML offset from those abstracts,
+        and with no sample it refuses the whole chapter outright.
+
+        So the reviews round trip is load-bearing for UNDERLINES. Skipping it does
+        not merely drop ideas; on a mid-chapter book it silently drops every
+        highlight as well. What actually gets saved here is the write of the note
+        bodies into reviews.jsonl and the inline [n] thought badges -- worth
+        having on a 1,483-chapter book where thoughts run into the hundreds of
+        megabytes of JSON, and the reason reviews are still fetched in batches.
         """
         try:
             underlines = self.gateway("/book/underlines", {"bookId": book_id,
@@ -518,6 +757,7 @@ class WeRead:
                   file=sys.stderr, flush=True)
             rows = []
             underlines["underlines"] = rows
+        underlines["chapterUid"] = chapter_uid
         ranges = list(dict.fromkeys(str(row["range"]) for row in rows if row.get("range")))
         reviews: list[dict[str, Any]] = []
         for start in range(0, len(ranges), 30):
@@ -539,7 +779,8 @@ class WeRead:
                       file=sys.stderr, flush=True)
                 continue
             reviews.extend(batch_reviews)
-        underlines["chapterUid"] = chapter_uid
+        if not want_thoughts:
+            reviews = strip_thought_bodies(reviews)
         return underlines, reviews
 
     def fetch_book(self, book_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -956,6 +1197,92 @@ def discover_checkpoint_files(workspace: Path, chapters: list[dict[str, Any]]) -
     return found
 
 
+#: Messages that mean "this chapter's payload came back empty or unusable this
+#: time". WeRead sometimes answers a valid request with a shard set that decodes
+#: to nothing (observed on UID 1194), and a fresh fetch usually succeeds, so these
+#: get a bounded retry instead of ending the chapter on the first try.
+TRANSIENT_CHAPTER_MARKERS = (
+    "decoded without an XHTML body",
+    "empty body despite catalog wordCount=",
+    "SSLError", "EOF occurred", "timed out", "Timeout", "Connection aborted",
+)
+#: Attempts for a transient content/transport fault, including the first try.
+CHAPTER_TRANSIENT_ATTEMPTS = 3
+#: Backoff in seconds before retry 1, 2, ... (doubles each time).
+CHAPTER_RETRY_BASE_DELAY = 2.0
+
+
+def is_transient_chapter_fault(exc: BaseException) -> bool:
+    """Is this chapter failure worth a bounded retry?
+
+    Covers empty/no-body decodes and TLS/EOF/timeout transport errors. Paid
+    placeholders are deliberately excluded: retrying cannot make a paid chapter
+    readable, so that one stays a permanent, visible failure.
+    """
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    text = f"{type(exc).__name__}: {exc}"
+    return any(marker in text for marker in TRANSIENT_CHAPTER_MARKERS)
+
+
+def run_chapter_with_retries(uid: str, attempt_once, throttle: "Throttle",
+                             unresolved: dict[str, str],
+                             sleep=None,
+                             transient_attempts: int = CHAPTER_TRANSIENT_ATTEMPTS,
+                             base_delay: float = CHAPTER_RETRY_BASE_DELAY) -> bool:
+    """Run one chapter until it succeeds, is rate-limited out, or exhausts retries.
+
+    Rate limits keep their own budget (Throttle.max_attempts). A transient
+    content/transport fault gets at most `transient_attempts` tries in total,
+    with exponential backoff between them. Anything else is permanent. Whatever
+    is left over is recorded in `unresolved` so the caller refuses to publish an
+    incomplete EPUB; nothing here drops a chapter silently.
+
+    Returns True when the chapter completed.
+    """
+    attempt = 0
+    transient = 0
+    while attempt < throttle.max_attempts:
+        throttle.wait_turn()
+        try:
+            attempt_once()
+            throttle.note_success()
+            return True
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {str(exc)[:240]}"
+            # Keep the stack. The reason string alone says nothing about which
+            # shard call failed, and an intermittent failure is otherwise
+            # impossible to diagnose from the log.
+            detail = traceback.format_exc()
+            attempt += 1
+            if is_rate_limited(exc):
+                throttle.note_throttled()
+                print(f"[THROTTLED] chapter UID {uid} hit a WeRead rate limit "
+                      f"(attempt {attempt}/{throttle.max_attempts}); "
+                      f"concurrency now {throttle.jobs}, backing off: {reason}",
+                      flush=True)
+                throttle.backoff()
+                continue
+            if is_transient_chapter_fault(exc):
+                transient += 1
+                if transient < transient_attempts:
+                    delay = base_delay * (2 ** (transient - 1))
+                    print(f"[RETRY] chapter UID {uid} transient attempt "
+                          f"{transient}/{transient_attempts} failed; retrying in "
+                          f"{delay:.0f}s: {reason}", flush=True)
+                    (sleep or time.sleep)(delay)
+                    continue
+                reason = f"{reason} (gave up after {transient_attempts} attempts)"
+            unresolved[uid] = reason
+            kind = "THROTTLED" if throttle.throttled else "UNRESOLVED"
+            print(f"[{kind}] chapter UID {uid} marked INCOMPLETE: {reason}; "
+                  f"will continue with other UIDs", flush=True)
+            print(detail, file=sys.stderr, flush=True)
+            return False
+    unresolved.setdefault(uid, "rate limit did not clear")
+    return False
+
+
 def acquire_export_lock(workspace: Path, book_id: str) -> Path:
     lock = workspace / "export.lock"
     for _attempt in range(2):
@@ -980,14 +1307,15 @@ def acquire_export_lock(workspace: Path, book_id: str) -> Path:
     raise RuntimeError("Cannot acquire desktop export lock")
 
 
-def probe_book(book_id: str, chapter_uid: str | None, settings: dict[str, Any]) -> None:
+def probe_book(book_id: str, chapter_uid: str | None, settings: dict[str, Any],
+               want_thoughts: bool = True) -> None:
     lua = lua_runtime()
     api = WeRead(settings, lua)
     book, chapters = api.fetch_book(book_id)
     chapter = next((row for row in chapters if str(row["chapterUid"]) == str(chapter_uid)), None) if chapter_uid else chapters[0]
     if chapter is None: raise RuntimeError("chapter UID is not present in the book catalog")
     raw_xhtml, _css = api.chapter_html(book, chapter)
-    underlines, reviews = api.annotations(book_id, chapter["chapterUid"])
+    underlines, reviews = api.annotations(book_id, chapter["chapterUid"], want_thoughts)
     injected, _annotation_css = lua.globals()[b"_EXPORT"][b"inject"](
         raw_xhtml.encode("utf-8"), lua_table(lua, underlines),
         lua_table(lua, reviews), str(book_id).encode("utf-8"))
@@ -999,6 +1327,7 @@ def probe_book(book_id: str, chapter_uid: str | None, settings: dict[str, Any]) 
           "price:", chapter.get("price", 0), "paid_flag:", chapter.get("paid", "unknown"),
           "underlines:", len(underlines.get("underlines", [])),
           "review_ranges:", len(reviews), "thought_pages:", len(pages),
+          "want_thoughts:", "1" if want_thoughts else "0",
           "embedded_markers:", embedded.count("wr-underline"))
 
 
@@ -1012,6 +1341,40 @@ def book_info(book_id: str, settings: dict[str, Any]) -> None:
     data = {key: source.get(key, "") for key in allowed}
     data["bookId"] = str(data.get("bookId") or book_id)
     print("BOOK_INFO\t" + json.dumps(data, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+
+def shelf_books(settings: dict[str, Any]) -> None:
+    """Print the signed-in account's shelf as one JSON line.
+
+    The shelf is the account's own library, so it is the honest content for a
+    "我的书架" page: unlike the local export scan, these are books the user
+    actually owns and can download, each with cover, author and category
+    already resolved by the server (the search path has to fetch categories
+    separately; the shelf does not).
+
+    Output shape mirrors BOOK_INFO so the front end can reuse its parser:
+        SHELF\t{json list of book dicts}
+    """
+    lua = lua_runtime()
+    api = WeRead(settings, lua)
+    response = api.gateway("/shelf/sync", {})
+    books = response.get("books")
+    if not isinstance(books, list):
+        print("SHELF\t[]", flush=True)
+        return
+    allowed = ("bookId", "title", "author", "cover", "category", "intro",
+               "newRating", "newRatingCount", "finishReading", "secret")
+    rows = []
+    for book in books:
+        if not isinstance(book, dict):
+            continue
+        row = {key: book.get(key, "") for key in allowed}
+        row["bookId"] = str(row.get("bookId") or "")
+        if not row["bookId"]:
+            continue
+        rows.append(row)
+    print("SHELF\t" + json.dumps(rows, ensure_ascii=False, separators=(",", ":")),
+          flush=True)
 
 
 RATE_LIMIT_STATUS = (426, 429, 403)
@@ -1098,15 +1461,64 @@ class Throttle:
             time.sleep(remaining)
 
 
-def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int = 1) -> Path:
+def find_book_workspaces(output: Path, book_id: str, max_depth: int = 2) -> list[Path]:
+    """Every existing `<anything>-<book_id>.work` directory under `output`.
+
+    Searched up to `max_depth` levels down, so a run started with --output set to
+    a parent folder is still found. Only directory names are matched here.
+    """
+    suffix = f"-{book_id}.work"
+    found: list[Path] = []
+    pending: list[tuple[Path, int]] = [(output, 0)]
+    while pending:
+        folder, depth = pending.pop()
+        try:
+            children = [child for child in folder.iterdir() if child.is_dir()]
+        except OSError:
+            continue
+        for child in children:
+            if child.name.endswith(suffix) and len(child.name) > len(suffix):
+                found.append(child)
+            elif depth + 1 < max_depth:
+                pending.append((child, depth + 1))
+    return sorted(found)
+
+
+def resolve_export_workspace(output: Path, book_id: str, package_name: str) -> Path:
+    """Pick the `.work` directory a run should resume, or the one to create.
+
+    An exact `<package_name>.work` under `output` wins, which is the original
+    behaviour. Otherwise a single `*-<book_id>.work` beneath `output` is reused,
+    so completed chapters are not fetched again. More than one candidate is an
+    error: guessing could pick the wrong checkpoint or split one book in two.
+    """
+    exact = output / (package_name + ".work")
+    if exact.is_dir():
+        return exact
+    candidates = find_book_workspaces(output, book_id)
+    if len(candidates) == 1:
+        print(f"[RESUME] Found existing workspace for book {book_id}: {candidates[0]}", flush=True)
+        return candidates[0]
+    if len(candidates) > 1:
+        listing = "; ".join(str(path) for path in candidates)
+        raise RuntimeError(
+            f"{len(candidates)} workspaces match book {book_id} under {output}: {listing}. "
+            "Keep one and move or delete the others, then run again."
+        )
+    return exact
+
+
+def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int = 1,
+                want_thoughts: bool = True) -> Path:
     secure_output_directory(output)
     lua = lua_runtime()
     api = WeRead(settings, lua)
     book, chapters = api.fetch_book(book_id)
     stem = safe_name(f"{book.get('title', book_id)} - full")
-    package_dir = output / safe_name(f"{book.get('title', book_id)}-{book_id}")
+    package_name = safe_name(f"{book.get('title', book_id)}-{book_id}")
+    workspace = resolve_export_workspace(output, book_id, package_name)
+    package_dir = workspace.with_name(workspace.name[:-len(".work")])
     secure_output_directory(package_dir)
-    workspace = package_dir.with_name(package_dir.name + ".work")
     secure_output_directory(workspace)
     workspace_images = workspace / "images"
     workspace_images.mkdir(parents=True, exist_ok=True)
@@ -1115,7 +1527,8 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     state_path = workspace / "state.json"
     chapter_uids = [str(chapter["chapterUid"]) for chapter in chapters]
     state = {"version": 1, "book_id": book_id, "title": book.get("title"),
-             "total": len(chapters), "chapter_uids": chapter_uids, "completed": 0}
+             "total": len(chapters), "chapter_uids": chapter_uids, "completed": 0,
+             "want_thoughts": bool(want_thoughts)}
     if state_path.exists():
         try:
             old = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1123,6 +1536,20 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
                 state.update(old)
                 state["total"] = len(chapters)
                 state["chapter_uids"] = chapter_uids
+                # A checkpoint written by the other mode cannot be resumed into this
+                # one: its chapters already carry (or lack) the thought markers that
+                # this run would add or skip, so merging them yields a book whose
+                # notes depend on download order. Refuse the mix and start clean.
+                if bool(old.get("want_thoughts", True)) != bool(want_thoughts):
+                    print(f"[THOUGHTS] checkpoint was written with "
+                          f"want_thoughts={bool(old.get('want_thoughts', True))}, "
+                          f"this run asks for {bool(want_thoughts)}; re-exporting "
+                          f"from scratch rather than mixing two modes", flush=True)
+                    for stale in list(workspace.glob("chapter-uid-*")):
+                        stale.unlink(missing_ok=True)
+                    state["completed"] = 0
+                    state["want_thoughts"] = bool(want_thoughts)
+                state["want_thoughts"] = bool(want_thoughts)
         except (OSError, ValueError):
             pass
     cached_by_uid = discover_checkpoint_files(workspace, chapters)
@@ -1168,13 +1595,20 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             raise RuntimeError(
                 f"Chapter {chapter['chapterUid']} is marked paid ({chapter.get('price')}) but returned only a placeholder body; credentials/access did not provide the paid text"
             )
-        underlines, reviews = worker_api.annotations(book_id, chapter["chapterUid"])
+        underlines, reviews = worker_api.annotations(book_id, chapter["chapterUid"], want_thoughts)
         injected_xhtml, annotation_css = worker_lua.globals()[b"_EXPORT"][b"inject"](
             raw_xhtml.encode("utf-8"), lua_table(worker_lua, underlines),
             lua_table(worker_lua, reviews), book_id.encode("utf-8"))
         processed = py_value(injected_xhtml)
         if not re.search(r"<body\b", processed, re.I):
             raise RuntimeError(f"Chapter {chapter['chapterUid']} decoded without an XHTML body; refusing to export malformed content")
+        # Audit the same raw XHTML inject() consumed, never `processed`: the
+        # plugin treats already-injected HTML as a no-op, so auditing the output
+        # would return an empty record list and read as a clean chapter with no
+        # underlines at all. Costs a second placement pass per chapter, on the
+        # same HTML, with no second network call.
+        underline_audit = summarize_underline_audit(worker_lua, raw_xhtml, underlines,
+                                                    reviews, book_id, chapter["chapterUid"])
         chapter_css = py_value(annotation_css) or chapter_css or ""
         underline_rows = underlines.get("underlines", [])
         expected_ranges = len({str(row.get("range")) for row in underline_rows if row.get("range")})
@@ -1233,6 +1667,11 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             # rather than taken on the count's word.
             "missing_underline_ids": missing_ids[:20],
             "dropped_underline_ranges": dropped_ranges,
+            # Placement graded by text, from the plugin's own audit pass. Null
+            # means the audit did not run, which is NOT the claim that nothing
+            # was wrong: an id that reached the page still does not prove the
+            # highlight sits on the words WeRead meant.
+            **underline_audit,
             # Counted here so the manifest can state exactly what the book is
             # missing, instead of the loss being invisible to the reader.
             "dropped_images": dropped_image_count,
@@ -1278,47 +1717,8 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
 
     def fetch_with_retries(index: int, chapter: dict[str, Any]) -> None:
         uid = str(chapter["chapterUid"])
-        attempt = 0
-        # A throttled run gets more attempts than an unthrottled one: the
-        # chapter was never bad, so giving up early just loses content.
-        while attempt < throttle.max_attempts:
-            throttle.wait_turn()
-            try:
-                download_one(index, chapter)
-                throttle.note_success()
-                return
-            except Exception as exc:
-                reason = f"{type(exc).__name__}: {str(exc)[:240]}"
-                # Keep the stack. The reason string alone ("data must be str, not
-                # tuple") says nothing about which of the several shard calls
-                # produced it, and an intermittent chapter failure is otherwise
-                # impossible to diagnose from the log.
-                detail = traceback.format_exc()
-                if is_rate_limited(exc):
-                    attempt += 1
-                    throttle.note_throttled()
-                    print(f"[THROTTLED] chapter UID {uid} hit a WeRead rate limit "
-                          f"(attempt {attempt}/{throttle.max_attempts}); "
-                          f"concurrency now {throttle.jobs}, backing off: {reason}",
-                          flush=True)
-                    throttle.backoff()
-                    continue
-                permanent = any(token in str(exc) for token in (
-                    "decoded without an XHTML body",
-                    "empty body despite catalog wordCount=", "marked paid",
-                ))
-                attempt += 1
-                if permanent or attempt >= throttle.max_attempts:
-                    unresolved[uid] = reason
-                    kind = "THROTTLED" if throttle.throttled else "UNRESOLVED"
-                    print(f"[{kind}] chapter UID {uid}: {reason}; "
-                          f"will continue with other UIDs", flush=True)
-                    print(detail, file=sys.stderr, flush=True)
-                    return
-                delay = float(attempt * 2)
-                print(f"[RETRY] chapter UID {uid} attempt {attempt}/3 failed; "
-                      f"retrying in {delay:.0f}s: {reason}", flush=True)
-                time.sleep(delay)
+        run_chapter_with_retries(uid, lambda: download_one(index, chapter),
+                                 throttle, unresolved)
 
     if jobs == 1:
         for index, chapter in pending:
@@ -1354,6 +1754,16 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     chapters_with_dropped_images = 0
     dropped_image_samples: list[str] = []
     missing_underline_samples: list[str] = []
+    # Identity and text answer two different questions. Identity asks whether the
+    # underline's id reached the page; text asks whether the words it landed on
+    # are the words WeRead meant, which is the only version of the question that
+    # can see a highlight painted a few characters off. Kept in its own counters
+    # because a null in one must not be summed as a zero in the other.
+    audit = {"measured_chapters": 0, "unmeasured_chapters": 0,
+             "verified_underlines": 0, "unverified_underlines": 0,
+             "refused_underlines": 0, "chapters_with_unverified_underlines": 0,
+             "chapters_with_refused_underlines": 0, "refused_underline_reasons": {}}
+    quote_mismatch_samples: list[dict[str, str]] = []
     for index in range(1, len(chapters) + 1):
         chapter_css = css_paths[index - 1].read_text(encoding="utf-8")
         if chapter_css and chapter_css not in style_set:
@@ -1375,6 +1785,27 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
                 if name not in dropped_image_samples:
                     dropped_image_samples.append(name)
         if int(row.get("underline_ranges", 0)) > 0: annotation_coverage["chapters_with_underlines"] += 1
+        # A chapter that was never audited contributes nothing and is counted as
+        # unmeasured. Reading its nulls as zeros would let a book nobody checked
+        # report itself as verified.
+        verified = row.get("verified_underlines")
+        if not isinstance(verified, int):
+            audit["unmeasured_chapters"] += 1
+        else:
+            audit["measured_chapters"] += 1
+            unverified = int(row.get("unverified_underlines") or 0)
+            refused = int(row.get("refused_underlines") or 0)
+            audit["verified_underlines"] += verified
+            audit["unverified_underlines"] += unverified
+            audit["refused_underlines"] += refused
+            if unverified: audit["chapters_with_unverified_underlines"] += 1
+            if refused: audit["chapters_with_refused_underlines"] += 1
+            for reason, count in (row.get("refused_underline_reasons") or {}).items():
+                audit["refused_underline_reasons"][reason] = (
+                    audit["refused_underline_reasons"].get(reason, 0) + int(count or 0))
+            for sample in (row.get("quote_mismatch_samples") or []):
+                if len(quote_mismatch_samples) < _AUDIT_SAMPLE_LIMIT:
+                    quote_mismatch_samples.append(sample)
     if annotation_coverage["dropped_underline_ranges"]:
         # Say it plainly rather than letting the user find out later: the text
         # is complete, but these specific highlights are not carried over.
@@ -1388,6 +1819,26 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         print(f"[ANNOTATION] {dropped_images} image(s) across "
               f"{chapters_with_dropped_images} chapter(s) are no longer served by "
               f"WeRead and were left out. Every chapter's text is complete.", flush=True)
+    # The split the identity measurement cannot produce, on one line, because a
+    # human running the app should not have to open a JSON file to learn whether
+    # any highlight is sitting on the wrong words.
+    if audit["measured_chapters"]:
+        scope = f"{audit['measured_chapters']} chapter(s)"
+        if audit["unmeasured_chapters"]:
+            scope += f", {audit['unmeasured_chapters']} not measured"
+        reasons = ", ".join(f"{reason}={count}" for reason, count
+                            in sorted(audit["refused_underline_reasons"].items()))
+        print(f"[ANNOTATION] Underline placement checked against the quoted text: "
+              f"{audit['verified_underlines']} verified, "
+              f"{audit['unverified_underlines']} placed but unproven, "
+              f"{audit['refused_underlines']} refused, over {scope}"
+              f"{'; refused by reason: ' + reasons if reasons else ''}.", flush=True)
+    else:
+        print(f"[ANNOTATION] Underline placement was NOT checked against the "
+              f"quoted text on any of the {len(chapters)} chapter(s): every "
+              f"highlight in this book is unverified, and one sitting a few "
+              f"characters off the intended words would look identical to a "
+              f"correct one here.", flush=True)
     # One honest, machine-readable statement of what this book is missing. A
     # reader who is not told that images or highlights went missing will assume
     # the book is whole, and degraded output is only better than failed output
@@ -1406,6 +1857,23 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         "underline_ranges_dropped": annotation_coverage["dropped_underline_ranges"],
         "chapters_with_dropped_underlines": annotation_coverage["chapters_with_dropped_underlines"],
         "missing_underline_examples": missing_underline_samples,
+        # Placement graded by text. Every figure below is null when no chapter
+        # was audited at all, because "nobody checked" and "everything matched"
+        # are different facts and only the second may read as a clean book.
+        # underlines_not_placed above is the identity view: it can be larger or
+        # smaller than underlines_refused_by_audit, because a row whose range
+        # does not parse is a refusal (bad_range) that identity cannot see -- it
+        # has no id to look for -- while a placed-and-mismatched one would appear
+        # under underlines_unverified_by_text instead.
+        "underline_text_audit_measured": bool(audit["measured_chapters"]
+                                              and not audit["unmeasured_chapters"]),
+        "underlines_verified_by_text": audit["verified_underlines"] if audit["measured_chapters"] else None,
+        "underlines_unverified_by_text": audit["unverified_underlines"] if audit["measured_chapters"] else None,
+        "underlines_refused_by_audit": audit["refused_underlines"] if audit["measured_chapters"] else None,
+        "chapters_with_unverified_underlines": audit["chapters_with_unverified_underlines"] if audit["measured_chapters"] else None,
+        "chapters_with_refused_underlines": audit["chapters_with_refused_underlines"] if audit["measured_chapters"] else None,
+        "underlines_refused_by_reason": audit["refused_underline_reasons"] if audit["measured_chapters"] else None,
+        "underline_mismatch_examples": quote_mismatch_samples if audit["measured_chapters"] else None,
         "images_dropped": dropped_images,
         "chapters_with_dropped_images": chapters_with_dropped_images,
         "dropped_image_examples": dropped_image_samples,
@@ -1414,6 +1882,16 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
                             "placed. An unverified anchor would highlight the wrong words. "
                             "This is deliberate, not a download failure.",
         "reason_images": "WeRead no longer serves these images (HTTP 403/404/410).",
+        "reason_placement_audit": "underlines_verified_by_text counts highlights "
+                                  "whose marked text equals the quote WeRead holds, "
+                                  "proved by the plugin's own placement pass; "
+                                  "underlines_unverified_by_text counts highlights "
+                                  "that landed but could not be proved to sit on "
+                                  "those words; underlines_refused_by_audit counts "
+                                  "highlights WeRead reported that were deliberately "
+                                  "not painted, broken down in "
+                                  "underlines_refused_by_reason. All are null when "
+                                  "the audit did not run.",
     }
     css = "\n".join(styles) + "\nbody{line-height:1.7;margin:5%}img{max-width:100%}.wr-underline{border-bottom:2px dashed #666;padding-bottom:2px}.wr-thought-count{font-size:.8em;color:#000;border:1px solid #777;padding:0 2px;margin-left:3px;vertical-align:super;font-weight:bold}.wr-thought-link{text-decoration:none;color:inherit}"
     cover_path = None
@@ -1486,10 +1964,17 @@ def main() -> int:
     parser.add_argument("--book-info", help="Fetch safe public metadata for one book without downloading")
     parser.add_argument("--probe-book", help="Fetch one chapter and validate the live protocol/annotation path without creating an export")
     parser.add_argument("--probe-chapter", help="Chapter UID for --probe-book (default: first readable chapter)")
+    parser.add_argument("--shelf", action="store_true",
+                        help="List the signed-in account's shelf as JSON (for 我的书架)")
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--jobs", type=int, default=1, help="Concurrent chapter workers (1-4; default 1 for LuaJIT stability)")
+    parser.add_argument("--no-thoughts", action="store_true",
+                        help="Skip idea/review fetching. Underlines are still placed; "
+                             "only the idea text and [n] badges are omitted. Much "
+                             "faster on heavily annotated books.")
     args = parser.parse_args()
-    if not args.check_auth and not args.search and not args.book_info and not args.probe_book and not args.book_id:
+    want_thoughts = not args.no_thoughts
+    if not args.check_auth and not args.search and not args.book_info and not args.probe_book and not args.shelf and not args.book_id:
         parser.error("book_id is required unless --check-auth, --search, or --probe-book is used")
     if args.jobs < 1 or args.jobs > 4:
         parser.error("--jobs must be between 1 and 4")
@@ -1531,9 +2016,12 @@ def main() -> int:
             book_info(args.book_info, settings)
             return 0
         if args.probe_book:
-            probe_book(args.probe_book, args.probe_chapter, settings)
+            probe_book(args.probe_book, args.probe_chapter, settings, want_thoughts)
             return 0
-        result = export_book(args.book_id, args.output, settings, args.jobs)
+        if args.shelf:
+            shelf_books(settings)
+            return 0
+        result = export_book(args.book_id, args.output, settings, args.jobs, want_thoughts)
         print("DONE", result, flush=True)
         return 0
     except Exception as exc:

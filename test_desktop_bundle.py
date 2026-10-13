@@ -65,7 +65,7 @@ def test_desktop_exporter_offline_end_to_end():
         finally:
             with concurrency_lock: in_flight["current"] -= 1
 
-    def fake_annotations(self, book_id, chapter_uid):
+    def fake_annotations(self, book_id, chapter_uid, want_thoughts=True):
         return ({"chapterUid": chapter_uid, "underlines": []}, [])
 
     exporter.WeRead.fetch_book = fake_fetch_book

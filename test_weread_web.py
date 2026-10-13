@@ -230,11 +230,14 @@ def test_state_endpoint_exposes_the_documented_shape():
     assert status == 200, status
     state = json.loads(body)["state"]
     assert set(state) == {"busy", "action", "status", "auth", "resultCount",
-                          "results", "detail", "progress", "jobs", "logSeq",
-                          "account", "hasCredentials", "login"}, sorted(state)
+                          "results", "detail", "progress", "jobs", "wantThoughts",
+                          "logSeq", "account", "hasCredentials", "login"}, sorted(state)
     assert isinstance(state["results"], list)
     assert isinstance(state["progress"], float)
     assert state["jobs"] == 1, state["jobs"]
+    # Off by default: thoughts are the slow part of an export and most readers
+    # never open them, while underlines are unaffected either way.
+    assert state["wantThoughts"] is False, state["wantThoughts"]
     assert set(state["login"]) == {"state", "message", "otpNeeded", "qrSeq"}, sorted(state["login"])
     assert state["login"]["state"] == "idle"
     assert set(state["detail"]) == {"bookId", "title", "author", "cover",
@@ -612,7 +615,7 @@ def test_probe_and_export_reach_the_worker_with_the_gui_arguments():
     calls.clear()
 
     controller.probe()
-    assert (["--probe-book", "19480992"], "probe") in calls, calls
+    assert (["--probe-book", "19480992", "--no-thoughts"], "probe") in calls, calls
     assert "第一章" in controller.status
 
     controller.process = _BusyProcess()
@@ -624,8 +627,23 @@ def test_probe_and_export_reach_the_worker_with_the_gui_arguments():
     controller.process = None
     controller.set_jobs(3)
     controller.export()
-    assert (["19480992", "--jobs", "3"], "export") in calls, calls
+    assert (["19480992", "--jobs", "3", "--no-thoughts"], "export") in calls, calls
     assert controller.progress == 0.0
+    # Turning thoughts back on must drop the flag from BOTH worker invocations.
+    controller.set_thoughts(True)
+    assert controller.want_thoughts is True
+    calls.clear()
+    controller.probe()
+    assert (["--probe-book", "19480992"], "probe") in calls, calls
+    calls.clear()
+    controller.export()
+    assert (["19480992", "--jobs", "3"], "export") in calls, calls
+    # A running worker owns its own flag: flipping the switch mid-job must not
+    # silently change what the job is doing.
+    controller.process = _BusyProcess()
+    controller.set_thoughts(False)
+    assert controller.want_thoughts is True, "a busy worker must not be re-flagged"
+    controller.process = None
     # Concurrency is clamped to the range the GUI's combo box offered.
     controller.set_jobs(99)
     assert controller.jobs == web.MAX_JOBS
@@ -834,10 +852,25 @@ def test_probe_export_and_pause_endpoints_are_reachable_over_http():
 
     status, _, body = _call("/api/probe", method="POST", body={}, headers=_auth())
     assert status == 200, status
-    assert ["--probe-book", "19480992"] in [args for args, _a in calls], calls
+    assert ["--probe-book", "19480992", "--no-thoughts"] in [args for args, _a in calls], calls
 
     _call("/api/jobs", method="POST", body={"jobs": 2}, headers=_auth())
     assert json.loads(_call("/api/state", headers=_auth())[2])["state"]["jobs"] == 2
+
+    # The switch is a real endpoint: on, off, and it round-trips through state.
+    status, _, body = _call("/api/thoughts", method="POST", body={"enabled": True},
+                            headers=_auth())
+    assert status == 200, status
+    state = json.loads(_call("/api/state", headers=_auth())[2])["state"]
+    assert state["wantThoughts"] is True, state["wantThoughts"]
+    status, _, body = _call("/api/thoughts", method="POST", body={"enabled": False},
+                            headers=_auth())
+    assert status == 200, status
+    assert json.loads(_call("/api/state", headers=_auth())[2])["state"]["wantThoughts"] is False
+    # A non-boolean payload must not be able to turn it into something truthy
+    # by accident, nor crash the request.
+    _call("/api/thoughts", method="POST", body={"enabled": "yes"}, headers=_auth())
+    assert json.loads(_call("/api/state", headers=_auth())[2])["state"]["wantThoughts"] is True
 
     status, _, _ = _call("/api/pause", method="POST", body={}, headers=_auth())
     assert status == 200, status

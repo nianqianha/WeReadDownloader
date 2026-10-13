@@ -9,7 +9,9 @@ GUI bundle stays free of LuaJIT/lxml and of any WeRead credentials.
 from __future__ import annotations
 
 import io
+import shutil
 import json
+import datetime
 import os
 import queue
 import subprocess
@@ -60,15 +62,20 @@ from weread_core import (  # noqa: E402
 # progress), and handling all of them in one main-thread pass blocks Tk long
 # enough for Windows to report the window as unresponsive. The rest is picked
 # up on the next 100 ms tick.
-# Shared by the window title and the single-instance lookup: a second launch
-# finds the running window by this exact caption and brings it forward.
+# The window title and the single-instance lookup: a second launch finds the
+# running window by this exact caption and brings it forward.
+#
+# Display name stays Chinese on purpose -- the whole interface is Chinese, and
+# switching only the caption to English makes the program look misinstalled.
+# The English name lives where it belongs: the process, the install directory
+# (WeReadDownloader) and the installer (AppName), all of which read the same
+# constant so they cannot drift apart.
 APP_TITLE = "微信读书 · 电脑端下载助手"
-SINGLE_INSTANCE_KEY = "WeReadDesktop-Graphics"
+PRODUCT_NAME = "WeReadDownloader"
+SINGLE_INSTANCE_KEY = "WeReadDownloader-Graphics"
 
-# Type scale. The editorial voice comes from pairing a real Chinese serif for
-# display type with the OS UI sans for everything functional; Noto Serif SC is
-# present on this machine, so nothing has to be bundled into the 38 MB exe.
-SERIF = "Noto Serif SC"
+# Type scale. The console voice is the OS UI sans at every size -- the old
+# serif display face was part of the editorial look and is gone with it.
 SANS = "Microsoft YaHei UI"
 MONO = "Cascadia Mono"
 
@@ -176,60 +183,88 @@ def describe_omissions(report, compact: bool = False) -> str:
 
 
 class DesktopApp:
-    """Warm editorial palette: bone paper, hairline rules, one clay accent.
+    """Enterprise console layout: dark rail, white top bar, carded content.
 
-    Colour is spent only where it carries meaning. Surfaces are warm and close
-    together, separation is done with 1px hairlines rather than heavy cards,
-    and the single accent is a clay/terracotta that never reads as "SaaS blue".
-    Text is a warm off-black; pure #000 is deliberately avoided.
+    Everything the reference design defines is built for real: a dark sidebar
+    with brand + nav + a green bar on the active item, a white top bar that
+    carries the global search and account controls, a stat-card row, carded
+    results/detail panels, and a full-width download card at the bottom.
+
+    Surfaces stay as they were: cool grey ground, white cards, hairline rules,
+    one muted green accent. SERIF is gone too -- the console voice is the OS
+    UI sans at every size.
     """
 
     # surfaces
-    BG = "#F4F2EE"           # warm bone canvas
+    BG = "#F0F2F5"           # cool grey page ground
     CARD = "#FFFFFF"         # primary surface
-    SUNKEN = "#FAF8F4"       # nested surface: export panel, intro, log
-    HAIRLINE = "#E4E0D8"     # 1px structural rule
-    HAIRLINE_SOFT = "#EEEBE4"
+    SUNKEN = "#F7F8FA"       # nested surface: export panel, intro, inputs
+    HAIRLINE = "#E3E6EA"     # 1px structural rule
+    HAIRLINE_SOFT = "#EEF0F3"
 
     # ink
-    INK = "#2B2825"          # primary text, warm off-black
-    MUTED = "#6E675E"        # secondary
-    FAINT = "#9B948A"        # meta / tertiary
+    INK = "#1F2937"          # primary text, near-black
+    MUTED = "#4B5563"        # secondary
+    FAINT = "#8B95A3"        # meta / tertiary
 
     # the one accent
-    ACCENT = "#8A4A2E"
-    ACCENT_HOVER = "#77402A"
-    ACCENT_TINT = "#F2E8E1"
-    ACCENT_ON_TINT = "#7A4026"
+    ACCENT = "#2D6A4F"
+    ACCENT_HOVER = "#256048"
+    ACCENT_TINT = "#EAF3EE"
+    ACCENT_ON_TINT = "#256048"
     BLUE = ACCENT            # legacy alias; nothing should reference it now
 
     # semantic, all desaturated
-    GREEN = "#3C6B41"
-    GREEN_TINT = "#EDF3EC"
-    RED = "#9F2F2D"
-    RED_TINT = "#FBEAEA"
-    AMBER = "#8A5B12"
-    AMBER_TINT = "#FAF1DC"
+    GREEN = "#2D6A4F"
+    GREEN_TINT = "#EAF3EE"
+    RED = "#C0392F"
+    RED_TINT = "#FDEAEC"
+    AMBER = "#B7791F"
+    AMBER_TINT = "#FDF5E6"
 
-    RADIUS = 10
+    # the dark navigation rail (reference design's sidebar). CustomTkinter only
+    # accepts hex colours, so the reference's rgba(255,255,255,.09) is flattened
+    # onto the rail's own gradient here.
+    SIDE_BG = "#1D2632"
+    SIDE_BG_2 = "#232E3C"
+    SIDE_TXT = "#AEB8C5"
+    SIDE_TXT_HI = "#FFFFFF"
+    SIDE_ACTIVE = "#2A3646"
+    SIDE_HOVER = "#242F3D"
+
+    RADIUS = 8
     COVER_W, COVER_H = 54, 76
     # Small on purpose: the selected card in the list already shows the cover,
     # and every pixel here goes to the introduction instead.
-    DETAIL_COVER_W, DETAIL_COVER_H = 72, 96
+    DETAIL_COVER_W, DETAIL_COVER_H = 72, 88
 
     def __init__(self, root: ctk.CTk):
         self.root = root
         root.report_callback_exception = self._handle_callback_exception
         root.title(APP_TITLE)
+        # The window's own icon, so the title bar and the taskbar button show the
+        # same art as the file and the shortcut. Without iconphoto() Tk shows its
+        # default widget icon no matter what the exe carries.
+        self._set_window_icon(root)
         # 680 logical px = 850 physical, which fits a 1536x864 screen at 125%
         # scaling. The previous 790 was 988 physical px -- taller than the
         # display itself, so part of the window was always off-screen.
         root.geometry("1120x680")
         root.minsize(980, 580)
+        # NOTE (2026-10-13): building while withdrawn (root.withdraw()) together
+        # with a splash cover in main() was tried to stop the launch from
+        # painting region by region. Both were reverted at the user's request.
+        # Measurement is why: the ~1.4 s first paint is a FIXED CustomTkinter/Tk
+        # cost -- 201 widgets painted in 876 ms and 1201 in 827 ms -- so no
+        # layout change removes it, and hiding it costs a second window. The
+        # visible build is the accepted trade.
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
         self.events: queue.Queue[tuple] = queue.Queue()
         self.process: subprocess.Popen | None = None
+        # True between "the user clicked" and "the off-thread Popen returned";
+        # see _start_worker for why the spawn no longer runs on the Tk thread.
+        self._spawn_pending = False
         self.reader: threading.Thread | None = None
         self.current_action = ""
         self.job_seq = 0
@@ -285,6 +320,60 @@ class DesktopApp:
         self._stall_watcher.start()
         self.root.after(100, self._poll)
 
+    def _set_window_icon(self, root):
+        """Give the window the app icon, in both source and frozen layouts.
+
+        The exe's own icon is not enough: Tk draws its default widget icon in
+        the title bar and the taskbar unless iconphoto() is called. So the .ico
+        has to be found at run time as well.
+
+        The icon is a multi-size .ico (16..256) and Tk's PhotoImage only reads
+        one frame, so the frames are pulled out with PIL and handed over as
+        separate PhotoImages -- that is what makes the small sizes crisp rather
+        than a downscaled 256px blur.
+        """
+        candidates = []
+        here = Path(__file__).resolve().parent
+        if getattr(sys, "frozen", False):
+            # PyInstaller onefile unpacks into _MEIPASS; onedir keeps the exe
+            # directory. Check both, then the install tree next to it.
+            mei = Path(getattr(sys, "_MEIPASS", "") or here)
+            exe_dir = Path(sys.executable).resolve().parent
+            for base in (mei, exe_dir, exe_dir.parent):
+                candidates.append(base / "assets" / "weread-app.ico")
+                candidates.append(base / "weread-app.ico")
+        else:
+            candidates.append(here / "assets" / "weread-app.ico")
+
+        path = next((c for c in candidates if c.is_file()), None)
+        if path is None:
+            print("[ICON] weread-app.ico not found; using the Tk default",
+                  file=sys.stderr)
+            return
+        try:
+            from PIL import Image
+            import tkinter as _tk
+            frames = []
+            for size in (48, 32, 24, 16):
+                frame = Image.open(path).convert("RGBA").resize(
+                    (size, size), Image.LANCZOS)
+                # Tk's PhotoImage takes GIF/PPM/PGM, not raw RGBA bytes -- so
+                # each frame is re-encoded as GIF. Reopening the file per size
+                # keeps every frame crisp instead of downscaling the 256px one.
+                buf = io.BytesIO()
+                frame.save(buf, format="GIF")
+                buf.seek(0)
+                frames.append(_tk.PhotoImage(data=buf.read()))
+            # keep them alive: a garbage-collected PhotoImage makes Tk raise
+            # "image doesn't exist" on the next update
+            self._icon_refs = frames
+            root.iconphoto(True, *frames)
+        except Exception as exc:
+            # Never fatal: a missing icon must not stop the window from opening,
+            # and this runs before the log writer's own state exists.
+            print("[ICON] could not apply the window icon: %s: %s"
+                  % (type(exc).__name__, exc), file=sys.stderr)
+
     def _restore_login_identity(self):
         """Show the already-saved account on the login button at startup."""
         stored = weread_login.load_saved_credentials()
@@ -331,11 +420,657 @@ class DesktopApp:
         row = ctk.CTkFrame(head, fg_color="transparent")
         row.pack(fill="x")
         ctk.CTkLabel(row, text=numeral, text_color=self.ACCENT,
-                     font=_font(15, "bold", SERIF)).pack(side="left", padx=(0, 10))
+                     font=_font(12, "bold")).pack(side="left", padx=(0, 8))
         ctk.CTkLabel(row, text=title, text_color=self.INK,
-                     font=_font(18, "bold", SERIF)).pack(side="left")
-        ctk.CTkFrame(head, height=1, fg_color=self.HAIRLINE).pack(fill="x", pady=(10, 0))
+                     font=_font(15, "bold")).pack(side="left")
+        ctk.CTkFrame(head, height=1, fg_color=self.HAIRLINE).pack(fill="x", pady=(8, 0))
         return head
+
+    def _nav_item(self, parent, text: str, glyph: str, active: bool = False, command=None):
+        """One sidebar entry in the reference design's dark rail.
+
+        A single CTkButton with no child widgets. That is deliberate and it is
+        the whole point of this method:
+
+        MEASURED 2026-10-12 -- a CTkButton with a bar and two labels packed on
+        top of it looked right and hovered correctly, but clicking did nothing:
+        the children sit above the button's canvas, so clicks reached a label
+        and the button's command never ran. Binding the children too ("+") did
+        not fix it either, because CustomTkinter's bind() here does not report
+        or reliably register on those child frames/labels.
+
+        CTkButton's own command is wired by CustomTkinter to its own canvas,
+        which is exactly why the top bar's 刷新 / 搜索 buttons work. So the row
+        is one button: the glyph and label live in its text, and the reference's
+        3px green selection bar becomes a 3px left border.
+        """
+        item = ctk.CTkButton(
+            parent,
+            text=("%s   %s" % (glyph, text)),
+            command=command,
+            fg_color=self.SIDE_ACTIVE if active else "transparent",
+            hover_color=self.SIDE_HOVER,
+            text_color=self.SIDE_TXT_HI if active else self.SIDE_TXT,
+            font=_font(13, "bold" if active else "normal"),
+            anchor="w",
+            corner_radius=6,
+            height=38,
+            border_width=3 if active else 0,
+            border_color=self.ACCENT if active else self.SIDE_BG,
+        )
+        item.pack(fill="x", pady=1)
+        item._nav_active = active
+        item._nav_text = text
+        item._nav_glyph = glyph
+        return item
+
+    def _switch_page(self, page_name: str):
+        """Switch to the specified page."""
+        if page_name == self._current_page:
+            return
+        # Update nav item states. Each row is one CTkButton (see _nav_item), so
+        # the selected look is rebuilt by configuring the button itself: fill,
+        # text colour, weight, and a 3px left border as the selection bar.
+        for name, item in self.nav_items.items():
+            is_active = name == page_name
+            item._nav_active = is_active
+            item.configure(
+                fg_color=self.SIDE_ACTIVE if is_active else "transparent",
+                text_color=self.SIDE_TXT_HI if is_active else self.SIDE_TXT,
+                font=_font(13, "bold" if is_active else "normal"),
+                border_width=3 if is_active else 0,
+                border_color=self.ACCENT if is_active else self.SIDE_BG,
+            )
+
+        # Hide current page, show new page
+        if self._current_page in self.pages:
+            self.pages[self._current_page].pack_forget()
+        self._current_page = page_name
+        if page_name not in self.pages:
+            # Build on first visit; the builder registers the page in self.pages.
+            self._create_page(page_name)
+        self.pages[page_name].pack(fill="both", expand=True)
+
+    def _scan_exports(self):
+        """Every export folder, classified, with its disk cost.
+
+        Three kinds show up on a real machine and the UI must not blur them:
+
+          done    -- holds a published .epub; this is what the reader wants
+          partial -- a `.work` tree: the resume scratch space. MEASURED on this
+                     machine: 5 of 12 folders were `.work`, 677 MB, invisible
+                     in the old list. Deleting one is safe -- it only costs the
+                     ability to resume, and a re-download starts from zero.
+          stale   -- `_stale-*` leftovers from a superseded workspace. Nothing
+                     reads them; they are pure reclaimable space.
+
+        Each row is (name, size_mb, mtime, kind, path).
+        """
+        rows = []
+        try:
+            OUTPUT.mkdir(parents=True, exist_ok=True)
+            for entry in sorted(OUTPUT.iterdir(), key=lambda p: p.stat().st_mtime,
+                                reverse=True):
+                if not entry.is_dir():
+                    continue
+                try:
+                    total = sum(f.stat().st_size
+                                for f in entry.rglob("*") if f.is_file())
+                except OSError:
+                    total = 0
+                mtime = datetime.datetime.fromtimestamp(entry.stat().st_mtime)
+                if entry.name.endswith(".work"):
+                    kind = "partial"
+                elif entry.name.startswith("_stale-"):
+                    kind = "stale"
+                else:
+                    # A finished-looking folder with no .epub is a download that
+                    # never completed: on this machine 无名之町-3300020514 sat
+                    # there empty and still looked like a book in the list.
+                    kind = "done" if next(entry.glob("*.epub"), None) else "failed"
+                rows.append((entry.name, total / 1048576.0, mtime, kind, entry))
+        except OSError:
+            pass
+        return rows
+
+    def _read_history(self):
+        """DONE lines from the worker log, newest first: (stamp, summary)."""
+        rows = []
+        try:
+            log_path = Path(LOG_DIR) / "desktop-general.log"
+            if not log_path.is_file():
+                return rows
+            for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if not line.startswith("DONE "):
+                    continue
+                # DONE {json payload}; the title and chapter count are what a
+                # reader wants, not the internal dict dump.
+                try:
+                    payload = json.loads(line[5:])
+                    title = str(payload.get("title") or "未知书名")
+                    chapters = payload.get("chapters") or payload.get("total") or "?"
+                    rows.append(("完成", f"{title} · {chapters} 章"))
+                except (ValueError, TypeError):
+                    rows.append(("完成", line[5:120]))
+        except OSError:
+            pass
+        return rows[:200]
+
+    def _read_annotation_notes(self):
+        """Unplaced-underline decisions from the log, newest first."""
+        rows = []
+        try:
+            log_path = Path(LOG_DIR) / "desktop-general.log"
+            if not log_path.is_file():
+                return rows
+            for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                # The engine's actual phrasing: "[ANNOTATION] chapter UID N: text
+                # kept, X of Y underline(s) not placed by WeRead: ..."
+                if line.startswith("[ANNOTATION]") and "not placed" in line:
+                    rows.append(("拒绝标注", line[:200]))
+                elif line.startswith("[UNRESOLVED]") or line.startswith("[INCOMPLETE]"):
+                    rows.append(("章节存疑", line[:200]))
+        except OSError:
+            pass
+        return rows[:200]
+
+    def _open_export(self, name: str):
+        """Open one export folder; the name comes from our own scan."""
+        safe = Path(name).name  # never trust more than the basename
+        target = OUTPUT / safe
+        if target.is_dir():
+            os.startfile(str(target))
+
+    def _create_page(self, page_name: str):
+        """Create page content on demand.
+
+        All pages live under the same content area (self.page_host, the frame
+        below the top bar). The download workshop is built eagerly in _build;
+        the other five are built here on first visit and cached.
+        """
+        builders = {
+            "我的书架": self._create_bookshelf_page,
+            "下载记录": self._create_download_history_page,
+            "统计分析": self._create_statistics_page,
+            "划线清单": self._create_highlights_page,
+            "设置": self._create_settings_page,
+        }
+        builder = builders.get(page_name)
+        if builder is not None and page_name not in self.pages:
+            builder(self.page_host)
+
+    def _page_scaffold(self, host, title: str):
+        """Shared chrome for the non-workshop pages: heading + one card."""
+        page = ctk.CTkFrame(host, fg_color=self.BG, corner_radius=0)
+        self.pages[title] = page
+        head = ctk.CTkFrame(page, fg_color="transparent")
+        head.pack(fill="x")
+        ctk.CTkLabel(head, text=title, text_color=self.INK,
+                     font=_font(18, "bold")).pack(side="left")
+        ctk.CTkFrame(page, height=1, fg_color=self.HAIRLINE).pack(fill="x", pady=(12, 0))
+        card = ctk.CTkFrame(page, fg_color=self.CARD, corner_radius=self.RADIUS,
+                            border_width=1, border_color=self.HAIRLINE)
+        card.pack(fill="both", expand=True, pady=(14, 0))
+        return page, card
+
+    def _refresh_page(self, page_name: str):
+        """Rebuild a page in place, so deletes and new downloads show up."""
+        old = self.pages.pop(page_name, None)
+        if old is not None:
+            old.pack_forget()
+            old.destroy()
+        self._create_page(page_name)
+        if page_name in self.pages:
+            self.pages[page_name].pack(fill="both", expand=True)
+
+    def _create_bookshelf_page(self, host):
+        """书架 = 微信里的真书架（可下载）+ 本机已导出（可清理）。
+
+        The shelf half is the honest "我的书架": the account's own books, each
+        clickable straight into a download, exactly like a search result. The
+        export half below it is what this machine holds, with the reclaim and
+        delete tools the disk needed.
+        """
+        page, card = self._page_scaffold(self.page_host, "我的书架")
+
+        # ---- half 1: the real WeRead shelf --------------------------------
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(14, 0))
+        ctk.CTkLabel(head, text="微信书架", text_color=self.INK,
+                     font=_font(13, "bold")).pack(side="left")
+        ctk.CTkLabel(head, text="点书名即可下载，与搜索结果一致",
+                     text_color=self.FAINT, font=_font(11)).pack(side="left", padx=(10, 0))
+        self._quiet_button(head, "刷新书架", 84, self.load_shelf).pack(side="right")
+
+        self.shelf_frame = ctk.CTkScrollableFrame(card, fg_color=self.SUNKEN,
+                                                  corner_radius=8)
+        self.shelf_frame.pack(fill="x", padx=14, pady=(10, 0))
+        self.shelf_frame.configure(height=210)
+        ctk.CTkLabel(self.shelf_frame, text="正在读取微信书架…",
+                     text_color=self.FAINT, font=_font(12)).pack(expand=True, pady=40)
+        self.load_shelf()
+
+        # ---- half 2: what this machine already holds ----------------------
+        rows = self._scan_exports()
+        if not rows:
+            return
+        ctk.CTkFrame(card, height=1, fg_color=self.HAIRLINE).pack(
+            fill="x", padx=16, pady=(14, 0))
+        head2 = ctk.CTkFrame(card, fg_color="transparent")
+        head2.pack(fill="x", padx=16, pady=(10, 0))
+        ctk.CTkLabel(head2, text="本机已导出", text_color=self.INK,
+                     font=_font(13, "bold")).pack(side="left")
+        ctk.CTkLabel(head2, text="删除会永久移除文件，请谨慎",
+                     text_color=self.FAINT, font=_font(11)).pack(side="left", padx=(10, 0))
+
+        done = [r for r in rows if r[3] == "done"]
+        failed = [r for r in rows if r[3] == "failed"]
+        reclaimable = [r for r in rows if r[3] in ("partial", "stale", "failed")]
+        reclaim_mb = sum(r[1] for r in reclaimable)
+
+        if reclaimable:
+            bar = ctk.CTkFrame(card, fg_color=self.AMBER_TINT, corner_radius=6)
+            bar.pack(fill="x", padx=14, pady=(10, 0))
+            what = []
+            if failed:
+                what.append("%d 个未完成" % len(failed))
+            if len(rows) - len(done) - len(failed):
+                what.append("%d 个半成品或残留"
+                            % (len(rows) - len(done) - len(failed)))
+            ctk.CTkLabel(bar, text="可回收 %.0f MB：%s，清理不影响已完成的书。"
+                         % (reclaim_mb, "、".join(what)),
+                         text_color=self.AMBER, font=_font(12),
+                         anchor="w").pack(side="left", fill="x", expand=True,
+                                          padx=14, pady=10)
+            self._quiet_button(bar, "全部清理", 96,
+                               lambda: self._delete_exports(reclaimable)
+                               ).pack(side="right", padx=(0, 14))
+
+        local = ctk.CTkScrollableFrame(card, fg_color=self.CARD, corner_radius=0)
+        local.pack(fill="both", expand=True, padx=8, pady=(8, 10))
+        for name, size_mb, mtime, kind, path in rows:
+            self._build_local_row(local, name, size_mb, kind, path)
+
+    def _build_local_row(self, parent, name, size_mb, kind, path):
+        """One row of the on-machine export list (delete / 删想法 / open)."""
+        row = ctk.CTkFrame(parent, fg_color="transparent", height=44)
+        row.pack(fill="x", pady=1)
+        row.pack_propagate(False)
+        if kind == "done":
+            glyph, tint = "▤", self.GREEN
+        elif kind == "failed":
+            glyph, tint = "⚠", self.RED
+        elif kind == "partial":
+            glyph, tint = "◔", self.AMBER
+        else:
+            glyph, tint = "⌫", self.FAINT
+        ctk.CTkLabel(row, text=glyph, width=30, text_color=tint,
+                     font=_font(13)).pack(side="left")
+        suffix = {"done": "", "failed": "（未完成）",
+                  "partial": "（半成品）", "stale": "（残留）"}[kind]
+        ctk.CTkLabel(row, text=name + suffix,
+                     text_color=self.INK if kind == "done" else self.FAINT,
+                     anchor="w", font=_font(12)
+                     ).pack(side="left", fill="x", expand=True)
+
+        thoughts_mb = 0.0
+        if kind == "done":
+            reviews = path / "reviews.jsonl"
+            if reviews.is_file():
+                try:
+                    thoughts_mb = reviews.stat().st_size / 1048576.0
+                except OSError:
+                    thoughts_mb = 0.0
+        if thoughts_mb >= 1.0:
+            ctk.CTkLabel(row, text="想法 %.0f MB" % thoughts_mb,
+                         text_color=self.AMBER, font=_font(11)
+                         ).pack(side="right", padx=(0, 8))
+        ctk.CTkLabel(row, text="%.1f MB" % size_mb, text_color=self.FAINT,
+                     font=_font(11)).pack(side="right", padx=(0, 6))
+
+        ctk.CTkButton(row, text="删除", width=48, height=26,
+                      corner_radius=6, fg_color=self.CARD,
+                      hover_color=self.RED_TINT,
+                      border_width=1, border_color="#D5D9DF",
+                      text_color=self.RED, font=_font(11),
+                      command=lambda r=(name, size_mb, None, kind, path):
+                      self._delete_exports([r])
+                      ).pack(side="right", padx=(0, 4))
+        if thoughts_mb >= 1.0:
+            ctk.CTkButton(row, text="删想法", width=60, height=26,
+                          corner_radius=6, fg_color=self.CARD,
+                          hover_color=self.AMBER_TINT,
+                          border_width=1, border_color="#D5D9DF",
+                          text_color=self.AMBER, font=_font(11),
+                          command=lambda p=path: self._delete_thoughts(p)
+                          ).pack(side="right", padx=(0, 4))
+        ctk.CTkButton(row, text="打开", width=48, height=26,
+                      corner_radius=6, fg_color=self.CARD, hover_color=self.SUNKEN,
+                      border_width=1, border_color="#D5D9DF", text_color=self.MUTED,
+                      font=_font(11),
+                      command=lambda n=name: self._open_export(n)
+                      ).pack(side="right")
+
+    def load_shelf(self):
+        """Ask the worker for the account's shelf; the reply lands on the queue."""
+        if self._is_busy():
+            self.status.set("当前有任务正在运行，等它结束再刷新书架。")
+            return
+        if not self._start_worker(["--shelf"], "shelf", "正在读取微信书架…"):
+            self.status.set("书架读取没有启动。请检查登录状态后重试。")
+
+    def _show_shelf(self, rows):
+        """Render the account's shelf into the shelf frame."""
+        if not hasattr(self, "shelf_frame") or not self.shelf_frame.winfo_exists():
+            return
+        for widget in self.shelf_frame.winfo_children():
+            widget.destroy()
+        if not rows:
+            ctk.CTkLabel(self.shelf_frame,
+                         text="书架是空的，或登录状态已过期。\n\n点「刷新书架」重试，或先「检查登录」。",
+                         text_color=self.FAINT, font=_font(12), justify="center"
+                         ).pack(expand=True, pady=40)
+            return
+        for book in rows:
+            self._build_shelf_row(book)
+        self.status.set("已读取微信书架，共 %d 本。" % len(rows))
+
+    def _build_shelf_row(self, book):
+        """One shelf row: cover, title, author, category, and a download action."""
+        book_id = str(book.get("bookId") or "")
+        if not book_id:
+            return
+        title = str(book.get("title") or "").strip() or "未命名书籍"
+        author = str(book.get("author") or "").strip() or "作者未知"
+        category = str(book.get("category") or "").strip()
+
+        row = ctk.CTkFrame(self.shelf_frame, fg_color=self.CARD, corner_radius=6,
+                           border_width=1, border_color=self.HAIRLINE, height=56)
+        row.pack(fill="x", pady=2, padx=2)
+        row.pack_propagate(False)
+
+        cover = ctk.CTkLabel(row, text="", width=36, height=48, corner_radius=3,
+                             fg_color=self.SUNKEN)
+        cover.pack(side="left", padx=(10, 10), pady=4)
+
+        text_col = ctk.CTkFrame(row, fg_color="transparent")
+        text_col.pack(side="left", fill="both", expand=True, pady=6)
+        ctk.CTkLabel(text_col, text=title, text_color=self.INK, anchor="w",
+                     font=_font(13, "bold")).pack(fill="x")
+        meta = author + (" · " + category if category else "")
+        ctk.CTkLabel(text_col, text=meta, text_color=self.FAINT, anchor="w",
+                     font=_font(11)).pack(fill="x", pady=(1, 0))
+
+        ctk.CTkButton(row, text="下载", width=64, height=30,
+                      corner_radius=6, fg_color=self.ACCENT,
+                      hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
+                      font=_font(12),
+                      command=lambda b=book_id, t=title:
+                      self._download_from_shelf(b, t)
+                      ).pack(side="right", padx=(0, 12))
+
+        def choose(_event=None, b=book_id, t=title):
+            self._download_from_shelf(b, t)
+        for widget in (row, cover, text_col, *text_col.winfo_children()):
+            widget.bind("<Button-1>", choose)
+
+        url = str(book.get("cover") or "").strip()
+        if url:
+            self._request_shelf_cover(cover, url)
+
+    def _request_shelf_cover(self, label, url):
+        """Load a cover in the background; failures leave the placeholder."""
+        def fetch():
+            image = None
+            try:
+                response = requests.get(url, timeout=(5, 15))
+                response.raise_for_status()
+                if len(response.content) <= 8 * 1024 * 1024:
+                    image = _decode_cover(response.content, (36, 48))
+            except Exception:
+                image = None
+            self.events.put(("shelf-cover", (label, image)))
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _download_from_shelf(self, book_id, title):
+        """Pick a shelf book and go straight to the download confirmation.
+
+        Deliberately does NOT wait for the book-info fetch: the click means
+        "download this", so the confirmation comes up immediately and the
+        detail pane fills in behind it. export() owns the busy check and says
+        so itself, which is a clearer answer than silently doing nothing.
+        """
+        if not book_id:
+            return
+        self._select_book({"bookId": book_id, "title": title})
+        self._switch_page("下载工坊")
+        self.export()
+
+    def _delete_thoughts(self, path):
+        """Drop a finished book's note data but keep its EPUB.
+
+        MEASURED on this machine: 超神机械师-19480992 held a 183 MB
+        reviews.jsonl next to a 10 MB EPUB -- 18x the book itself, for notes
+        most readers never open. Deleting that single file gives back almost
+        the whole folder while the readable book stays.
+
+        The bundle zip embeds its own copy of the notes, so it goes too; the
+        reader can still re-download them later with 含想法 on.
+        """
+        folder = Path(path)
+        targets = [folder / "reviews.jsonl", folder / "*.weread.zip"]
+        victims, total = [], 0
+        for pattern in targets:
+            try:
+                if pattern.name.startswith("*"):
+                    found = list(folder.glob(pattern.name))
+                else:
+                    found = [pattern] if pattern.is_file() else []
+                for f in found:
+                    size = f.stat().st_size
+                    victims.append((f, size))
+                    total += size
+            except OSError:
+                continue
+        if not victims:
+            self.status.set("这本书没有可删除的想法数据。")
+            return
+        mb = total / 1048576.0
+        if not self._ask("askyesno", "删除想法数据",
+                         "删除《%s》的想法数据（约 %.0f MB）？\n\n"
+                         "EPUB 正文和划线会完整保留，只丢笔记正文与打包副本；\n"
+                         "之后勾选「含想法」重新下载可以再取回。\n\n继续吗？"
+                         % (folder.name, mb)):
+            return
+        removed, failed = 0, 0
+        for f, _size in victims:
+            try:
+                f.unlink()
+                removed += 1
+            except Exception as exc:
+                failed += 1
+                self._persist_log("[DELETE_THOUGHTS_FAILED] %s: %s" % (f, exc))
+        if removed:
+            self._persist_log("[DELETE_THOUGHTS] %s: removed %d file(s), %.0f MB"
+                              % (folder.name, removed, mb))
+        self._refresh_page("我的书架")
+        if failed:
+            self.status.set("想法数据已删除，但有 %d 个文件删除失败（可能仍被占用）。" % failed)
+        else:
+            self.status.set("已删除《%s》的想法数据，回收约 %.0f MB，EPUB 保留。"
+                            % (folder.name, mb))
+
+    def _delete_exports(self, rows):
+        """Delete export folders after a confirmation that says what is lost.
+
+        The confirmation is not decoration. Deleting a finished book removes
+        its EPUB permanently, while deleting a .work tree only costs the
+        ability to resume, so the two must not share one wording.
+        """
+        if not rows:
+            return
+        finished = [r for r in rows if r[3] == "done"]
+        others = [r for r in rows if r[3] != "done"]
+        total_mb = sum(r[1] for r in rows)
+
+        if finished and others:
+            message = ("将删除 %d 项，共约 %.0f MB。\n\n"
+                       "其中 %d 本是已完成的书（EPUB 会永久删除），"
+                       "%d 项是半成品或残留。\n\n继续吗？"
+                       % (len(rows), total_mb, len(finished), len(others)))
+        elif finished:
+            if len(finished) == 1:
+                message = ("删除《%s》？\n\n它的 EPUB 和全部附带数据会永久删除，"
+                           "无法恢复。\n\n继续吗？" % finished[0][0])
+            else:
+                message = ("删除 %d 本已完成的书？\n\n它们的 EPUB 会永久删除，"
+                           "共约 %.0f MB，无法恢复。\n\n继续吗？"
+                           % (len(finished), total_mb))
+        else:
+            message = ("清理 %d 项半成品或残留，共约 %.0f MB？\n\n"
+                       "已完成的书不受影响；下次下载同一本书会从头开始，"
+                       "不能续传。\n\n继续吗？" % (len(others), total_mb))
+
+        if not self._ask("askyesno", "确认删除", message):
+            return
+
+        removed, failed = [], []
+        for name, _size, _mtime, _kind, path in rows:
+            try:
+                shutil.rmtree(str(path))
+                removed.append(name)
+            except Exception as exc:
+                failed.append((name, str(exc)))
+                self._persist_log("[DELETE_FAILED] %s: %s" % (name, exc))
+        if removed:
+            self._persist_log("[DELETE] removed %d export folder(s): %s"
+                              % (len(removed), ", ".join(removed)))
+        self._refresh_page("我的书架")
+        if failed:
+            self.status.set("已删除 %d 项，%d 项删除失败（可能仍被占用），详见技术日志。"
+                            % (len(removed), len(failed)))
+        else:
+            self.status.set("已删除 %d 项，回收约 %.0f MB。"
+                            % (len(removed), total_mb))
+
+    def _create_download_history_page(self, host):
+        """下载记录：the worker log's DONE lines, newest first."""
+        page, card = self._page_scaffold(self.page_host, "下载记录")
+        rows = self._read_history()
+        if not rows:
+            ctk.CTkLabel(card, text="还没有下载记录。\n\n每次完成的下载会在这里留一条。",
+                         text_color=self.FAINT, font=_font(13), justify="center"
+                         ).pack(expand=True)
+            return
+        list_frame = ctk.CTkScrollableFrame(card, fg_color=self.CARD, corner_radius=0)
+        list_frame.pack(fill="both", expand=True, padx=12, pady=10)
+        for stamp, line in rows:
+            row = ctk.CTkFrame(list_frame, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkLabel(row, text=stamp, text_color=self.GREEN, width=130,
+                         font=_font(11, "normal", MONO), anchor="w").pack(side="left")
+            ctk.CTkLabel(row, text=line, text_color=self.MUTED, anchor="w",
+                         font=_font(12)).pack(side="left", fill="x", expand=True)
+
+    def _create_statistics_page(self, host):
+        """统计分析：what the exports directory holds, and what it wastes."""
+        page, card = self._page_scaffold(self.page_host, "统计分析")
+        rows = self._scan_exports()
+        done = [r for r in rows if r[3] == "done"]
+        failed = [r for r in rows if r[3] == "failed"]
+        reclaimable = [r for r in rows if r[3] in ("partial", "stale", "failed")]
+        total_mb = sum(r[1] for r in rows)
+        reclaim_mb = sum(r[1] for r in reclaimable)
+        # Note data is the other half of the real cost: 183 MB beside a 10 MB
+        # EPUB on this machine. Show it so "where did my disk go" has an answer.
+        thoughts_mb = 0.0
+        for _n, _s, _m, kind, path in rows:
+            if kind == "done":
+                reviews = path / "reviews.jsonl"
+                if reviews.is_file():
+                    try:
+                        thoughts_mb += reviews.stat().st_size / 1048576.0
+                    except OSError:
+                        pass
+        newest = max((r[2] for r in done), default=None)
+        stats = ctk.CTkFrame(card, fg_color="transparent")
+        stats.pack(fill="x", padx=18, pady=(16, 8))
+        for key, value, tint in (("已完成的书", str(len(done)), self.GREEN),
+                                 ("想法数据", "%.0f MB" % thoughts_mb, self.AMBER),
+                                 ("占用总计", "%.1f MB" % total_mb, self.AMBER),
+                                 ("可回收", "%.1f MB" % reclaim_mb,
+                                  self.RED if reclaim_mb > 200 else self.GREEN)):
+            box = ctk.CTkFrame(stats, fg_color=self.SUNKEN, corner_radius=6)
+            box.pack(side="left", fill="x", expand=True, padx=(0, 12))
+            ctk.CTkLabel(box, text=key, text_color=self.FAINT, height=1,
+                         font=_font(11)).pack(anchor="w", padx=14, pady=(10, 2))
+            ctk.CTkLabel(box, text=value, text_color=tint, height=1,
+                         font=_font(17, "bold")).pack(anchor="w", padx=14, pady=(0, 10))
+        if newest:
+            ctk.CTkLabel(card, text="最近完成：%s" % newest.strftime("%Y-%m-%d %H:%M"),
+                         text_color=self.FAINT, font=_font(12), anchor="w"
+                         ).pack(anchor="w", padx=18, pady=(4, 0))
+
+        note = "这些数字来自本机导出目录的实时扫描。"
+        if reclaim_mb > 200:
+            note += ("\n\n可回收 %.0f MB 是未完成、半成品与残留目录，"
+                     "在「我的书架」里可以安全清理。" % reclaim_mb)
+        if thoughts_mb > 100:
+            note += ("\n\n想法数据占 %.0f MB（正文之外的笔记与打包副本）；"
+                     "在「我的书架」里对某本书点「删想法」可只释放这部分，保留 EPUB。"
+                     % thoughts_mb)
+        ctk.CTkLabel(card, text=note, text_color=self.FAINT, font=_font(12),
+                     justify="left").pack(anchor="w", padx=18, pady=(8, 16))
+
+    def _create_highlights_page(self, host):
+        """划线清单：what the engine refused to place, from the log."""
+        page, card = self._page_scaffold(self.page_host, "划线清单")
+        rows = self._read_annotation_notes()
+        if not rows:
+            ctk.CTkLabel(card, text="没有需要留意的划线记录。\n\n"
+                                    "当某条划线无法安全落点时，引擎会拒绝标注而不是标错位置，\n"
+                                    "这类决定会记录在这里供你复核。",
+                         text_color=self.FAINT, font=_font(13), justify="center"
+                         ).pack(expand=True)
+            return
+        list_frame = ctk.CTkScrollableFrame(card, fg_color=self.CARD, corner_radius=0)
+        list_frame.pack(fill="both", expand=True, padx=12, pady=10)
+        for stamp, line in rows:
+            row = ctk.CTkFrame(list_frame, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkLabel(row, text=stamp, text_color=self.AMBER, width=130,
+                         font=_font(11, "normal", MONO), anchor="w").pack(side="left")
+            ctk.CTkLabel(row, text=line, text_color=self.MUTED, anchor="w",
+                         font=_font(12), wraplength=560, justify="left"
+                         ).pack(side="left", fill="x", expand=True)
+
+    def _create_settings_page(self, host):
+        """设置：real, small, and honest about what each item does."""
+        page, card = self._page_scaffold(self.page_host, "设置")
+
+        def folder_row(label, path, opener):
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(fill="x", padx=18, pady=(12, 0))
+            ctk.CTkLabel(row, text=label, text_color=self.INK, anchor="w",
+                         font=_font(13, "bold")).pack(fill="x")
+            ctk.CTkLabel(row, text=str(path), text_color=self.FAINT, anchor="w",
+                         font=_font(11, "normal", MONO), wraplength=560,
+                         justify="left").pack(fill="x")
+            self._quiet_button(row, "打开文件夹", 110, opener).pack(anchor="w", pady=(6, 0))
+
+        folder_row("下载目录", OUTPUT, self.open_output)
+        folder_row("技术日志", LOG_DIR, self.open_logs)
+        ctk.CTkFrame(card, height=1, fg_color=self.HAIRLINE).pack(fill="x", padx=18, pady=(14, 0))
+        ctk.CTkLabel(card, text="登录", text_color=self.INK, anchor="w",
+                     font=_font(13, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
+        ctk.CTkLabel(card, text="扫码凭证只保存在本机；「退出登录」删除的是会话文件，"
+                                "weread-live-settings.lua 里的基础凭证不受影响。",
+                     text_color=self.FAINT, anchor="w", font=_font(12),
+                     wraplength=560, justify="left").pack(anchor="w", padx=18, pady=(2, 0))
+        btns = ctk.CTkFrame(card, fg_color="transparent")
+        btns.pack(fill="x", padx=18, pady=(8, 16))
+        self._quiet_button(btns, "登录 / 切换账号", 136, self.open_login).pack(side="left")
+        self._quiet_button(btns, "检查登录状态", 118, self.check_auth).pack(side="left", padx=(8, 0))
 
     def _ask(self, kind: str, title: str, message: str, **kwargs) -> str:
         """Run a modal dialog with the main window as its parent, and log it.
@@ -363,75 +1098,154 @@ class DesktopApp:
             self._modal_depth -= 1
 
     def _quiet_button(self, parent, text: str, width: int, command, **kwargs):
-        """Secondary action: outlined on the paper surface, never a filled slab."""
+        """Secondary action: outlined on the card surface, never a filled slab."""
         return ctk.CTkButton(
             parent, text=text, width=width, height=34, command=command,
             corner_radius=self.RADIUS, fg_color=self.CARD,
-            hover_color=self.ACCENT_TINT, text_color=self.ACCENT_ON_TINT,
-            border_width=1, border_color=self.HAIRLINE,
+            hover_color=self.SUNKEN, text_color=self.MUTED,
+            border_width=1, border_color="#D5D9DF",
             font=_font(13), **kwargs)
 
+    def _stat_card(self, parent, key: str, initial: str, tint: str):
+        """One of the reference design's statistic cards: grey label, big number.
+
+        The value is kept in a dict keyed by `key` so later updates go through
+        _set_stat() instead of reaching into the widget tree.
+        """
+        card = ctk.CTkFrame(parent, fg_color=self.CARD, corner_radius=self.RADIUS,
+                            border_width=1, border_color=self.HAIRLINE)
+        card.pack(side="left", fill="both", expand=True, padx=(0, 12))
+        ctk.CTkLabel(card, text=key, text_color=self.FAINT, height=1,
+                     font=_font(11), anchor="w").pack(fill="x", padx=16, pady=(8, 1))
+        value = ctk.CTkLabel(card, text=initial, text_color=tint, height=1,
+                             font=_font(18, "bold"), anchor="w")
+        value.pack(fill="x", padx=16, pady=(0, 8))
+        return value
+
     def _build(self):
+        self._stats = {}
+        # ---- overall structure: dark rail + white top bar + content -----
         self.root.configure(fg_color=self.BG)
-        page = ctk.CTkFrame(self.root, fg_color=self.BG, corner_radius=0)
-        page.pack(fill="both", expand=True, padx=28, pady=(18, 12))
+        shell = ctk.CTkFrame(self.root, fg_color=self.BG, corner_radius=0)
+        shell.pack(fill="both", expand=True)
 
-        # ---- masthead ----------------------------------------------------
-        header = ctk.CTkFrame(page, fg_color=self.BG)
-        header.pack(fill="x")
-        title_box = ctk.CTkFrame(header, fg_color=self.BG)
-        title_box.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(title_box, text="微信读书 · 电脑端下载助手", text_color=self.INK,
-                     font=_font(27, "bold", SERIF)).pack(anchor="w")
-        ctk.CTkLabel(title_box, text="在电脑上搜索、下载并安全续传；划线无法确认时不会擅自标错。",
-                     text_color=self.MUTED, font=_font(13)).pack(anchor="w", pady=(6, 0))
+        # ---- sidebar (the reference's dark rail) -------------------------
+        side = ctk.CTkFrame(shell, width=216, corner_radius=0, fg_color=self.SIDE_BG)
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
 
-        self.auth_button = self._quiet_button(header, "检查登录", 112, self.check_auth)
-        self.auth_button.pack(side="right", padx=(10, 0))
-        self.login_button = ctk.CTkButton(
-            header, text="登录 / 切换账号", width=136, height=34,
-            corner_radius=self.RADIUS, fg_color=self.ACCENT,
-            hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
-            font=_font(13), command=self.open_login)
-        self.login_button.pack(side="right", padx=(10, 0))
-        self.auth_badge = ctk.CTkLabel(header, text="尚未检查", text_color=self.MUTED,
-                                       fg_color=self.SUNKEN, corner_radius=14,
-                                       padx=13, pady=7, font=_font(12))
-        self.auth_badge.pack(side="right")
+        brand = ctk.CTkFrame(side, fg_color="transparent", height=52)
+        brand.pack(fill="x", padx=16, pady=(10, 4))
+        brand.pack_propagate(False)
+        logo = ctk.CTkLabel(brand, text="读", width=24, height=24, corner_radius=6,
+                            fg_color=self.ACCENT, text_color="#FFFFFF",
+                            font=_font(12, "bold"))
+        logo.pack(side="left")
+        ctk.CTkLabel(brand, text="微信读书下载", text_color=self.SIDE_TXT_HI,
+                     font=_font(13, "bold"), anchor="w").pack(side="left", padx=(10, 0))
 
-        # A single hairline does the work that a heavy header band would.
-        ctk.CTkFrame(page, height=1, fg_color=self.HAIRLINE).pack(fill="x", pady=(18, 20))
+        ctk.CTkFrame(side, height=1, fg_color="#2A3646").pack(fill="x", padx=16, pady=(4, 8))
 
-        # ---- two columns -------------------------------------------------
-        body = ctk.CTkFrame(page, fg_color=self.BG)
-        body.pack(fill="both", expand=True)
+        nav = ctk.CTkFrame(side, fg_color="transparent")
+        nav.pack(fill="both", expand=True, padx=10)
+        self.nav_items = {}
+        self.nav_items["下载工坊"] = self._nav_item(nav, "下载工坊", "◇", active=True,
+                                                    command=lambda: self._switch_page("下载工坊"))
+        self.nav_items["我的书架"] = self._nav_item(nav, "我的书架", "▤",
+                                                    command=lambda: self._switch_page("我的书架"))
+        self.nav_items["下载记录"] = self._nav_item(nav, "下载记录", "↺",
+                                                    command=lambda: self._switch_page("下载记录"))
+        self.nav_items["统计分析"] = self._nav_item(nav, "统计分析", "▥",
+                                                    command=lambda: self._switch_page("统计分析"))
+        self.nav_items["划线清单"] = self._nav_item(nav, "划线清单", "≡",
+                                                    command=lambda: self._switch_page("划线清单"))
 
-        left = ctk.CTkFrame(body, fg_color=self.CARD, corner_radius=self.RADIUS,
-                            border_width=1, border_color=self.HAIRLINE, width=364)
-        left.pack(side="left", fill="y", padx=(0, 18))
-        left.pack_propagate(False)
+        ctk.CTkFrame(side, height=1, fg_color="#2A3646").pack(fill="x", padx=16, pady=8)
+        self.nav_items["设置"] = self._nav_item(nav, "设置", "⚙",
+                                                command=lambda: self._switch_page("设置"))
 
-        self._section(left, "I", "搜索书籍", padx=20, pady=18)
-        search_row = ctk.CTkFrame(left, fg_color=self.CARD)
-        search_row.pack(fill="x", padx=20, pady=(16, 0))
+        # ---- right side: top bar + content ------------------------------
+        main = ctk.CTkFrame(shell, fg_color=self.BG, corner_radius=0)
+        main.pack(side="left", fill="both", expand=True)
+
+        topbar = ctk.CTkFrame(main, height=52, corner_radius=0, fg_color=self.CARD)
+        topbar.pack(fill="x")
+        topbar.pack_propagate(False)
+        # The global search lives in the top bar, as in the reference design;
+        # it drives the same search() the old panel input did.
         self.search_entry = ctk.CTkEntry(
-            search_row, placeholder_text="输入书名或关键词", height=38,
-            corner_radius=8, fg_color=self.SUNKEN, border_color=self.HAIRLINE,
+            topbar, placeholder_text="搜索书名、作者或关键词…", height=34,
+            corner_radius=6, fg_color=self.SUNKEN, border_color="#DDE1E6",
             text_color=self.INK, font=_font(13))
-        self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.search_entry.pack(side="left", fill="x", expand=True,
+                               padx=(24, 8), pady=(0, 0), ipadx=0)
         self.search_entry.bind("<Return>", lambda _event: self.search())
         self.search_button = ctk.CTkButton(
-            search_row, text="搜索", width=68, height=38, command=self.search,
-            corner_radius=8, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            topbar, text="搜索", width=60, height=34, command=self.search,
+            corner_radius=6, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
             text_color="#FFFFFF", font=_font(13))
-        self.search_button.pack(side="right")
-        self.result_count = ctk.CTkLabel(left, text="搜索结果会显示在这里", text_color=self.FAINT,
-                                         font=_font(12))
-        self.result_count.pack(anchor="w", padx=20, pady=(12, 6))
+        self.search_button.pack(side="left", pady=(0, 0))
+
+        self.auth_badge = ctk.CTkLabel(topbar, text="尚未检查", text_color=self.MUTED,
+                                       fg_color=self.SUNKEN, corner_radius=6,
+                                       padx=10, pady=5, font=_font(12))
+        self.auth_badge.pack(side="right", padx=(0, 24))
+        self.refresh_button = self._quiet_button(topbar, "刷新", 70, self.check_auth)
+        self.refresh_button.configure(height=32)
+        self.refresh_button.pack(side="right", padx=(0, 10))
+        self.login_button = ctk.CTkButton(
+            topbar, text="登录 / 切换账号", width=136, height=34,
+            corner_radius=6, fg_color=self.ACCENT,
+            hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
+            font=_font(13), command=self.open_login)
+        self.login_button.pack(side="right")
+
+        # ---- page container ----------------------------------------------
+        # Every sidebar entry owns one page frame stacked in page_host. The
+        # download workshop's content is built directly into its frame below;
+        # the other five are created on demand by _create_page().
+        self.pages = {}
+        self._current_page = "下载工坊"
+
+        self.page_host = ctk.CTkFrame(main, fg_color=self.BG, corner_radius=0)
+        self.page_host.pack(fill="both", expand=True, padx=24, pady=(10, 10))
+
+        page = ctk.CTkFrame(self.page_host, fg_color=self.BG, corner_radius=0)
+        page.pack(fill="both", expand=True)
+        self.pages["下载工坊"] = page
+
+        head_row = ctk.CTkFrame(page, fg_color="transparent")
+        head_row.pack(fill="x")
+        ctk.CTkLabel(head_row, text="下载工坊", text_color=self.INK,
+                     font=_font(18, "bold")).pack(side="left")
+        self.result_count = ctk.CTkLabel(head_row, text="搜索结果会显示在这里",
+                                         text_color=self.FAINT, font=_font(12))
+        self.result_count.pack(side="left", padx=(16, 0), pady=(4, 0))
+
+        # ---- stat cards ---------------------------------------------------
+        stats = ctk.CTkFrame(page, fg_color="transparent", height=70)
+        stats.pack(fill="x", pady=(10, 0))
+        stats.pack_propagate(False)
+        self._stats["books"] = self._stat_card(stats, "已导出书籍", "—", self.GREEN)
+        self._stats["marks"] = self._stat_card(stats, "累计划线", "—", self.AMBER)
+        self._stats["active"] = self._stat_card(stats, "下载中", "0", self.GREEN)
+
+        # ---- main grid: results card + detail card -----------------------
+        self.body = ctk.CTkFrame(page, fg_color="transparent")
+        self.body.pack(fill="both", expand=True, pady=(10, 0))
+        self.body.grid_columnconfigure(0, weight=0)
+        self.body.grid_columnconfigure(1, weight=1)
+        self.body.grid_rowconfigure(0, weight=1)
+
+        left = ctk.CTkFrame(self.body, fg_color=self.CARD, corner_radius=self.RADIUS,
+                            border_width=1, border_color=self.HAIRLINE, width=380)
+        left.grid(row=0, column=0, sticky="nsw", padx=(0, 14))
+        left.pack_propagate(False)
+        self._section(left, "①", "搜索结果", padx=18, pady=10)
         self.results = ctk.CTkScrollableFrame(
             left, fg_color=self.CARD, corner_radius=0,
             scrollbar_button_color=self.HAIRLINE, scrollbar_button_hover_color=self.ACCENT_TINT)
-        self.results.pack(fill="both", expand=True, padx=(12, 8), pady=(0, 14))
+        self.results.pack(fill="both", expand=True, padx=(10, 6), pady=(0, 4))
 
         # Results are paged rather than all built at once. Repainting a
         # CTkScrollableFrame is synchronous and its cost grows with the number
@@ -439,7 +1253,7 @@ class DesktopApp:
         # thread, and a second search adds ~1 s destroying the old cards --
         # together enough for Windows to declare the window unresponsive.
         self.page_bar = ctk.CTkFrame(left, fg_color="transparent")
-        self.page_bar.pack(side="bottom", fill="x", padx=20, pady=(0, 10))
+        self.page_bar.pack(side="bottom", fill="x", padx=18, pady=(0, 10))
         self.prev_button = self._quiet_button(
             self.page_bar, "上一页", 84, lambda: self._turn_page(-1))
         self.prev_button.pack(side="left")
@@ -451,13 +1265,13 @@ class DesktopApp:
         self.next_button.pack(side="left")
         self._set_page_buttons(0, 0)
 
-        right = ctk.CTkFrame(body, fg_color=self.CARD, corner_radius=self.RADIUS,
+        right = ctk.CTkFrame(self.body, fg_color=self.CARD, corner_radius=self.RADIUS,
                              border_width=1, border_color=self.HAIRLINE)
-        right.pack(side="left", fill="both", expand=True)
+        right.grid(row=0, column=1, sticky="nsew")
 
-        self._section(right, "II", "确认书籍", padx=22, pady=18)
+        self._section(right, "②", "确认书籍", padx=20, pady=10)
         info_row = ctk.CTkFrame(right, fg_color=self.CARD)
-        info_row.pack(fill="x", padx=22, pady=(8, 0))
+        info_row.pack(fill="x", padx=20, pady=(2, 0))
         self.cover = ctk.CTkLabel(info_row, text="封面",
                                   width=self.DETAIL_COVER_W, height=self.DETAIL_COVER_H,
                                   fg_color=self.SUNKEN, corner_radius=6,
@@ -470,7 +1284,7 @@ class DesktopApp:
         # which is what hands the space to the introduction.
         self.book_title_label = ctk.CTkLabel(
             meta, text="先从左侧搜索并点击一本书", text_color=self.INK, height=1,
-            font=_font(18, "bold", SERIF), justify="left", anchor="w", wraplength=540)
+            font=_font(18, "bold"), justify="left", anchor="w", wraplength=540)
         self.book_title_label.pack(fill="x", anchor="w", pady=(0, 4))
         # Author and category share a line, rating and id share the next one:
         # the introduction needs the height more than a five-line metadata
@@ -488,9 +1302,9 @@ class DesktopApp:
                                      font=_font(11, "normal", MONO), anchor="w")
         self.id_label.pack(fill="x", pady=(1, 0))
 
-        ctk.CTkFrame(right, height=1, fg_color=self.HAIRLINE_SOFT).pack(fill="x", padx=22, pady=(9, 0))
-        ctk.CTkLabel(right, text="简介", text_color=self.MUTED, height=1,
-                     font=_font(12)).pack(anchor="w", padx=22, pady=(6, 2))
+        ctk.CTkFrame(right, height=1, fg_color=self.HAIRLINE_SOFT).pack(fill="x", padx=20, pady=(9, 0))
+        ctk.CTkLabel(right, text="简介", text_color=self.FAINT, height=1,
+                     font=_font(12)).pack(anchor="w", padx=20, pady=(6, 2))
         # The introduction is the one part of this column worth real estate, so
         # it expands into whatever the fixed rows leave over. The requested
         # height is deliberately small: pack hands the slack to an expanding
@@ -500,59 +1314,74 @@ class DesktopApp:
             right, height=90, fg_color=self.SUNKEN, corner_radius=8,
             border_width=1, border_color=self.HAIRLINE,
             wrap="word", text_color=self.MUTED, font=_font(13))
-        self.intro.pack(fill="both", expand=True, padx=22, pady=(0, 0))
+        self.intro.pack(fill="both", expand=True, padx=20, pady=(0, 0))
         self.intro.insert("1.0", "点击左侧搜索结果后，这里会显示简介和书籍详情。")
         self.intro.configure(state="disabled")
 
-        # ---- III download, on a sunken panel so it reads as the action zone
-        export = ctk.CTkFrame(right, fg_color=self.SUNKEN, corner_radius=self.RADIUS,
+        # ---- III download: its own card, as in the reference design ------
+        # The right column keeps book identity + intro; the action zone moves
+        # below both columns so it spans the full width, exactly like the
+        # reference's bottom "③ 下载到电脑" panel.
+        export = ctk.CTkFrame(page, fg_color=self.CARD, corner_radius=self.RADIUS,
                               border_width=1, border_color=self.HAIRLINE)
-        export.pack(fill="x", padx=22, pady=(8, 0))
-        export.grid_columnconfigure(0, weight=1)
-        export.grid_columnconfigure(1, weight=1)
-        self._section(export, "III", "下载到电脑",
-                      grid_at={"row": 0, "column": 0, "sticky": "w",
-                               "padx": 18, "pady": (12, 0)})
+        export.pack(fill="x", pady=(10, 0))
+        export.grid_columnconfigure(0, weight=0)
+        self._section(export, "③", "下载到电脑",
+                      grid_at={"row": 0, "column": 0, "columnspan": 4, "sticky": "w",
+                               "padx": 18, "pady": (8, 0)})
         # 并发 rides on the section row instead of taking a row of its own, so
         # the introduction keeps the vertical space.
         ctk.CTkLabel(export, text="并发", text_color=self.FAINT,
                      font=_font(12)).grid(row=0, column=1, sticky="e",
-                                          padx=(0, 18), pady=(12, 0))
+                                          padx=(0, 6), pady=(12, 0))
         self.jobs_box = ctk.CTkComboBox(
-            export, values=["1", "2", "3", "4"], width=56, height=26,
-            corner_radius=8, fg_color=self.CARD, border_color=self.HAIRLINE,
+            export, values=["1", "2", "3", "4"], width=56, height=28,
+            corner_radius=6, fg_color=self.CARD, border_color="#D5D9DF",
             text_color=self.INK, font=_font(12), dropdown_fg_color=self.CARD,
             dropdown_text_color=self.INK, button_color=self.HAIRLINE,
-            button_hover_color=self.ACCENT_TINT, variable=self.jobs, state="readonly")
-        self.jobs_box.grid(row=0, column=2, sticky="e", padx=(6, 18), pady=(12, 0))
+            button_hover_color=self.SUNKEN, variable=self.jobs, state="readonly")
+        self.jobs_box.grid(row=0, column=2, sticky="e", padx=(0, 6), pady=(12, 0))
         self._make_combo_keyboard_reachable(self.jobs_box)
-        export.grid_columnconfigure(2, weight=0)
+        # 想法 is its own switch next to 并发: it changes how long an export takes
+        # far more than 并发 does, on the heavily annotated books that need it least.
+        self.thoughts_var = ctk.BooleanVar(value=False)
+        self.thoughts_box = ctk.CTkSwitch(
+            export, text="含想法", variable=self.thoughts_var, width=44,
+            height=22, corner_radius=11, progress_color=self.ACCENT,
+            button_color=self.CARD, button_hover_color=self.CARD,
+            text_color=self.FAINT, font=_font(12), fg_color=self.HAIRLINE)
+        self.thoughts_box.grid(row=0, column=3, sticky="w", padx=(0, 10), pady=(12, 0))
+        self.thoughts_box.configure(state="disabled")
         self.probe_button = ctk.CTkButton(
             export, text="先检查第一章", command=self.probe, height=36,
-            corner_radius=8, fg_color=self.CARD, hover_color=self.ACCENT_TINT,
-            border_width=1, border_color=self.HAIRLINE,
-            text_color=self.ACCENT_ON_TINT, font=_font(13))
-        self.probe_button.grid(row=1, column=0, padx=(18, 6), pady=(8, 12), sticky="ew")
+            corner_radius=6, fg_color=self.CARD, hover_color=self.SUNKEN,
+            border_width=1, border_color="#D5D9DF",
+            text_color=self.MUTED, font=_font(13))
+        self.probe_button.grid(row=1, column=0, padx=(18, 6), pady=(6, 10), sticky="ew")
         self.export_button = ctk.CTkButton(
             export, text="开始下载 / 继续下载", height=36, command=self.export,
-            corner_radius=8, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            corner_radius=6, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
             text_color="#FFFFFF", font=_font(13))
-        self.export_button.grid(row=1, column=1, padx=(6, 18), pady=(8, 12), sticky="ew")
+        self.export_button.grid(row=1, column=1, columnspan=3, padx=(6, 18),
+                                pady=(6, 10), sticky="ew")
 
+        # progress + status live on the same card, below the buttons
         self.progress = ctk.CTkProgressBar(
-            right, height=6, corner_radius=3, progress_color=self.ACCENT,
+            export, height=6, corner_radius=3, progress_color=self.ACCENT,
             fg_color=self.HAIRLINE_SOFT)
-        self.progress.pack(fill="x", padx=22, pady=(8, 4))
+        self.progress.grid(row=2, column=0, columnspan=4, sticky="ew",
+                           padx=18, pady=(0, 6))
         self.progress.set(0)
         self.status_label = ctk.CTkLabel(
-            right, textvariable=self.status, text_color=self.MUTED, height=1,
-            font=_font(12), justify="left", anchor="w", wraplength=640)
-        self.status_label.pack(fill="x", padx=22, pady=(0, 4))
+            export, textvariable=self.status, text_color=self.MUTED, height=1,
+            font=_font(12), justify="left", anchor="w")
+        self.status_label.grid(row=3, column=0, columnspan=4, sticky="w",
+                               padx=18, pady=(0, 6))
 
-        task_row = ctk.CTkFrame(right, fg_color=self.CARD)
-        task_row.pack(fill="x", padx=22, pady=(0, 14))
+        task_row = ctk.CTkFrame(export, fg_color="transparent")
+        task_row.grid(row=4, column=0, columnspan=4, sticky="ew", padx=18, pady=(0, 10))
         self.pause_button = ctk.CTkButton(
-            task_row, text="暂停下载", width=104, height=32, corner_radius=8,
+            task_row, text="暂停下载", width=104, height=32, corner_radius=6,
             fg_color=self.RED_TINT, hover_color="#F6DEDE", text_color=self.RED,
             font=_font(12), command=self.stop, state="disabled")
         self.pause_button.pack(side="left")
@@ -643,6 +1472,10 @@ class DesktopApp:
         self._log_buffer.clear()
 
     def _is_busy(self) -> bool:
+        # A spawn in flight counts as busy: the user cannot start a second
+        # worker while the first is still being created off-thread.
+        if self._spawn_pending:
+            return True
         return self.process is not None and self.process.poll() is None
 
     def _start_worker(self, args: list[str], action: str, status: str) -> bool:
@@ -659,39 +1492,72 @@ class DesktopApp:
             return False
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
-        # Time the spawn. This runs on the Tk thread inside a button callback,
-        # so anything slow here freezes the window outright, and the stall log
-        # reports blocked=0ms because the wait is not inside _drain_events. The
-        # first launch of the frozen worker is the suspect: Windows Defender
-        # scans a 13 MB exe plus its whole bundled plugin tree, which is
-        # measured rather than assumed.
-        spawn_started = time.perf_counter()
-        try:
-            self.process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
-                cwd=str(Path(command[0]).parent),
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except OSError as exc:
-            self._persist_log(f"[WORKER_START_ERROR] {type(exc).__name__}: {exc}")
-            self._ask("showerror", "无法启动", "程序没能启动下载组件。\n\n请重新解压程序后重试。")
-            return False
-        spawn_ms = (time.perf_counter() - spawn_started) * 1000.0
-        if spawn_ms > 500:
-            self._persist_log(
-                "[SPAWN] worker %s took %.0f ms to start; the window was blocked "
-                "for that long" % (action, spawn_ms))
+        # The Popen itself runs OFF the Tk thread. MEASURED 2026-10-12: doing it
+        # on the Tk thread inside a button callback froze the window for 23-26 s
+        # ([SPAWN] ... the window was blocked for that long, five [STALL_STACK]
+        # samples all sitting in subprocess._execute_child), because Windows
+        # Defender scans a freshly deployed 13 MB exe plus a 3211-file plugin
+        # tree before letting the first launch through. Everything below that
+        # can block is state the user can see; the actual spawn cannot.
+        #
+        # While the spawn is in flight the app counts as busy, so a second
+        # click cannot race a second process. The widgets flip when the process
+        # actually exists, via the same event queue every worker line uses.
+        self._spawn_pending = True
+        self.current_action = action
+        self.status.set(status)
+        self._spawn_started = time.perf_counter()
+
+        def spawn():
+            spawn_started = time.perf_counter()
+            try:
+                process = subprocess.Popen(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
+                    cwd=str(Path(command[0]).parent),
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except OSError as exc:
+                self.events.put(("spawn-failed", (action, f"{type(exc).__name__}: {exc}")))
+                return
+            spawn_ms = (time.perf_counter() - spawn_started) * 1000.0
+            if spawn_ms > 500:
+                self._persist_log(
+                    "[SPAWN] worker %s took %.0f ms to start (spawned off the Tk "
+                    "thread; the window was never blocked)" % (action, spawn_ms))
+            self.events.put(("spawned", (action, process)))
+
+        threading.Thread(target=spawn, daemon=True).start()
+        return True
+
+    def _handle_spawned(self, action: str, process) -> None:
+        """Adopt a worker started off the Tk thread; runs on the Tk thread."""
+        if not self._spawn_pending:
+            # A newer action superseded this spawn; kill the orphan.
+            try:
+                process.kill()
+            except Exception:
+                pass
+            return
+        self._spawn_pending = False
+        self.process = process
         self.job_seq += 1
         job = self.job_seq
-        self.current_action = action
         self.last_failure = False
+        # A running worker already carries its own --no-thoughts decision, so
+        # flipping the switch now would silently not apply to this job.
+        self.thoughts_box.configure(state="disabled")
         self.last_unresolved = False
         self.omissions = None
-        self.status.set(status)
         self.pause_button.configure(state="normal" if action == "export" else "disabled")
         self.reader = threading.Thread(target=self._read_output, args=(self.process, job), daemon=True)
         self.reader.start()
-        return True
+
+    def _handle_spawn_failed(self, action: str, detail: str) -> None:
+        """The off-thread Popen raised; tell the user and unstick the widgets."""
+        self._spawn_pending = False
+        self.current_action = ""
+        self._persist_log(f"[WORKER_START_ERROR] {detail}")
+        self.status.set("任务没有启动。请查看技术日志后重试。")
 
     def _read_output(self, process, job: int):
         try:
@@ -860,8 +1726,14 @@ class DesktopApp:
                     self.cover.configure(text="封面暂不可用", image=None)
                 elif kind == "card-cover":
                     self._apply_card_cover(*value)
+                elif kind == "shelf-cover":
+                    self._apply_shelf_cover(*value)
                 elif kind == "login":
                     self._handle_login_event(*value)
+                elif kind == "spawned":
+                    self._handle_spawned(*value)
+                elif kind == "spawn-failed":
+                    self._handle_spawn_failed(*value)
                 elif kind == "done":
                     self._handle_done(*value)
                 else:
@@ -899,6 +1771,31 @@ class DesktopApp:
         except Exception:
             label.configure(text="暂无封面", image=None)
 
+    def _parse_shelf(self, value: str):
+        """`SHELF\\t{json}` -> list of book dicts, or None when unusable."""
+        payload = value.split("\t", 1)[1].strip() if "\t" in value else ""
+        if not payload:
+            return []
+        try:
+            rows = json.loads(payload)
+        except (ValueError, TypeError):
+            return None
+        return rows if isinstance(rows, list) else None
+
+    def _apply_shelf_cover(self, label, image):
+        """Put a fetched cover onto a shelf row; failures keep the placeholder."""
+        try:
+            if not label.winfo_exists():
+                return
+            if image is None:
+                label.configure(text="")
+                return
+            photo = ctk.CTkImage(light_image=image, dark_image=image, size=(36, 48))
+            self._image_refs.append(photo)
+            label.configure(text="", image=photo)
+        except Exception:
+            pass
+
     def _handle_line(self, value: str):
         info = parse_book_info_message(value)
         if info is not None:
@@ -911,6 +1808,14 @@ class DesktopApp:
         if value.startswith("BOOK_INFO"):
             self._persist_log("[BOOK_INFO_PARSE_ERROR] " + value[:200])
             self.status.set("书籍详情暂时读不到；仍可以继续检查或下载。")
+            return
+        if value.startswith("SHELF\t"):
+            rows = self._parse_shelf(value)
+            if rows is None:
+                self._persist_log("[SHELF_PARSE_ERROR] " + value[:200])
+                self.status.set("书架数据读不到，请重试或检查登录状态。")
+            else:
+                self._show_shelf(rows)
             return
         meta = parse_search_meta(value)
         if meta is not None:
@@ -991,6 +1896,7 @@ class DesktopApp:
         self.process = None
         self.current_action = ""
         self.pause_button.configure(state="disabled")
+        self.thoughts_box.configure(state="normal")
         try:
             if self.last_failure:
                 self._finish_failed_action(action)
@@ -1179,29 +2085,36 @@ class DesktopApp:
         bid = str(item.get("bookId") or "")
         if not bid:
             return
-        card = ctk.CTkFrame(self.results, fg_color=self.CARD, corner_radius=self.RADIUS,
-                            border_width=1, border_color=self.HAIRLINE)
-        card.pack(fill="x", padx=3, pady=4)
-        inner = ctk.CTkFrame(card, fg_color=self.CARD)
-        inner.pack(fill="x", padx=12, pady=12)
+        # Row style, as in the reference design's list panel: a full-width row
+        # separated by hairlines, cover left, text middle, rating right, and a
+        # 3px green bar plus green wash marking the selected row.
+        selected = bid == self.selected_id
+        card = ctk.CTkFrame(self.results, fg_color=self.GREEN_TINT if selected else self.CARD,
+                            corner_radius=0, border_width=0)
+        card.pack(fill="x", padx=2, pady=0)
+        bar = ctk.CTkFrame(card, width=3, corner_radius=0,
+                           fg_color=self.ACCENT if selected else "transparent")
+        bar.pack(side="left", fill="y")
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="x", padx=(2, 10), pady=10)
         cover = ctk.CTkLabel(inner, text="封面\n加载中", width=self.COVER_W, height=self.COVER_H,
-                             fg_color=self.SUNKEN, corner_radius=6, text_color=self.FAINT,
+                             fg_color=self.SUNKEN, corner_radius=4, text_color=self.FAINT,
                              font=_font(10), justify="center")
         cover.pack(side="left", anchor="n", padx=(0, 12))
-        text_col = ctk.CTkFrame(inner, fg_color=self.CARD)
+        text_col = ctk.CTkFrame(inner, fg_color="transparent")
         text_col.pack(side="left", fill="both", expand=True)
         title = str(item.get("title") or "").strip() or "未命名书籍"
         author = str(item.get("author") or "").strip() or "作者未知"
         category = str(item.get("category") or "").strip()
         ctk.CTkLabel(text_col, text=title, text_color=self.INK, anchor="w", justify="left",
-                     font=_font(14, "bold", SERIF), wraplength=238
+                     font=_font(13, "bold"), wraplength=240
                      ).pack(fill="x", anchor="w")
-        ctk.CTkLabel(text_col, text=f"作者：{author}", text_color=self.MUTED, anchor="w",
-                     font=_font(12)).pack(fill="x", anchor="w", pady=(4, 0))
+        ctk.CTkLabel(text_col, text=author, text_color=self.MUTED, anchor="w",
+                     font=_font(11)).pack(fill="x", anchor="w", pady=(3, 0))
         category_label = ctk.CTkLabel(text_col,
-                                      text=f"分类：{category}" if category else "分类加载中…",
+                                      text=category if category else "分类加载中…",
                                       text_color=self.FAINT, anchor="w",
-                                      font=_font(12))
+                                      font=_font(11))
         category_label.pack(fill="x", anchor="w", pady=(2, 0))
         raw_rating = item.get("newRating")
         try:
@@ -1210,7 +2123,7 @@ class DesktopApp:
             rated = False
         ctk.CTkLabel(text_col,
                      text=card_rating_text(raw_rating, item.get("newRatingCount")),
-                     text_color=self.AMBER if rated else self.FAINT, anchor="w", font=_font(12)
+                     text_color=self.AMBER if rated else self.FAINT, anchor="w", font=_font(11)
                      ).pack(fill="x", anchor="w", pady=(3, 0))
 
         def choose(_event=None, selected=dict(item)):
@@ -1218,10 +2131,9 @@ class DesktopApp:
 
         for widget in (card, inner, cover, text_col, *text_col.winfo_children()):
             widget.bind("<Button-1>", choose)
-        card.bind("<Enter>", lambda _e, w=card: w.configure(
-            fg_color=self.ACCENT_TINT, border_color=self.ACCENT))
-        card.bind("<Leave>", lambda _e, w=card: w.configure(
-            fg_color=self.CARD, border_color=self.HAIRLINE))
+        if not selected:
+            card.bind("<Enter>", lambda _e, w=card: w.configure(fg_color=self.SUNKEN))
+            card.bind("<Leave>", lambda _e, w=card: w.configure(fg_color=self.CARD))
 
         self.card_widgets[bid] = {"frame": card, "cover": cover, "category": category_label,
                                   "image": None}
@@ -1291,6 +2203,10 @@ class DesktopApp:
         self.selected_author = str(item.get("author", ""))
         self.book_info = dict(item)
         self.info_loaded = False
+        # Repaint the page so the selected row carries the reference design's
+        # green bar and wash. Only rows on the current page exist as widgets;
+        # _render_page rebuilds exactly those, cheaply.
+        self._render_page()
         self.book_title_label.configure(text=self.selected_title or "暂无书名")
         self.author_label.configure(text=f"作者：{self.selected_author or '暂无信息'}")
         self.id_label.configure(text=f"书籍 ID：{self.selected_id or '暂无信息'}")
@@ -1432,7 +2348,7 @@ class DesktopApp:
         self.login_dialog = dialog
 
         ctk.CTkLabel(dialog, text="登录微信读书", text_color=self.INK,
-                     font=_font(22, "bold", SERIF)).pack(anchor="w", padx=26, pady=(22, 4))
+                     font=_font(22, "bold")).pack(anchor="w", padx=26, pady=(22, 4))
         ctk.CTkLabel(dialog, text="扫码后凭证只保存在本机，不进入日志或安装包。",
                      text_color=self.MUTED, font=_font(12)).pack(anchor="w", padx=26)
         ctk.CTkFrame(dialog, height=1, fg_color=self.HAIRLINE).pack(fill="x", padx=26, pady=(16, 0))
@@ -1500,7 +2416,7 @@ class DesktopApp:
         # white block, because the window is sized for the taller QR tab.
         manual_box.pack(fill="x", padx=0, pady=(12, 0))
         ctk.CTkLabel(manual_box, text="API Key（必填）", text_color=self.INK, anchor="w",
-                     font=_font(14, "bold", SERIF)).pack(anchor="w", padx=20, pady=(18, 4))
+                     font=_font(14, "bold")).pack(anchor="w", padx=20, pady=(18, 4))
         ctk.CTkLabel(manual_box, text="在 weread.qq.com/r/weread-skills 登录后复制，格式为 wrk- 开头。",
                      text_color=self.MUTED, anchor="w", font=_font(11),
                      wraplength=460).pack(anchor="w", padx=20)
@@ -1511,7 +2427,7 @@ class DesktopApp:
         self.manual_api_key.pack(fill="x", padx=20, pady=(8, 16))
 
         ctk.CTkLabel(manual_box, text="wr_skey（必填）", text_color=self.INK, anchor="w",
-                     font=_font(14, "bold", SERIF)).pack(anchor="w", padx=20)
+                     font=_font(14, "bold")).pack(anchor="w", padx=20)
         ctk.CTkLabel(manual_box, text="微信读书网页版会话 cookie。没有它可以搜书和看详情，但无法下载章节正文。",
                      text_color=self.MUTED, anchor="w", font=_font(11),
                      wraplength=460).pack(anchor="w", padx=20)
@@ -1749,8 +2665,13 @@ class DesktopApp:
         if self._is_busy():
             self.status.set("当前有任务正在运行，等它结束再检查第一章。")
             return
-        self._start_worker(["--probe-book", self.selected_id], "probe",
-                           "正在检查这本书的第一章、划线和想法…")
+        args = ["--probe-book", self.selected_id]
+        want_thoughts = bool(self.thoughts_var.get())
+        if not want_thoughts:
+            args.append("--no-thoughts")
+        self._start_worker(args, "probe",
+                           "正在检查这本书的第一章、划线"
+                           + ("和想法…" if want_thoughts else "…（已跳过想法）"))
 
     def export(self):
         if not self.selected_id:
@@ -1759,15 +2680,20 @@ class DesktopApp:
         if self._is_busy():
             self.status.set("当前有任务正在运行，等它结束再开始下载。")
             return
-        if not self._ask("askyesno", 
+        want_thoughts = bool(self.thoughts_var.get())
+        if not self._ask("askyesno",
                 "开始下载",
                 f"准备下载：{self.selected_title}\n作者：{self.selected_author or '暂无信息'}\n\n"
+                f"想法（笔记正文）：{'包含' if want_thoughts else '跳过——划线仍会全部保留'}\n\n"
                 "已有章节会自动续传。若微信读书返回空章节或无法确认的划线，会记录问题并继续检查其它章节；"
                 "有未解决章节时不会生成不完整 EPUB。继续吗？"):
             return
         self.progress.set(0)
         jobs = max(1, min(4, int(self.jobs.get())))
-        if not self._start_worker([self.selected_id, "--jobs", str(jobs)], "export",
+        args = [self.selected_id, "--jobs", str(jobs)]
+        if not want_thoughts:
+            args.append("--no-thoughts")
+        if not self._start_worker(args, "export",
                                   "正在准备下载并检查本地断点…"):
             self.status.set("下载没有启动。请检查程序目录后重试。")
 
@@ -1834,6 +2760,8 @@ class DesktopApp:
         self.logout_button.configure(state="normal" if ready else "disabled")
 
 
+
+
 def main() -> int:
     if FROZEN and len(sys.argv) > 1:
         raise SystemExit("The GUI executable does not accept worker commands.")
@@ -1846,7 +2774,3 @@ def main() -> int:
     DesktopApp(root)
     root.mainloop()
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
