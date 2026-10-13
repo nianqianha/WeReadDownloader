@@ -70,7 +70,7 @@ from weread_core import (  # noqa: E402
 # The English name lives where it belongs: the process, the install directory
 # (WeReadDownloader) and the installer (AppName), all of which read the same
 # constant so they cannot drift apart.
-APP_TITLE = "微信读书 · 电脑端下载助手"
+APP_TITLE = "WeReadDownloader"
 PRODUCT_NAME = "WeReadDownloader"
 SINGLE_INSTANCE_KEY = "WeReadDownloader-Graphics"
 
@@ -1143,7 +1143,7 @@ class DesktopApp:
                             fg_color=self.ACCENT, text_color="#FFFFFF",
                             font=_font(12, "bold"))
         logo.pack(side="left")
-        ctk.CTkLabel(brand, text="微信读书下载", text_color=self.SIDE_TXT_HI,
+        ctk.CTkLabel(brand, text=APP_TITLE, text_color=self.SIDE_TXT_HI,
                      font=_font(13, "bold"), anchor="w").pack(side="left", padx=(10, 0))
 
         ctk.CTkFrame(side, height=1, fg_color="#2A3646").pack(fill="x", padx=16, pady=(4, 8))
