@@ -17,6 +17,17 @@ __pycache__/
 Thumbs.db
 desktop.ini
 
+# The icon SOURCES are third-party artwork and must never be published. The
+# derived .ico files are tracked; the JPEGs they were built from are not.
+assets/icon-sources/
+
+# Never publish anything that could carry a session, even by accident.
+weread-live-settings.lua
+session-cookies.json
+credentials.json
+*.pfx
+*.p12
+
 # NOTE: these ARE tracked on purpose:
 #   *.spec / installer\*.iss / installer\*.isl  - reproducible build + installer definition
 #   assets\ (icons) / design\ (reference captures + NOTES.md)

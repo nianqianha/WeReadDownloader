@@ -63,6 +63,9 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
+    # Same reason as the GUI spec: without this the exe shows PyInstaller's
+    # default icon in Explorer, on the taskbar and in the title bar.
+    icon=FAVICON,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
