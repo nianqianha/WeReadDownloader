@@ -306,7 +306,8 @@ def _restrict_to_current_user(path: Path) -> None:
     """
     try:
         if os.name == "nt":
-            user = subprocess.check_output(["whoami"], text=True).strip()
+            # Use explicit encoding to avoid UnicodeDecodeError on Chinese Windows
+            user = subprocess.check_output(["whoami"], encoding="utf-8", errors="replace").strip()
             subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", user + ":F"],
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
