@@ -1,15 +1,16 @@
 ﻿; ============================================================================
-;  微信读书电脑端下载器 —— Inno Setup 6 安装脚本
+;  WeReadDownloader —— Inno Setup 6 安装脚本
 ;
 ;  设计要点：
-;   * 安装后的目录结构让两个版本共用同一份下载组件。worker_command() 的
-;     查找顺序里第二条是「exe 同级目录/../WeReadWorker/」，因此把两个 exe
-;     分别放在 WeReadDesktop\ 与 WeReadWeb\，worker 放在它们共同的父级：
+;   * 网页版暂时封存，不再进安装包。源码（weread_web.py / webui.html /
+;     packaging/WeReadWeb.spec）留在仓库里，想装回去把 [Files] 的 web 段、
+;     [Icons]、[Run] 恢复并加回 web 组件即可。
+;   * 现在只有一个 exe，因此只有一个安装类型和一个快捷方式，都叫
+;     WeReadDownloader。以前叫「图形版（二维码登录）」，那是实现细节——界面上
+;     只有一个程序，两个名字只会让人以为是两个软件。
+;   * 安装后的目录结构让 exe 找到 worker。worker_command() 的查找顺序里第二条
+;     是「exe 同级目录/../WeReadWorker/」，所以 worker 放在 exe 的父级：
 ;         {app}\WeReadDesktop\WeReadDesktop.exe   ->  {app}\WeReadWorker\
-;         {app}\WeReadWeb\WeReadDesktop.exe       ->  {app}\WeReadWorker\
-;     这样只装一份 133 MB 的 worker，而不是两份 266 MB。
-;   * 版本由用户在安装时勾选（[Components]），worker 是 fixed 组件，
-;     选中任一版本都会自动带上。
 ;   * 桌面快捷方式默认勾选（[Tasks] 的 checkedonce）。
 ;   * 安装完成页提供「立即启动」勾选框（[Run] 的 postinstall）。
 ;
@@ -17,7 +18,7 @@
 ;     "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" installer\WeReadDesktop.iss
 ; ============================================================================
 
-#define MyAppName "微信读书电脑端下载器"
+#define MyAppName "WeReadDownloader"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "Kindle 桌面端项目"
 
@@ -67,39 +68,28 @@ VersionInfoProductVersion={#MyAppVersion}
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 
-; 注意：[Types] 的名字故意不叫 graphics/web —— 它们若与 [Components] 的组件
-; 同名，Inno Setup 在解析 /COMPONENTS 过滤与组件选择时会歧义，导致未选中的
-; 组件也被安装（已实测踩过：只选 graphics 仍装上了 web 的 56 个文件）。
+; 网页版暂时封存：源码（weread_web.py / webui.html / packaging/WeReadWeb.spec）
+; 都留在仓库里，随时可以装回去，但不再进安装包，也不再出现在类型页/组件页/开始
+; 菜单/桌面上。删掉的是分发入口，不是代码。
 ;
-; 用「安装类型」页而不是「组件勾选」页。原因是 [Components] 没有"默认勾选"这个
-; flag（只支持 fixed/exclusive/dontinheritcheckboxes 等），custom 类型下实测三个
-; 组件全是未勾选（BM_GETCHECK 读清单框确认），装出来是空壳。类型页则完全确定：
-; 默认 full 装齐两版，用户想只要一个就选 onlygraphics / onlyweb。
+; 只剩一个安装类型：没有"选哪个"的余地，也就不会再出现"以为装了 A 其实装了 B"。
 [Types]
-Name: "full"; Description: "完整安装（图形版 + 网页版）"
-Name: "onlygraphics"; Description: "仅图形版（二维码登录）"
-Name: "onlyweb"; Description: "仅网页版（0.6s 启动）"
+Name: "full"; Description: "完整安装"
 
 [Components]
-Name: "graphics"; Description: "图形版（二维码登录，桌面窗口程序）"; Types: full onlygraphics
-Name: "web"; Description: "网页版（0.6s 启动，本地服务 + 浏览器）"; Types: full onlyweb
-Name: "worker"; Description: "下载组件（两个版本共用，必选）"; Types: full onlygraphics onlyweb; Flags: fixed
+Name: "graphics"; Description: "主程序（桌面窗口）"; Types: full
+Name: "worker"; Description: "下载组件（必选）"; Types: full; Flags: fixed
 
 ; checkedonce 是 [Tasks] 里唯一能表达「默认勾上」的 flag（checked 不是合法值）。
-; 至于它在清单框里是否真显示为勾选，由 installer-drive.py 的干净跑给出地面真相。
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"; Flags: checkedonce
 
 [Files]
-; 图形版（二维码登录）
+; 主程序
 Source: "..\release-qrlogin\WeReadDesktop\*"; DestDir: "{app}\WeReadDesktop"; \
     Components: graphics; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; 网页版（0.6s 启动）
-Source: "..\release-web\WeReadDesktop\*"; DestDir: "{app}\WeReadWeb"; \
-    Components: web; Flags: ignoreversion recursesubdirs createallsubdirs
-
-; 下载组件（两版共用，只装一份）
+; 下载组件
 Source: "..\release-qrlogin\WeReadWorker\*"; DestDir: "{app}\WeReadWorker"; \
     Components: worker; Flags: ignoreversion recursesubdirs createallsubdirs
 
@@ -108,32 +98,23 @@ Source: "..\release-qrlogin\WeReadWorker\*"; DestDir: "{app}\WeReadWorker"; \
 ; （已实测：IconLocation 存成 '..\assets\weread-app.ico,0'，该路径不存在）。
 Source: "..\assets\weread-app.ico"; DestDir: "{app}\assets"; \
     Components: graphics; Flags: ignoreversion
-Source: "..\assets\weread-web.ico"; DestDir: "{app}\assets"; \
-    Components: web; Flags: ignoreversion
 
 ; 快捷方式必须显式指定图标。不设 IconFilename 时会沿用 PyInstaller exe 内嵌的
-; 通用图标，桌面上会变成两个很难看的默认图标（已实测踩过：IconLocation 为 ",0"）。
-; 图形版用 weread-app.ico，网页版用 weread-web.ico，与桌面上原有的两个快捷方式一致。
+; 通用图标，桌面上会变成一个很难看的默认图标（已实测踩过：IconLocation 为 ",0"）。
+; 名字直接用 WeReadDownloader，不再叫「图形版（二维码登录）」——那是实现细节，
+; 界面上只有一个程序，两个名字只会让人以为是两个软件。
 [Icons]
-Name: "{group}\图形版（二维码登录）"; Filename: "{app}\WeReadDesktop\WeReadDesktop.exe"; \
+Name: "{group}\{#MyAppName}"; Filename: "{app}\WeReadDesktop\WeReadDesktop.exe"; \
     WorkingDir: "{app}\WeReadDesktop"; IconFilename: "{app}\assets\weread-app.ico"; Components: graphics
-Name: "{group}\网页版（0.6s 启动）"; Filename: "{app}\WeReadWeb\WeReadDesktop.exe"; \
-    WorkingDir: "{app}\WeReadWeb"; IconFilename: "{app}\assets\weread-web.ico"; Components: web
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 
-Name: "{autodesktop}\图形版（二维码登录）"; Filename: "{app}\WeReadDesktop\WeReadDesktop.exe"; \
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\WeReadDesktop\WeReadDesktop.exe"; \
     WorkingDir: "{app}\WeReadDesktop"; IconFilename: "{app}\assets\weread-app.ico"; \
     Tasks: desktopicon; Components: graphics
-Name: "{autodesktop}\网页版（0.6s 启动）"; Filename: "{app}\WeReadWeb\WeReadDesktop.exe"; \
-    WorkingDir: "{app}\WeReadWeb"; IconFilename: "{app}\assets\weread-web.ico"; \
-    Tasks: desktopicon; Components: web
 
 [Run]
-Filename: "{app}\WeReadDesktop\WeReadDesktop.exe"; Description: "立即启动图形版"; \
+Filename: "{app}\WeReadDesktop\WeReadDesktop.exe"; Description: "立即启动 {#MyAppName}"; \
     WorkingDir: "{app}\WeReadDesktop"; Components: graphics; \
-    Flags: nowait postinstall skipifsilent
-Filename: "{app}\WeReadWeb\WeReadDesktop.exe"; Description: "立即启动网页版"; \
-    WorkingDir: "{app}\WeReadWeb"; Components: web; \
     Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
