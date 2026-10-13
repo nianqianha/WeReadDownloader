@@ -21,6 +21,9 @@ desktop.ini
 # derived .ico files are tracked; the JPEGs they were built from are not.
 assets/icon-sources/
 
+# Design reference captures (UI screenshots) - tracked for reference only
+docs/design/*.png
+
 # Never publish anything that could carry a session, even by accident.
 weread-live-settings.lua
 session-cookies.json
