@@ -121,6 +121,39 @@ def test_no_placeholder_body_remains():
         assert stripped != "pass", "a bare `pass` body is the stub that shipped"
 
 
+@test
+def test_the_credential_path_comes_from_a_module_that_defines_it():
+    """The wizard must not import SETTINGS from desktop_app.
+
+    desktop_app has no module-level SETTINGS -- the only definitions are inside
+    logout(), one imported from weread_desktop and one a local fallback. Writing
+    'from desktop_app import SETTINGS' therefore raised ImportError at the moment
+    the wizard was needed, which is how the first attempt at this fix failed its
+    own runtime check. The authoritative definition is weread_desktop's.
+    """
+    source = (HERE / "first_run.py").read_text(encoding="utf-8")
+    assert "from desktop_app import SETTINGS" not in source, \
+        "desktop_app does not define SETTINGS; import it from weread_desktop"
+    assert "desktop_app import SETTINGS" not in source, \
+        "desktop_app does not define SETTINGS; import it from weread_desktop"
+
+    # And prove the claim rather than trusting the comment: load weread_desktop
+    # the way the program does and check the attribute exists.
+    import importlib.util as ilu
+    spec = ilu.spec_from_file_location("weread_desktop", HERE / "weread_desktop.py")
+    wd = ilu.module_from_spec(spec)
+    spec.loader.exec_module(wd)
+    assert hasattr(wd, "SETTINGS"), "weread_desktop must define SETTINGS"
+    assert str(wd.SETTINGS).endswith("weread-live-settings.lua"), wd.SETTINGS
+
+
+@test
+def test_the_settings_helper_resolves_without_a_package():
+    """_settings_path() must work when weread/ is on sys.path but not a package."""
+    path = first_run._settings_path()
+    assert str(path).endswith("weread-live-settings.lua"), path
+
+
 def main() -> int:
     failures = 0
     for fn in CASES:
