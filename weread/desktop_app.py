@@ -2789,6 +2789,17 @@ class DesktopApp:
         if self._is_busy():
             self.status.set("当前有任务在运行，请先暂停或等它结束再退出登录。")
             return
+
+        # Ask user whether to do a full cleanup (including weread-live-settings.lua)
+        if not self._ask("askyesno",
+                "退出登录",
+                "是否彻底清除所有本地凭证？\n\n"
+                "• 是：删除 session-cookies.json 和 weread-live-settings.lua\n"
+                "      下次启动需重新扫码 + 填 api_key/user_vid\n\n"
+                "• 否：仅删除 session-cookies.json（刷新重置）\n"
+                "      weread-live-settings.lua 保留，下次打开直接可用"):
+            return
+
         try:
             removed = weread_login.clear_credentials()
         except OSError as exc:
@@ -2800,18 +2811,66 @@ class DesktopApp:
             self._set_login_identity(None)
             self.logout_button.configure(state="disabled")
             return
+
+        # Also remove the base credentials file (weread-live-settings.lua)
+        try:
+            # Import SETTINGS here to avoid circular import issues in tests
+            from .weread_desktop import SETTINGS
+            if SETTINGS.is_file():
+                SETTINGS.unlink(missing_ok=True)
+                self._persist_log("[LOGOUT] weread-live-settings.lua removed")
+        except ImportError:
+            # Fallback for test environment where relative import fails
+            import sys
+            from pathlib import Path
+            SETTINGS = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "WeReadDesktop" / "weread-live-settings.lua"
+            if SETTINGS.is_file():
+                SETTINGS.unlink(missing_ok=True)
+                self._persist_log("[LOGOUT] weread-live-settings.lua removed")
+        except OSError as exc:
+            self._persist_log(f"[LOGOUT_ERROR] failed to remove SETTINGS: {exc}")
+
         self._set_login_identity(None)
         self.logout_button.configure(state="disabled")
-        self._persist_log("[LOGOUT] session-cookies.json removed by the user")
-        # No modal here on purpose: a dialog takes over the Tk main loop until
-        # it is clicked, which is precisely what a stuck "(未响应)" window is.
-        # The status bar carries the caveat, and the log keeps it in full.
-        self.status.set(
-            "已删除本机保存的登录凭证。需要注意：weread-live-settings.lua 里仍留着一份会话，"
-            "所以这更接近「刷新重置」而非彻底登出——若之后仍能直接下载，原因就在这里。")
-        self._persist_log(
-            "[LOGOUT] note: weread-live-settings.lua keeps its own session, so this is a "
-            "refresh reset rather than a full sign-out")
+        self._persist_log("[LOGOUT] session-cookies.json and weread-live-settings.lua removed by the user")
+        self.status.set("已彻底清除本地凭证。下次启动需重新配置 api_key/user_vid 并扫码登录。")
+        self._persist_log("[LOGOUT] full credential wipe completed by the user")
+
+        # Ask user whether to do a full cleanup (including weread-live-settings.lua)
+        if not self._ask("askyesno",
+                "退出登录",
+                "是否彻底清除所有本地凭证？\n\n"
+                "• 是：删除 session-cookies.json 和 weread-live-settings.lua\n"
+                "      下次启动需重新扫码 + 填 api_key/user_vid\n\n"
+                "• 否：仅删除 session-cookies.json（刷新重置）\n"
+                "      weread-live-settings.lua 保留，下次打开直接可用"):
+            return
+
+        try:
+            removed = weread_login.clear_credentials()
+        except OSError as exc:
+            self._persist_log(f"[LOGOUT_ERROR] {type(exc).__name__}: {exc}")
+            self.status.set(f"退出登录失败：{exc}")
+            return
+        if not removed:
+            self.status.set("本机没有已保存的登录会话，无需退出。")
+            self._set_login_identity(None)
+            self.logout_button.configure(state="disabled")
+            return
+
+        # Also remove the base credentials file (weread-live-settings.lua)
+        try:
+            if SETTINGS.is_file():
+                SETTINGS.unlink(missing_ok=True)
+                self._persist_log("[LOGOUT] weread-live-settings.lua removed")
+        except OSError as exc:
+            self._persist_log(f"[LOGOUT_ERROR] failed to remove SETTINGS: {exc}")
+
+        self._set_login_identity(None)
+        self.logout_button.configure(state="disabled")
+        self._persist_log("[LOGOUT] session-cookies.json and weread-live-settings.lua removed by the user")
+        self.status.set("已彻底清除本地凭证。下次启动需重新配置 api_key/user_vid 并扫码登录。")
+        self._persist_log("[LOGOUT] full credential wipe completed by the user")
 
     def _refresh_logout_button(self):
         """Only offer 退出登录 when there is actually something to log out of.
