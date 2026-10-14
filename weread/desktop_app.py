@@ -712,7 +712,14 @@ class DesktopApp:
         builder(self.page_host)
 
     def _page_scaffold(self, host, title: str):
-        """Shared chrome for the non-workshop pages: heading + one card."""
+        """Shared chrome for the non-workshop pages: heading + one card.
+
+        The card lives inside a scrollable frame. On a short window the page
+        content is taller than the viewport -- the download card's fields, the
+        statistics row, a long shelf -- and the bottom was simply cut off with
+        no way to reach it. Scrolling the page (not the card) is the fix; the
+        heading stays pinned because only the card area scrolls.
+        """
         page = ctk.CTkFrame(host, fg_color=self.BG, corner_radius=0)
         self.pages[title] = page
         head = ctk.CTkFrame(page, fg_color="transparent")
@@ -720,9 +727,16 @@ class DesktopApp:
         ctk.CTkLabel(head, text=title, text_color=self.INK,
                      font=_font(18, "bold")).pack(side="left")
         ctk.CTkFrame(page, height=1, fg_color=self.HAIRLINE).pack(fill="x", pady=(12, 0))
-        card = ctk.CTkFrame(page, fg_color=self.CARD, corner_radius=self.RADIUS,
+
+        scroll = ctk.CTkScrollableFrame(
+            page, fg_color=self.BG, corner_radius=0,
+            scrollbar_button_color=self.HAIRLINE,
+            scrollbar_button_hover_color=self.ACCENT_TINT)
+        scroll.pack(fill="both", expand=True, pady=(14, 0))
+
+        card = ctk.CTkFrame(scroll, fg_color=self.CARD, corner_radius=self.RADIUS,
                             border_width=1, border_color=self.HAIRLINE)
-        card.pack(fill="both", expand=True, pady=(14, 0))
+        card.pack(fill="x", expand=True)
         return page, card
 
     def _refresh_page(self, page_name: str):
@@ -1318,9 +1332,20 @@ class DesktopApp:
         self.page_host = ctk.CTkFrame(main, fg_color=self.BG, corner_radius=0)
         self.page_host.pack(fill="both", expand=True, padx=24, pady=(10, 10))
 
-        page = ctk.CTkFrame(self.page_host, fg_color=self.BG, corner_radius=0)
-        page.pack(fill="both", expand=True)
-        self.pages["下载工坊"] = page
+        # The workshop page scrolls as a whole. On a short window the download
+        # card (buttons, credential fields, status row) fell below the bottom
+        # edge with no way to reach it -- the user hit exactly that. Everything
+        # lives in a scrollable frame; the results list keeps its own inner
+        # scroll, and the body gets a fixed height so the outer scrollbar has
+        # something concrete to scroll past.
+        page_scroll = ctk.CTkScrollableFrame(
+            self.page_host, fg_color=self.BG, corner_radius=0,
+            scrollbar_button_color=self.HAIRLINE,
+            scrollbar_button_hover_color=self.ACCENT_TINT)
+        page_scroll.pack(fill="both", expand=True)
+        page = ctk.CTkFrame(page_scroll, fg_color=self.BG, corner_radius=0)
+        page.pack(fill="x", expand=True)
+        self.pages["下载工坊"] = page_scroll
 
         head_row = ctk.CTkFrame(page, fg_color="transparent")
         head_row.pack(fill="x")
@@ -1340,7 +1365,13 @@ class DesktopApp:
 
         # ---- main grid: results card + detail card -----------------------
         self.body = ctk.CTkFrame(page, fg_color="transparent")
-        self.body.pack(fill="both", expand=True, pady=(10, 0))
+        # Fixed height: inside a scrollable page the body cannot "expand" to
+        # fill the viewport (the page is as tall as its content), so a concrete
+        # height is what gives the outer scrollbar something to scroll past.
+        # 420 px fits the result/detail cards with room for covers.
+        self.body.pack(fill="x", pady=(10, 0))
+        self.body.configure(height=420)
+        self.body.pack_propagate(False)
         self.body.grid_columnconfigure(0, weight=0)
         self.body.grid_columnconfigure(1, weight=1)
         self.body.grid_rowconfigure(0, weight=1)
