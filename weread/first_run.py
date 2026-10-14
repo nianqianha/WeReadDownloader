@@ -174,28 +174,38 @@ def _settings_path() -> Path:
 
 
 def _credentials_usable(settings: Path) -> bool:
-    """Is the credential file present AND parseable by load_credentials()?
+    """Would load_credentials() accept the credentials RIGHT NOW?
 
-    Existence alone is not enough. Measured against the frozen build, four
-    credential states produce four different outcomes, and the interesting one
-    is the last:
+    The merged view is the only honest answer. Credentials live in two files --
+    the Lua base (api_key, and possibly wr_skey) and the sealed session overlay
+    the QR login writes -- and load_credentials() merges them. Judging the base
+    file alone said "wr_skey missing" to a user who had just scanned
+    successfully, and the card kept asking for a thing they already had while
+    search worked fine right next to it.
 
-        absent                    -> wizard shows            (correct)
-        api_key only, no wr_skey  -> no wizard               (correct: the QR
-                                                              login is the next step)
-        complete                  -> no wizard               (correct)
-        malformed                 -> no wizard, then every action fails with a
-                                      credential error the user cannot act on
-
-    A file that cannot be parsed has to behave like a missing one, otherwise
-    the user's only route forward is deleting a file they cannot see. The
-    validation used here is deliberately the same shape load_credentials()
-    requires: the body must be a Lua table readable by LuaJIT, and for the file
-    to be *usable* api_key and cookies.wr_skey must both be non-empty.
-
-    Returns True only when the file can satisfy load_credentials(); a file that
-    exists but cannot is reported as unusable so the caller treats it as absent.
+    So: ask the loader's own companion, weread_login.has_credentials(), which
+    reads the same two files the same way the loader does. The base-file shape
+    check below stays as the fast path for the "no overlay at all" case and as
+    a fallback when weread_login cannot be imported.
     """
+    try:
+        try:
+            from . import weread_login
+        except ImportError:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import weread_login
+        if weread_login.has_credentials():
+            return True
+    except Exception:
+        # weread_login unreadable is not fatal: fall through to the base-file
+        # shape check, which is the answer the loader reaches when the overlay
+        # cannot be read either.
+        return _base_file_shape_ok(settings)
+    return _base_file_shape_ok(settings)
+
+
+def _base_file_shape_ok(settings: Path) -> bool:
+    """Would the BASE file alone satisfy the loader? (No overlay considered.)"""
     if not settings.is_file():
         return False
     try:
