@@ -57,11 +57,13 @@ SHELF_LINE = ('SHELF\t['
 def test_the_shelf_page_shows_the_accounts_books():
     root, inst = _make_instance()
     try:
+        # Stub BEFORE switching: the page constructor calls load_shelf(), which
+        # would otherwise start a real worker. Without a credential file that
+        # worker fails and its error overwrites the rows this test renders, so
+        # stubbing afterwards raced with it.
+        inst.load_shelf = lambda: None
         inst._switch_page("我的书架")
         root.update()
-        # Stub the worker call: switching pages triggers a real shelf fetch,
-        # and this test must render exactly the rows it supplies.
-        inst.load_shelf = lambda: None
         rows = inst._parse_shelf(SHELF_LINE)
         assert isinstance(rows, list) and len(rows) == 2, rows
         inst._show_shelf(rows)
