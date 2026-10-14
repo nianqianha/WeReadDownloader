@@ -127,13 +127,10 @@ Source: "..\release-fresh\WeReadWorker\*"; DestDir: "{app}\WeReadWorker"; \
 ; 网页版（浏览器界面）。纯 stdlib 的 http.server 包，不带 PIL/tkinter/Tcl，
 ; 所以它单独一个目录而不是和主程序混在一起：混在一起会让主程序的图形栈把它
 ; 拖进杀毒深度扫描，启动从零点几秒变成好几秒，而这个组件存在的理由就是快。
-; 注意：这行要求 build-fresh-web 的产物落到 release-fresh\WeReadWeb（当前尚缺，
-; 见汇报）。缺目录时 ISCC 直接编译失败，不会悄悄打出一个没有网页版的包——
-; 这正是想要的行为：能在组件页勾选就必须真能装上去。
-; Source: "..\release-fresh\WeReadWeb\*"; DestDir: "{app}\WeReadWeb"; \
-;     Components: web; Flags: ignoreversion recursesubdirs createallsubdirs
-
-; TEMP-VERIFY: 为了在没有网页版产物的情况下完成编译与解包验证，上面这行暂时注释。
+; 产物已就位（WeReadWeb.exe sha8=6fb9f8a5 + _internal/webui.html），缺目录时
+; ISCC 直接编译失败，不会悄悄打出一个没有网页版的包——这正是想要的行为。
+Source: "..\release-fresh\WeReadWeb\*"; DestDir: "{app}\WeReadWeb"; \
+    Components: web; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; 网页版图标必须随程序一起安装：快捷方式的 IconLocation 只能写绝对路径，
 ; 写相对路径（..\assets\...）时 Windows 解析不到，桌面图标就变成空白。
