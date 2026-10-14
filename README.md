@@ -115,11 +115,30 @@ KOReader 的导入器读 `bundle.json`，取出书装进书库，再按 `reviews
 
 ## 登录
 
-首次使用点右上角账号按钮：
+**这是两步走，缺一不可：**
 
-- **扫码**（默认）—— 微信扫一扫，按提示操作
-- **手动输入** —— 填 API Key 和 `wr_skey`，从
-  [weread.qq.com/r/weread-skills](https://weread.qq.com/r/weread-skills) 复制
+1. **先拿 `api_key`（只做一次）**
+   - 浏览器打开 [weread.qq.com/r/weread-skills](https://weread.qq.com/r/weread-skills)
+   - 登录后页面会给你 `api_key`（形如 `wrk-...`）和 `user_vid`
+   - 在 `%LOCALAPPDATA%\WeReadDesktop\` 下新建 `weread-live-settings.lua`，按格式填进去（程序启动会检查，缺了直接报错）
+
+2. **打开程序，扫码登录**
+   - 点右上角账号按钮 → 「扫码」
+   - 微信扫一扫，按提示确认
+   - 程序自动拿到 `wr_skey`，用 Windows DPAPI 加密存进 `session-cookies.json`
+
+| 东西 | 来源 | 存哪 | 过期/失效 |
+|---|---|---|---|
+| `api_key` (`wrk-...`) | 网页版手动抄 | `weread-live-settings.lua` | 长期有效，除非你在网页版“注销其它设备” |
+| `wr_skey` / cookie | 扫码登录 / 手动填 | `session-cookies.json` (DPAPI 加密) | 会过期，需重新扫码 |
+
+**退出登录** 只删 `session-cookies.json`（扫码得来的 cookie），`weread-live-settings.lua` 里的 `api_key` 留着，下次打开不用重新扫码。想彻底清净，手动删两个文件：
+```
+%LOCALAPPDATA%\WeReadDesktop\session-cookies.json
+%LOCALAPPDATA%\WeReadDesktop\weread-live-settings.lua
+```
+
+> **为什么不扫码自动搞定 `api_key`？** 微信读书官方没给第三方“扫码后自动下发 `api_key`”的接口，只给扫码换 `wr_skey`。所以第一步必须你自己去网页版抄一次。
 
 凭证用 Windows DPAPI 加密后存在本机，**不进日志、不进安装包、不进仓库**。
 仓库里有一条 pre-push 钩子，每次推送前自动扫描硬编码密钥和凭证文件。
@@ -141,8 +160,8 @@ KOReader 的导入器读 `bundle.json`，取出书装进书库，再按 `reviews
 ## 已知限制
 
 - 一本书同一时间只能有一个导出任务在跑
-- 想法数据即便选「只要划线」也仍会从服务器拉取（划线落点依赖它），只是不写入成品
-- 退出登录只删扫码会话，`weread-live-settings.lua` 里的基础凭证需手动删除
+- 标注选「只要划线」时，想法数据仍会从服务器拉取（划线落点依赖它），只是不写入成品
+- 退出登录只删扫码会话，`weread-live-settings.lua` 里的 `api_key` 保留，想彻底清净需手动删两个文件
 
 ### 以后也许会做的
 
