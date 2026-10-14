@@ -19,7 +19,8 @@ except ImportError:
 # The program modules live in weread/ and import each other by bare name.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "weread"))
 PROJ = Path(__file__).resolve().parent.parent
-PLUGIN = PROJ.parent.parent / "03_插件源码与解压文件" / "weread.koplugin"
+# the plugin tree is a SIBLING of the repo parent since the 2026-10 move
+PLUGIN = PROJ.parent / "Kindle" / "03_插件源码与解压文件" / "weread.koplugin"
 TEST = PROJ / "tests" / "test_desktop_bundle.lua"
 MODULE = PLUGIN / "weread" / "lib" / "desktop_bundle.lua"
 
