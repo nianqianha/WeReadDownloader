@@ -20,6 +20,18 @@ app.LOG_DIR = Path(_TMP_PROFILE.name) / "logs"
 app.OUTPUT = Path(_TMP_PROFILE.name) / "exports"
 # The login dialog persists credentials; keep that out of the real user profile too.
 app.weread_login.CREDENTIAL_STATE = Path(_TMP_PROFILE.name) / "session-cookies.json"
+# _save_manual_credentials also writes the credential BASE file through
+# first_run.write_settings(_settings_path(), ...). Without redirecting that path
+# the test's fake values (wrk-manual-key) overwrote the REAL credential file on
+# this machine -- the running program then failed every action while the QR
+# dialog still said logged-in. first_run resolves its path through
+# weread_core.PRIVATE, so patch the module in sys.modules: every importer (the
+# app, first_run, later imports) then sees the redirected profile, which is
+# stronger than patching one attribute and hoping every helper routes through it.
+import weread_core as _weread_core
+_weread_core.PRIVATE = Path(_TMP_PROFILE.name) / "WeReadDesktop"
+app._settings_path = lambda: (Path(_TMP_PROFILE.name) / "WeReadDesktop"
+                              / "weread-live-settings.lua")
 
 
 def _log_text(instance=None) -> str:
