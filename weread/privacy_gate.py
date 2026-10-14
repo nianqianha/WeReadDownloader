@@ -53,6 +53,14 @@ MUST_NOT_EXIST = ()
 # Extensions that carry third-party artwork or binaries we do not own.
 ARTWORK = (".jpeg", ".jpg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff")
 
+# Artwork we produced ourselves, so tracking it is fine. design/ holds the UI
+# reference captures; docs/screenshots/ holds captures of this program used in
+# the README. Both are screenshots of software in this repo, not other people's
+# images -- which is the only thing the artwork rule exists to stop. Note these
+# are matched case-insensitively, and every capture must still be free of
+# credentials and personal data before it is committed.
+OURS_ARTWORK = ("design/", "docs/screenshots/")
+
 # Path fragments that mean "vendored, not ours" -- skipped for secret scanning
 # because third-party code legitimately contains words like "token".
 VENDORED = ("release-", "build-", "build/", "debug", "dist/", "_internal",
@@ -152,7 +160,7 @@ def check(problems, strict=False):
         for prefix in MAY_EXIST_ON_DISK + MUST_NOT_EXIST:
             if norm.startswith(prefix):
                 problems.append("TRACKED blocked path: %s" % f)
-        if f.lower().endswith(ARTWORK) and not f.startswith("design/"):
+        if f.lower().endswith(ARTWORK) and not f.lower().startswith(OURS_ARTWORK):
             problems.append("TRACKED artwork (not ours): %s" % f)
     for prefix in MAY_EXIST_ON_DISK:
         base = os.path.join(HERE, prefix)
