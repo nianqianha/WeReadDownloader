@@ -40,25 +40,23 @@ def test(fn):
 
 
 @test
-def test_validate_accepts_a_well_formed_pair():
-    assert first_run.validate(FAKE_KEY, "123456789") == ""
+def test_validate_accepts_a_well_formed_key():
+    assert first_run.validate(FAKE_KEY) == ""
 
 
 @test
 def test_validate_rejects_the_typos_a_user_actually_makes():
-    assert "api_key" in first_run.validate("", "123456789")
-    assert "wrk-" in first_run.validate("abcdefghijklmnop", "123456789")
-    assert "短" in first_run.validate("wrk-fake-1", "123456789")
-    assert "user_vid" in first_run.validate(FAKE_KEY, "")
-    assert "数字" in first_run.validate(FAKE_KEY, "abc123")
+    assert "api_key" in first_run.validate("")
+    assert "wrk-" in first_run.validate("abcdefghijklmnop")
+    assert "短" in first_run.validate("wrk-fake-1")
     # whitespace from a copy-paste must not be treated as a typo
-    assert first_run.validate("  " + FAKE_KEY + "  ", " 123456789 ") == ""
+    assert first_run.validate("  " + FAKE_KEY + "  ") == ""
 
 
 @test
 def test_the_written_file_parses_as_lua_and_carries_both_values():
     """The real check: run the text through the same LuaJIT the loader uses."""
-    text = first_run.build_settings_lua(FAKE_KEY, "123456789")
+    text = first_run.build_settings_lua(FAKE_KEY)
     assert "\nreturn {" in text, "load_credentials() looks for this exact prefix"
     assert 'api_key = "%s"' % FAKE_KEY in text
     try:
@@ -79,7 +77,7 @@ def test_the_written_file_parses_as_lua_and_carries_both_values():
 def test_quotes_and_backslashes_in_values_do_not_break_the_lua():
     """A key pasted with a quote in it must not produce an unparseable file."""
     nasty = 'wrk-fake-a"b\\c'
-    text = first_run.build_settings_lua(nasty, "1")
+    text = first_run.build_settings_lua(nasty)
     try:
         from lupa.luajit21 import LuaRuntime
     except ImportError:
@@ -94,7 +92,7 @@ def test_quotes_and_backslashes_in_values_do_not_break_the_lua():
 def test_write_settings_is_atomic_and_leaves_no_tmp_behind():
     with tempfile.TemporaryDirectory(prefix="weread-firstrun-") as tmp:
         target = Path(tmp) / "sub" / "weread-live-settings.lua"
-        first_run.write_settings(target, FAKE_KEY, "123456789")
+        first_run.write_settings(target, FAKE_KEY)
         assert target.is_file()
         assert not list(target.parent.glob("*.tmp")), "temp file left behind"
         assert target.read_text(encoding="utf-8").startswith("--")
