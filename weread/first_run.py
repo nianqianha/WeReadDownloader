@@ -200,6 +200,37 @@ def _credentials_usable(settings: Path) -> bool:
         return False
 
 
+def _has_api_key(settings: Path) -> bool:
+    """Has the user already supplied api_key, with only wr_skey still missing?
+
+    This is the state right after the wizard is completed: the file exists and
+    api_key is non-empty, but cookies.wr_skey is not there yet because the QR
+    login has not run. The wizard must NOT fire for it -- the next step is the
+    QR login in the main window, not filling the same form again.
+    """
+    if not settings.is_file():
+        return False
+    try:
+        raw = settings.read_bytes()
+    except OSError:
+        return False
+    start = raw.find(b"\nreturn {")
+    if start < 0:
+        return False
+    try:
+        from lupa.luajit21 import LuaRuntime
+    except ImportError:
+        text = raw.decode("utf-8", "replace")
+        return "api_key = \"wrk-" in text
+    try:
+        lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+        table = lua.execute(raw[start + 1:])
+        api_key = table[b"api_key"]
+        return bool(api_key) and bool(api_key.decode(errors="replace").strip())
+    except Exception:
+        return False
+
+
 def _ensure_credentials_file(root) -> bool:
     """Open the wizard when the credentials are missing or unusable.
 
@@ -215,6 +246,23 @@ def _ensure_credentials_file(root) -> bool:
     settings = _settings_path()
 
     if _credentials_usable(settings):
+        return True
+
+    # Three states must be told apart, because they need different actions:
+    #
+    #   nothing at all        -> the wizard: fill in api_key
+    #   broken file           -> the wizard: the file is unusable, say so
+    #   api_key OK, no wr_skey -> NOT the wizard: the user already did their
+    #                            part and the remaining step is the QR login,
+    #                            which lives in the main window. Re-showing the
+    #                            wizard here bounces them in a loop with no
+    #                            explanation, which is exactly what happened:
+    #                            the file is written, the dialog returns, the
+    #                            check still fails, the dialog appears again.
+    #
+    # The third state returns True so the main window opens and the user can
+    # reach the QR login that completes the credential.
+    if _has_api_key(settings):
         return True
 
     # The file exists but cannot be used. Saying so is worth one dialog: the
