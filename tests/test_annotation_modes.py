@@ -19,7 +19,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-PROJ = Path(r"C:\Users\asus\Desktop\各类\Kindle\05_补丁与其他\桌面端WeRead下载器")
+PROJ = Path(r"C:\Users\asus\Desktop\各类\weread-downloader")
 sys.path.insert(0, str(PROJ / "weread"))
 spec = importlib.util.spec_from_file_location("weread_desktop", PROJ / "weread" / "weread_desktop.py")
 mod = importlib.util.module_from_spec(spec)

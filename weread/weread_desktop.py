@@ -37,10 +37,26 @@ import weread_login
 if getattr(sys, "frozen", False):
     ROOT = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "kindle_data"
 else:
-    # This file lives in <Kindle>/05_补丁与其他/桌面端WeRead下载器/weread/, so
-    # the Kindle root is four levels up. (It was parents[2] while the module sat
-    # at the repository root; the extra "weread" level shifted the index.)
-    ROOT = Path(__file__).resolve().parents[3]
+    # The Lua plugin lives in the Kindle tree, which is a SIBLING of this
+    # repository's parent (the repo moved to <各类>/weread-downloader in
+    # 2026-10; the plugin never moved). Two candidate roots are probed, the
+    # first that actually contains the plugin wins; WEREAD_KINDLE_ROOT wins
+    # over both, so a future move is a one-variable fix.
+    candidates = []
+    env_root = os.environ.get("WEREAD_KINDLE_ROOT")
+    if env_root:
+        candidates.append(Path(env_root))
+    # from <repo>/weread/: parent = repo, parent.parent = 各类, and the Kindle
+    # tree is 各类/Kindle
+    candidates.append(Path(__file__).resolve().parents[2] / "Kindle")
+    for root in candidates:
+        if (root / "03_插件源码与解压文件" / "weread.koplugin").is_dir():
+            ROOT = root
+            break
+    else:
+        raise RuntimeError(
+            "未找到微信读书 Lua 插件目录。它应位于 <各类>/Kindle/03_插件源码与解压文件/weread.koplugin；"
+            "若你移动过它，请设置环境变量 WEREAD_KINDLE_ROOT 指向 Kindle 目录。")
 PLUGIN = ROOT / "03_插件源码与解压文件" / "weread.koplugin"
 PRIVATE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "WeReadDesktop"
 SETTINGS = PRIVATE / "weread-live-settings.lua"

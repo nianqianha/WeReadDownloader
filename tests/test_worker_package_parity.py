@@ -20,9 +20,9 @@ PROJECT = Path(__file__).resolve().parent.parent
 PLUGIN_RELATIVE = Path(
     "kindle_data/03_插件源码与解压文件/weread.koplugin/weread/lib/annotation_source.lua"
 )
-# PROJECT is the repository root; the Lua plugin lives two levels up, beside the
-# other Kindle project folders.
-SOURCE = PROJECT.parents[1] / "03_插件源码与解压文件" / "weread.koplugin" / "weread" / "lib" / "annotation_source.lua"
+# PROJECT is the repository root (各类/weread-downloader since the 2026-10 move);
+# the Lua plugin lives in the SIBLING Kindle tree: 各类/Kindle/03_插件源码与解压文件.
+SOURCE = PROJECT.parent / "Kindle" / "03_插件源码与解压文件" / "weread.koplugin" / "weread" / "lib" / "annotation_source.lua"
 
 
 def check_worker_distribution(dist: Path) -> None:

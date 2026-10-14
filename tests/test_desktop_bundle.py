@@ -6,7 +6,10 @@ import sys
 
 # The program modules live in weread/ and import each other by bare name.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "weread"))
-PLUGIN = Path(__file__).resolve().parents[3] / "03_插件源码与解压文件" / "weread.koplugin"
+# The plugin tree is a SIBLING of the repo's parent (repo: 各类/weread-downloader,
+# plugin: 各类/Kindle/03_插件源码与解压文件) -- parents[2] from this file since the
+# 2026-10 move; it was parents[3] when the repo sat inside 05_补丁与其他.
+PLUGIN = Path(__file__).resolve().parents[2] / "Kindle" / "03_插件源码与解压文件" / "weread.koplugin"
 BUNDLE = PLUGIN / "weread" / "lib" / "desktop_bundle.lua"
 
 

@@ -17,17 +17,28 @@ SRC = os.path.join(ROOT, "weread")
 ICON = os.path.join(ROOT, "assets", "weread-app.ico")
 if not os.path.isfile(ICON):
     raise SystemExit("icon not found: " + ICON)
-# The Lua plugin lives beside the Kindle project, two levels above the repo
-# root: <Kindle>/05_补丁与其他/桌面端WeRead下载器 -> <Kindle>/03_插件源码与解压文件
-# Both dirnames are needed: ROOT is the repo root itself, so one dirname only
-# reaches <Kindle>/05_补丁与其他 and the build dies with "plugin dir not found".
-PLUGIN_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(ROOT)),
-    "03_插件源码与解压文件",
-    "weread.koplugin",
-)
-if not os.path.isdir(PLUGIN_DIR):
-    raise SystemExit("plugin dir not found: " + PLUGIN_DIR)
+# The Lua plugin lives in the Kindle tree, a sibling of the repo's parent
+# (the repo moved to <各类>/weread-downloader in 2026-10; the plugin did not).
+# 源码模式用同样的发现逻辑，见 weread_desktop.py；WEREAD_KINDLE_ROOT 可覆盖。
+def _find_plugin_dir():
+    candidates = []
+    env_root = os.environ.get("WEREAD_KINDLE_ROOT")
+    if env_root:
+        candidates.append(os.path.join(env_root, "03_插件源码与解压文件",
+                                       "weread.koplugin"))
+    # from <repo>: parent = 各类, and the Kindle tree is 各类/Kindle
+    candidates.append(os.path.join(os.path.dirname(ROOT),
+                                   "Kindle", "03_插件源码与解压文件",
+                                   "weread.koplugin"))
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    raise SystemExit(
+        "plugin dir not found. Expected <各类>/Kindle/03_插件源码与解压文件/weread.koplugin; "
+        "set WEREAD_KINDLE_ROOT if you moved it.")
+
+
+PLUGIN_DIR = _find_plugin_dir()
 
 datas = [(os.path.join(SRC, "weread_desktop.py"), ".")]
 datas.append((PLUGIN_DIR, os.path.join(

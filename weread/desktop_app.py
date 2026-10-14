@@ -1365,13 +1365,18 @@ class DesktopApp:
 
         # ---- main grid: results card + detail card -----------------------
         self.body = ctk.CTkFrame(page, fg_color="transparent")
-        # Fixed height: inside a scrollable page the body cannot "expand" to
-        # fill the viewport (the page is as tall as its content), so a concrete
-        # height is what gives the outer scrollbar something to scroll past.
-        # 420 px fits the result/detail cards with room for covers.
+        # Minimum height, not a fixed one: inside the scrollable page the body
+        # must be AT LEAST tall enough to be usable (420 px fits the result and
+        # detail cards), but the introduction inside it must still GROW when the
+        # window is taller -- grid row weight 0 below stretches it. A hard
+        # pack_propagate(False) squeezed the intro to 113 px on a 680 window
+        # (5.9 lines, just under the 6-line bar the layout test guards).
+        # fill=x, never expand: inside a CTkScrollableFrame the canvas height
+        # is fixed, so an expanding child gets the CANVAS height, not its
+        # content height -- that is what squeezed the intro to 113 px even
+        # after it learned to size itself.
         self.body.pack(fill="x", pady=(10, 0))
         self.body.configure(height=420)
-        self.body.pack_propagate(False)
         self.body.grid_columnconfigure(0, weight=0)
         self.body.grid_columnconfigure(1, weight=1)
         self.body.grid_rowconfigure(0, weight=1)
@@ -1453,7 +1458,7 @@ class DesktopApp:
             right, height=90, fg_color=self.SUNKEN, corner_radius=8,
             border_width=1, border_color=self.HAIRLINE,
             wrap="word", text_color=self.MUTED, font=_font(13))
-        self.intro.pack(fill="both", expand=True, padx=20, pady=(0, 0))
+        self.intro.pack(fill="x", padx=20, pady=(0, 0))
         self.intro.insert("1.0", "点击左侧搜索结果后，这里会显示简介和书籍详情。")
         self.intro.configure(state="disabled")
 
@@ -2560,6 +2565,14 @@ class DesktopApp:
         self.intro.delete("1.0", "end")
         self.intro.insert("1.0", text)
         self.intro.configure(state="disabled")
+        # Size the box to its content. The page scrolls now instead of being
+        # squeezed, so the old fixed 90 px has no cause left -- but a box that
+        # never grows would hide long introductions behind an inner scrollbar
+        # nobody asked for. 19 px per line matches the font metrics the layout
+        # test uses; the floor keeps the empty state from collapsing.
+        lines = max(1, text.count("\n") + 1)
+        wanted = max(90, min(260, 14 + lines * 19))
+        self.intro.configure(height=wanted)
 
     # ------------------------------------------------------------------ login
 
