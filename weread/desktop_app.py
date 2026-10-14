@@ -191,11 +191,13 @@ def describe_omissions(report, compact: bool = False) -> str:
         # One line, no embedded newlines, so the status label cannot grow the
         # packed column and push the buttons out of the window.
         summary = "；".join(line.split("：", 1)[-1].rstrip("。") for line in lines)
-        return "正文完整，但有附带内容取不回：%s。完整说明见完成提示与技术日志。" % summary
-    return ("正文完整，但有部分附带内容无法取回：\n\n"
-            + "\n".join("· " + line for line in lines)
-            + "\n\n这些都没有补全：微信读书那边已无数据，或原文没有可用的位置标记，"
-              "硬填会把划线标到错误的句子上。")
+        return "书已下载成功（正文完整）：%s。成品位置见「打开下载目录」。" % summary
+    return ("书已下载成功，EPUB 可直接阅读。\n\n"
+            "· " + "\n· ".join(lines)
+            + "\n\n以上缺失无法补全：微信读书那边已无数据，或原文没有可用的位置标记，"
+              "硬填会把划线标到错误的句子上。正文没有受影响。"
+            + "\n\n成品位置：点下方「打开下载目录」查看 EPUB 文件。"
+            + "\n\n要下载下一本：直接在左侧搜索另一本书并点击它，无需任何收尾操作。")
 
 
 class DesktopApp:
@@ -2115,9 +2117,12 @@ class DesktopApp:
                         # grew the packed column past the window bottom and took
                         # the task buttons with it.
                         self.status.set(describe_omissions(self.omissions, compact=True))
-                        self._ask("showinfo", "下载完成，但有内容缺失", notice)
+                        # The title leads with the OUTCOME, not the gap: this is a succeeded
+                        # download with notes, not a failure. The first title read as a
+                        # failure and sent the user hunting for an error that does not exist.
+                        self._ask("showinfo", "下载成功（附说明）", notice)
                     else:
-                        self.status.set("下载和文件校验完成。")
+                        self.status.set("下载完成，这本已收工。换下一本：在左侧搜索另一本书并点击即可。")
                 elif self.last_unresolved:
                     self.status.set("扫描到末尾，但有章节数据不完整；没有生成不完整 EPUB。点击“查看技术日志”查看具体章节。")
                 else:
@@ -2380,6 +2385,14 @@ class DesktopApp:
         self.selected_author = str(item.get("author", ""))
         self.book_info = dict(item)
         self.info_loaded = False
+        # A finished download leaves the progress bar full and the status bar
+        # talking about that book. Selecting a new book is the moment the old
+        # download's story ends, so the panel visibly resets here: bar to zero,
+        # status to the new selection. Without this, a user who wants to start
+        # the next book has no signal that they are allowed to just... pick
+        # another one -- the previous user (me) needed this written down.
+        self.progress.set(0)
+        self.status.set("已选择新书：%s。加载详情后即可下载。" % (self.selected_title or ""))
         # Repaint the page so the selected row carries the reference design's
         # green bar and wash. Only rows on the current page exist as widgets;
         # _render_page rebuilds exactly those, cheaply.
