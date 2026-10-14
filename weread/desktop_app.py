@@ -2867,14 +2867,32 @@ def main() -> int:
     # "Credential file not found", so the wizard runs first and the main window
     # only opens once it reports a file exists. Declining the wizard quits:
     # opening a window that cannot do anything would just be a dead end.
+    #
+    # A wizard failure is NOT treated as consent. The first version of this
+    # defaulted to "ready" on any exception, so when the frozen bundle could not
+    # import the module the wizard depends on, it failed invisibly and the main
+    # window opened anyway -- the user then hit "Credential file not found" on
+    # every action with nothing on screen explaining why. Failing closed shows a
+    # dialog that names the problem instead.
     try:
         ready = _ensure_credentials_file(root)
     except Exception as exc:
-        # A wizard that crashes must not take the program down with it; the main
-        # window can still show its own login entry point.
-        print("[FIRST_RUN] wizard failed: %s: %s"
-              % (type(exc).__name__, exc), file=sys.stderr)
-        ready = True
+        import traceback
+        detail = "%s: %s" % (type(exc).__name__, exc)
+        print("[FIRST_RUN] wizard failed: " + detail, file=sys.stderr)
+        traceback.print_exc()
+        try:
+            from tkinter import messagebox
+            messagebox.showerror(
+                "无法启动",
+                "首次运行向导出错，程序不能继续。\n\n"
+                "错误：%s\n\n"
+                "请把这条信息发给开发者。日志位于：\n%s"
+                % (detail, LOG_DIR))
+        except Exception:
+            pass
+        root.destroy()
+        return 1
     if not ready:
         root.destroy()
         return 0
