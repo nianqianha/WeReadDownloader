@@ -129,29 +129,67 @@ def test_the_credential_path_comes_from_a_module_that_defines_it():
     logout(), one imported from weread_desktop and one a local fallback. Writing
     'from desktop_app import SETTINGS' therefore raised ImportError at the moment
     the wizard was needed, which is how the first attempt at this fix failed its
-    own runtime check. The authoritative definition is weread_desktop's.
+    own runtime check.
     """
     source = (HERE / "first_run.py").read_text(encoding="utf-8")
     assert "from desktop_app import SETTINGS" not in source, \
-        "desktop_app does not define SETTINGS; import it from weread_desktop"
+        "desktop_app does not define SETTINGS"
     assert "desktop_app import SETTINGS" not in source, \
-        "desktop_app does not define SETTINGS; import it from weread_desktop"
+        "desktop_app does not define SETTINGS"
 
-    # And prove the claim rather than trusting the comment: load weread_desktop
-    # the way the program does and check the attribute exists.
-    import importlib.util as ilu
-    spec = ilu.spec_from_file_location("weread_desktop", HERE / "weread_desktop.py")
-    wd = ilu.module_from_spec(spec)
-    spec.loader.exec_module(wd)
-    assert hasattr(wd, "SETTINGS"), "weread_desktop must define SETTINGS"
-    assert str(wd.SETTINGS).endswith("weread-live-settings.lua"), wd.SETTINGS
+    path = first_run._settings_path()
+    assert str(path).endswith("weread-live-settings.lua"), path
 
 
 @test
-def test_the_settings_helper_resolves_without_a_package():
-    """_settings_path() must work when weread/ is on sys.path but not a package."""
-    path = first_run._settings_path()
-    assert str(path).endswith("weread-live-settings.lua"), path
+def test_the_credential_path_does_not_need_the_excluded_module():
+    """The GUI bundle EXCLUDES weread_desktop, so the path must not require it.
+
+    WeReadDesktop.spec lists weread_desktop in excludes (it pulls in LuaJIT and
+    lxml, ~5 s of startup). Importing SETTINGS from it raised ImportError inside
+    the frozen GUI, main() swallowed that, and the main window opened with no
+    wizard -- the user then saw 'Credential file not found' on every action.
+    weread_core is present in every bundle and owns PRIVATE, so the path must
+    resolve from it.
+    """
+    spec = (HERE.parent / "packaging" / "WeReadDesktop.spec").read_text(encoding="utf-8")
+    assert '"weread_desktop"' in spec, "the exclusion this test guards against is gone"
+    assert "weread_desktop" in spec.split("excludes=[")[1].split("]")[0], \
+        "weread_desktop is no longer excluded; this guard may need revisiting"
+
+    source = (HERE / "first_run.py").read_text(encoding="utf-8")
+    assert "weread_core" in source, \
+        "the wizard must resolve its path from weread_core, which the GUI keeps"
+
+    # Prove it with the module weread_desktop absent, which is the frozen case.
+    import importlib
+    saved = sys.modules.pop("weread_desktop", None)
+    try:
+        first_run_path = Path(HERE / "first_run.py")
+        spec2 = importlib.util.spec_from_file_location("first_run_isolated", first_run_path)
+        iso = importlib.util.module_from_spec(spec2)
+        spec2.loader.exec_module(iso)
+        p = iso._settings_path()
+        assert str(p).endswith("weread-live-settings.lua"), p
+    finally:
+        if saved is not None:
+            sys.modules["weread_desktop"] = saved
+
+
+@test
+def test_a_wizard_failure_fails_closed_not_open():
+    """main() must not treat a crashed wizard as consent.
+
+    The first version caught every exception and set ready = True, so a wizard
+    that could not even import let the main window open. That is what made the
+    failure invisible: nothing on screen said why every action failed.
+    """
+    source = (HERE / "desktop_app.py").read_text(encoding="utf-8")
+    marker = "ready = _ensure_credentials_file(root)"
+    assert marker in source
+    after = source.split(marker, 1)[1][:900]
+    assert "ready = True" not in after, \
+        "a wizard failure must not default to ready=True"
 
 
 def main() -> int:
