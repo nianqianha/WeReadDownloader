@@ -259,6 +259,45 @@ def test_the_trigger_is_not_wired_to_a_marker_file():
         assert marker not in source, "a first-run flag file must not decide this"
 
 
+# --- the state that caused the loop ------------------------------------------
+# The wizard writes api_key with an empty cookies table; wr_skey only arrives
+# after the QR login. At that moment the file is present and api_key is usable,
+# but load_credentials() still refuses it -- so a check on "usable" alone
+# re-showed the wizard forever, and the user never reached the QR login that
+# would have finished the job. This is the state the program is in right after
+# the first successful wizard submission.
+
+WIZARD_OUTPUT = ('\nreturn {\n  api_key = "%s",\n'
+                 '  cookies = {\n  },\n'
+                 '  wr_ticket = "",\n  wr_wrpa = "",\n}\n' % FAKE_KEY)
+
+
+@test
+def test_an_api_key_only_file_opens_the_main_window():
+    """api_key present, wr_skey not yet: the QR login is the next step."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "just_after_wizard.lua"
+        p.write_text(WIZARD_OUTPUT, encoding="utf-8")
+        assert first_run._credentials_usable(p) is False, \
+            "load_credentials() does need wr_skey; that part stays true"
+        assert first_run._has_api_key(p) is True, \
+            "the user already did their part and must not be bounced"
+
+
+@test
+def test_nothing_and_broken_still_open_the_wizard():
+    """The loop must not be broken by letting everything through."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = Path(tmp) / "none.lua"
+        assert first_run._has_api_key(missing) is False
+
+        broken = Path(tmp) / "broken.lua"
+        broken.write_text("not a lua table\n", encoding="utf-8")
+        assert first_run._has_api_key(broken) is False
+
+
 def main() -> int:
     failures = 0
     for fn in CASES:
