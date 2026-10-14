@@ -660,10 +660,39 @@ def _book_work_dir():
     for entry in sorted(wd.OUTPUT.iterdir()):
         if entry.is_dir() and entry.name.endswith(".work") and BOOK_ID in entry.name:
             return entry
-    raise AssertionError(
-        "the acceptance corpus %s-*.work is missing from %s; this gate measures "
-        "the fix against real exported output and must not skip itself"
-        % (BOOK_ID, wd.OUTPUT))
+    return None
+
+
+def _epub_corpus():
+    """Rebuild the replay corpus from the finished EPUB.
+
+    The .work tree holds the post-injection chapter bodies, but it is cleaned
+    once a book finishes exporting -- which turned this gate red on a checkout
+    whose code had not changed. The EPUB is built from that same markup and
+    keeps the wr-underline / wr-thought spans verbatim, so it is the same
+    evidence in a place that survives the cleanup.
+
+    Returns a list of (name, text) pairs, or [] when no export is present.
+    """
+    import zipfile
+    for entry in sorted(wd.OUTPUT.iterdir()):
+        if not entry.is_dir() or BOOK_ID not in entry.name:
+            continue
+        for epub in sorted(entry.glob("*.epub")):
+            try:
+                with zipfile.ZipFile(epub) as z:
+                    out = []
+                    for name in z.namelist():
+                        if not name.lower().endswith((".xhtml", ".html")):
+                            continue
+                        text = z.read(name).decode("utf-8", "replace")
+                        if 'class="wr-underline"' in text:
+                            out.append((name, text))
+                    if out:
+                        return out
+            except (zipfile.BadZipFile, OSError):
+                continue
+    return []
 
 
 def _reconstruct(text):
@@ -714,8 +743,24 @@ def test_real_corpus_placement_still_verifies():
     breakdown is printed so a regression in the rate is visible, not guessed.
     """
     work = _book_work_dir()
-    files = sorted(p for p in work.glob("chapter-*.body"))
-    assert files, "no chapter bodies under %s" % work
+    if work is not None:
+        files = sorted(p for p in work.glob("chapter-*.body"))
+        assert files, "no chapter bodies under %s" % work
+        source = "work tree %s" % work.name
+        read = lambda p: p.read_text(encoding="utf-8")  # noqa: E731
+        name_of = lambda p: p.name  # noqa: E731
+    else:
+        corpus = _epub_corpus()
+        assert corpus, (
+            "no acceptance corpus for %s in %s: neither a *.work tree nor an "
+            "exported EPUB is present. This gate measures the fix against real "
+            "exported output, so it must not pass by skipping -- export the book "
+            "once, then re-run." % (BOOK_ID, wd.OUTPUT))
+        source = "EPUB of %s" % BOOK_ID
+        files = corpus
+        read = lambda item: item[1]  # noqa: E731
+        name_of = lambda item: item[0]  # noqa: E731
+    print("replay corpus: %s (%d chapters)" % (source, len(files)))
 
     total = placed = 0
     reasons = {}
@@ -724,13 +769,13 @@ def test_real_corpus_placement_still_verifies():
     for path in files:
         if chapters >= REPLAY_CHAPTERS:
             break
-        text = path.read_text(encoding="utf-8")
+        text = read(path)
         if 'class="wr-underline"' not in text:
             continue
         plain, ranges = _reconstruct(text)
         assert "wr-underline" not in plain and "wr-thought" not in plain, (
             "the reconstruction of %s left injection artefacts behind, so it is "
-            "lossy and its audit result would mean nothing" % path.name)
+            "lossy and its audit result would mean nothing" % name_of(path))
         rows = [{"range": key, "markText": "".join(pieces)}
                 for key, pieces in sorted(ranges.items())]
         if not rows:
@@ -739,13 +784,13 @@ def test_real_corpus_placement_still_verifies():
         records = _audit(_ENVELOPE_HEAD + plain + _ENVELOPE_TAIL, rows)
         assert len(records) == len(rows), (
             "%s: %d rows produced %d records; a dropped record is an invisible "
-            "loss" % (path.name, len(rows), len(records)))
+            "loss" % (name_of(path), len(rows), len(records)))
         supplied = {row["range"] for row in rows}
         good = 0
         for record in records:
             assert record["range"] in supplied, (
                 "%s: the audit reported range %r, which this chapter never "
-                "supplied" % (path.name, record["range"]))
+                "supplied" % (name_of(path), record["range"]))
             reasons[record["reason"]] = reasons.get(record["reason"], 0) + 1
             if record["reason"] == "ok":
                 good += 1
