@@ -147,18 +147,85 @@ def _settings_path() -> Path:
     return Path(base) / "WeReadDesktop" / "weread-live-settings.lua"
 
 
-def _ensure_credentials_file(root) -> bool:
-    """Show the wizard when no credential file exists.
+def _credentials_usable(settings: Path) -> bool:
+    """Is the credential file present AND parseable by load_credentials()?
 
-    Returns True when a file exists on return (it already did, or the user just
-    created one), False when the user closed the wizard without providing one.
-    Callers use the False to decide whether starting the main window makes
-    sense at all.
+    Existence alone is not enough. Measured against the frozen build, four
+    credential states produce four different outcomes, and the interesting one
+    is the last:
+
+        absent                    -> wizard shows            (correct)
+        api_key only, no wr_skey  -> no wizard               (correct: the QR
+                                                              login is the next step)
+        complete                  -> no wizard               (correct)
+        malformed                 -> no wizard, then every action fails with a
+                                      credential error the user cannot act on
+
+    A file that cannot be parsed has to behave like a missing one, otherwise
+    the user's only route forward is deleting a file they cannot see. The
+    validation used here is deliberately the same shape load_credentials()
+    requires: the body must be a Lua table readable by LuaJIT, and for the file
+    to be *usable* api_key and cookies.wr_skey must both be non-empty.
+
+    Returns True only when the file can satisfy load_credentials(); a file that
+    exists but cannot is reported as unusable so the caller treats it as absent.
+    """
+    if not settings.is_file():
+        return False
+    try:
+        raw = settings.read_bytes()
+    except OSError:
+        return False
+    start = raw.find(b"\nreturn {")
+    if start < 0:
+        # No table literal. The loader's error for this is "Credential file has
+        # an unexpected format", so treat it as unusable.
+        return False
+    try:
+        from lupa.luajit21 import LuaRuntime
+    except ImportError:
+        # Without LuaJIT the shape cannot be checked. Falling back to "usable"
+        # would resurrect the malformed-file gap, so fall back to the loader's
+        # own contract: require api_key and cookies.wr_skey to be present in
+        # the text, which is a weaker but still meaningful check.
+        text = raw.decode("utf-8", "replace")
+        return "api_key" in text and "wr_skey" in text
+    try:
+        lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+        table = lua.execute(raw[start + 1:])
+        api_key = table[b"api_key"]
+        cookies = table[b"cookies"]
+        if not api_key or not api_key.decode(errors="replace").strip():
+            return False
+        skey = cookies[b"wr_skey"]
+        return bool(skey) and bool(skey.decode(errors="replace").strip())
+    except Exception:
+        # A parse failure or a missing key both mean "not usable"; either way
+        # the wizard is the better path than a window that cannot work.
+        return False
+
+
+def _ensure_credentials_file(root) -> bool:
+    """Open the wizard when the credentials are missing or unusable.
+
+    Returns True when a usable file exists on return (it already did, or the
+    user just created one), False when the user closed the wizard without
+    providing one. Callers use the False to decide whether starting the main
+    window makes sense at all.
+
+    NOTE FOR THE READER: "credentials missing" is not "first run". This runs on
+    every launch until a usable file exists -- including after a full logout,
+    which is the state most users reach first.
     """
     settings = _settings_path()
 
-    if settings.is_file():
+    if _credentials_usable(settings):
         return True
+
+    # The file exists but cannot be used. Saying so is worth one dialog: the
+    # alternative is a window where every button fails with a credential error,
+    # and the only fix is deleting an invisible file.
+    unusable = settings.is_file()
 
     # The dialog's type scale comes from desktop_app when it is importable; a
     # tuple is an acceptable fallback and keeps the wizard usable even if that
@@ -202,17 +269,26 @@ def _ensure_credentials_file(root) -> bool:
 
     dialog.protocol("WM_DELETE_WINDOW", on_close)
 
-    ctk.CTkLabel(dialog, text="首次运行：需要两个凭证",
+    if unusable:
+        heading_text = "凭证文件无法读取，需要重新填写"
+        body_text = (
+            "本机的凭证文件是坏的，程序没法用它登录。\n\n"
+            "请重新填写下面两个值。如果之前填错过，直接覆盖就好。"
+        )
+    else:
+        heading_text = "首次运行：需要两个凭证"
+        body_text = (
+            "本程序需要一个微信读书账号。请先确认你已能用手机 App 或\n"
+            "浏览器登录 https://weread.qq.com 。\n\n"
+            "然后打开下面这个页面，登录后即可看到两个值：\n"
+            "    " + SKILLS_URL
+        )
+
+    ctk.CTkLabel(dialog, text=heading_text,
                  font=_font(16, "bold"), anchor="w").pack(
         fill="x", padx=24, pady=(20, 6))
 
-    body = (
-        "本程序需要一个微信读书账号。请先确认你已能用手机 App 或\n"
-        "浏览器登录 https://weread.qq.com 。\n\n"
-        "然后打开下面这个页面，登录后即可看到两个值：\n"
-        "    " + SKILLS_URL
-    )
-    ctk.CTkLabel(dialog, text=body, font=_font(12), anchor="w",
+    ctk.CTkLabel(dialog, text=body_text, font=_font(12), anchor="w",
                  justify="left", wraplength=500).pack(fill="x", padx=24)
 
     # _font's second parameter is the font WEIGHT, not a style: passing
