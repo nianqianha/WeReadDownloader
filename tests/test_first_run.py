@@ -192,6 +192,75 @@ def test_a_wizard_failure_fails_closed_not_open():
         "a wizard failure must not default to ready=True"
 
 
+# --- when does the wizard trigger? -------------------------------------------
+# Measured against the frozen build, not assumed. Existence of the file is not
+# the same as a usable file, and the difference is a state a user reaches for
+# real: a logout leaves no file, but a corrupted one leaves a file behind.
+
+COMPLETE = ('\nreturn {\n  api_key = "%s",\n'
+            '  cookies = { wr_skey = "fakeskey" },\n'
+            '  wr_ticket = "",\n  wr_wrpa = "",\n}\n' % FAKE_KEY)
+
+API_ONLY = ('\nreturn {\n  api_key = "%s",\n'
+            '  cookies = {\n  },\n'
+            '  wr_ticket = "",\n  wr_wrpa = "",\n}\n' % FAKE_KEY)
+
+
+@test
+def test_the_wizard_does_not_trigger_for_a_complete_file():
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "ok.lua"
+        p.write_text(COMPLETE, encoding="utf-8")
+        assert first_run._credentials_usable(p) is True
+
+
+@test
+def test_a_file_the_loader_rejects_is_not_usable():
+    """api_key without wr_skey, or a broken table: not usable.
+
+    load_credentials() raises for both, so a wizard that skips them would open a
+    window whose every action fails. This is the case existence-only checking
+    got wrong.
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        only_api = Path(tmp) / "only_api.lua"
+        only_api.write_text(API_ONLY, encoding="utf-8")
+        assert first_run._credentials_usable(only_api) is False, \
+            "load_credentials() rejects api_key without wr_skey"
+
+        broken = Path(tmp) / "broken.lua"
+        broken.write_text("this is not a lua table at all\n", encoding="utf-8")
+        assert first_run._credentials_usable(broken) is False
+
+        truncated = Path(tmp) / "truncated.lua"
+        truncated.write_text("\nreturn {\n  api_key = \n", encoding="utf-8")
+        assert first_run._credentials_usable(truncated) is False
+
+
+@test
+def test_the_wizard_triggers_when_there_is_no_file():
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "missing.lua"
+        assert first_run._credentials_usable(p) is False
+
+
+@test
+def test_the_trigger_is_not_wired_to_a_marker_file():
+    """"First run" must not be decided by a flag file.
+
+    A .wizard-done marker would mean a user who deletes their credentials never
+    sees the wizard again. The trigger is the credential file's own state, so
+    it fires on every launch until a usable file exists -- which is also why
+    "first run" is the wrong name for it.
+    """
+    source = (HERE / "first_run.py").read_text(encoding="utf-8")
+    for marker in ("wizard-done", "wizard_done", ".first-run", "firstrun_done"):
+        assert marker not in source, "a first-run flag file must not decide this"
+
+
 def main() -> int:
     failures = 0
     for fn in CASES:
