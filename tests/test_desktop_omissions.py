@@ -98,7 +98,7 @@ def test_both_losses_are_reported_together():
 def test_the_notice_says_the_text_is_intact():
     """The reader must not conclude the book is damaged."""
     notice = app.describe_omissions(_report(images_dropped=100))
-    assert "正文完整" in notice, notice
+    assert "书已下载成功，EPUB 可直接阅读" in notice, notice
 
 
 # --- the worker channel ------------------------------------------------------
