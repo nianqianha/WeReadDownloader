@@ -116,17 +116,35 @@ def write_settings(settings_path: Path, api_key: str, user_vid: str,
 def _settings_path() -> Path:
     """Where the credential file lives.
 
-    Taken from weread_desktop, which is the module that defines and reads it --
-    desktop_app has no module-level SETTINGS at all (its logout() imports this
-    same one), so importing it from desktop_app raised ImportError and the
-    wizard never opened.
+    weread_core owns the profile directory (PRIVATE) and is present in every
+    bundle. weread_desktop also defines SETTINGS, but the GUI bundle EXCLUDES
+    that module on purpose -- it drags in LuaJIT and lxml, which cost ~5 s of
+    startup -- so importing from it raised ImportError inside the frozen GUI.
+    main() catches that and lets the window through, which is why the wizard
+    silently never appeared while the main window opened normally.
+
+    Resolution order: weread_core first (always present), then weread_desktop
+    for the source tree, then a literal fallback so the wizard still works if
+    neither can be imported.
     """
-    try:
-        from .weread_desktop import SETTINGS
-    except ImportError:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from weread_desktop import SETTINGS
-    return SETTINGS
+    for module in ("weread_core", "weread_desktop"):
+        try:
+            try:
+                mod = __import__("." + module, fromlist=["*"])
+            except ImportError:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                mod = __import__(module, fromlist=["*"])
+        except ImportError:
+            continue
+        settings = getattr(mod, "SETTINGS", None)
+        if settings is not None:
+            return Path(settings)
+        private = getattr(mod, "PRIVATE", None)
+        if private is not None:
+            return Path(private) / "weread-live-settings.lua"
+    # Last resort: the same location weread_core would compute.
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData/Local")
+    return Path(base) / "WeReadDesktop" / "weread-live-settings.lua"
 
 
 def _ensure_credentials_file(root) -> bool:
