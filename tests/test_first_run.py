@@ -99,14 +99,36 @@ def test_write_settings_is_atomic_and_leaves_no_tmp_behind():
 
 
 @test
-def test_the_wizard_is_actually_reachable_from_main():
-    """Imported-but-never-called is how this shipped broken once already."""
+def test_the_main_window_opens_before_any_credential_dialog():
+    """The window must open first, and the credential check must not gate it.
+
+    The startup order used to be: hide the window, show a wizard, only then
+    deiconify. A new user therefore saw a small dialog appear and vanish, and on
+    one path it came back a second time. The window is the program, so it opens
+    unconditionally and the check runs afterwards -- a check that raises must not
+    prevent it either.
+    """
     source = (HERE / "desktop_app.py").read_text(encoding="utf-8")
-    assert "from .first_run import _ensure_credentials_file" in source, \
-        "the import must remain"
-    # the call, not just the import
-    assert "_ensure_credentials_file(root)" in source, \
-        "main() must call the wizard, not merely import it"
+    body = source.split("def main()", 1)[1]
+
+    assert "root.withdraw()" not in body, \
+        "the main window must not be hidden at startup"
+    assert "DesktopApp(root)" in body, "the window is built"
+    idx_check = body.find("check_credentials_on_start()")
+    idx_build = body.find("DesktopApp(root)")
+    assert idx_check > idx_build > 0, \
+        "the credential check runs on a live window, not before it"
+
+
+@test
+def test_a_credential_check_failure_does_not_stop_the_window():
+    """A raising check is logged, not fatal."""
+    source = (HERE / "desktop_app.py").read_text(encoding="utf-8")
+    assert "def check_credentials_on_start" in source, "the method must exist"
+    call_region = source.split("def main()", 1)[1].split("mainloop", 1)[0]
+    assert "check_credentials_on_start()" in call_region
+    assert "except Exception" in call_region, \
+        "a credential check failure must not stop the window from opening"
 
 
 @test
@@ -175,19 +197,21 @@ def test_the_credential_path_does_not_need_the_excluded_module():
 
 
 @test
-def test_a_wizard_failure_fails_closed_not_open():
-    """main() must not treat a crashed wizard as consent.
+def test_the_wizard_is_no_longer_a_startup_gate():
+    """The wizard is not what decides whether the program starts.
 
-    The first version caught every exception and set ready = True, so a wizard
-    that could not even import let the main window open. That is what made the
-    failure invisible: nothing on screen said why every action failed.
+    It used to be: the window was hidden, the wizard ran, and only a "ready"
+    result deiconified it. That produced the observed sequence -- a small dialog
+    appearing, then the window, and on one path the dialog again -- because a
+    wizard failure was silently treated as consent. The window now opens first
+    and always; this asserts that design is still in place.
     """
     source = (HERE / "desktop_app.py").read_text(encoding="utf-8")
-    marker = "ready = _ensure_credentials_file(root)"
-    assert marker in source
-    after = source.split(marker, 1)[1][:900]
-    assert "ready = True" not in after, \
-        "a wizard failure must not default to ready=True"
+    main_body = source.split("def main()", 1)[1]
+    assert "_ensure_credentials_file(root)" not in main_body, \
+        "the wizard must not gate startup"
+    assert "root.withdraw()" not in main_body, \
+        "the window must not be hidden while anything else runs"
 
 
 # --- when does the wizard trigger? -------------------------------------------
