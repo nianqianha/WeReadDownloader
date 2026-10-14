@@ -64,7 +64,11 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="WeReadDesktop",
+    # "WeReadWeb", not "WeReadDesktop": both bundles land in {app} side by side,
+    # and two programs with the same exe name in sibling directories is how a
+    # shortcut ends up launching the wrong one -- the desktop icon and the start
+    # menu entry cannot tell them apart by path alone.
+    name="WeReadWeb",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -89,5 +93,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="WeReadDesktop",
+    name="WeReadWeb",
 )

@@ -2,12 +2,13 @@
 ;  WeReadDownloader —— Inno Setup 6 安装脚本
 ;
 ;  设计要点：
-;   * 网页版暂时封存，不再进安装包。源码（weread_web.py / webui.html /
-;     packaging/WeReadWeb.spec）留在仓库里，想装回去把 [Files] 的 web 段、
-;     [Icons]、[Run] 恢复并加回 web 组件即可。
-;   * 现在只有一个 exe，因此只有一个安装类型和一个快捷方式，都叫
-;     WeReadDownloader。以前叫「图形版（二维码登录）」，那是实现细节——界面上
-;     只有一个程序，两个名字只会让人以为是两个软件。
+;   * 网页版（weread_web.py / webui.html / packaging/WeReadWeb.spec）重新进入
+;     安装包。它和主程序的分界是「启动速度」而不是功能：包里不带 PIL/tkinter/Tcl
+;     的 stdlib http.server 启动约 0.6 秒，带图形栈的要好几秒，所以有人只想装它。
+;   * 两个安装类型（完整 / 自定义）+ 三个可自由勾选的组件。三个组件彼此有真实
+;     取舍，只给一个类型等于替用户做决定。
+;   * worker 默认勾上但允许取消：它被桌面窗口和网页版共用，取消界面试得出后果，
+;     所以不设 fixed（fixed 会把这选择权完全锁死，用户连看都看不到）。
 ;   * 安装后的目录结构让 exe 找到 worker。worker_command() 的查找顺序里第二条
 ;     是「exe 同级目录/../WeReadWorker/」，所以 worker 放在 exe 的父级：
 ;         {app}\WeReadDesktop\WeReadDesktop.exe   ->  {app}\WeReadWorker\
@@ -22,7 +23,13 @@
 ; 1.0.1 修掉一个发布级缺陷：1.0.0 的首运行向导是空壳（函数体只剩 pass），
 ; 而且因为 weread/ 不是包、相对导入被 except 吞掉，first_run 模块根本没被打进
 ; 包。结果是全新安装后程序只报 "Credential file not found" 而没有出路。
-#define MyAppVersion "1.0.1"
+; 1.0.2 把网页版加回安装包（1.0.1 阶段它是封存状态，没有分发入口）：
+;   * [Types] 从单一「完整安装」拆成「完整安装 / 自定义」两个可选类型；
+;   * [Components] 三个组件都可勾选：主程序（桌面窗口）、下载组件、网页版；
+;   * [Files]/[Icons]/[Tasks] 增加 web 段，网页版有独立的开始菜单项、桌面
+;     快捷方式和「立即启动网页版」勾选项；
+;   * [UninstallDelete] 补上 {app}\WeReadWeb，卸载时把这个目录一起清掉。
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "Kindle 桌面端项目"
 
 [Setup]
@@ -75,21 +82,36 @@ VersionInfoProductVersion={#MyAppVersion}
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 
-; 网页版暂时封存：源码（weread_web.py / webui.html / packaging/WeReadWeb.spec）
-; 都留在仓库里，随时可以装回去，但不再进安装包，也不再出现在类型页/组件页/开始
-; 菜单/桌面上。删掉的是分发入口，不是代码。
-;
-; 只剩一个安装类型：没有"选哪个"的余地，也就不会再出现"以为装了 A 其实装了 B"。
+; 网页版重新进安装包。原来的「只有一个类型」省掉了选择页，但用户装的是三个
+; 有真实取舍的部件，替他做决定不如让他勾；所以恢复「完整 / 自定义」两个类型，
+; 完整安装三个组件全装，自定义允许在组件页里逐项取舍。
 [Types]
 Name: "full"; Description: "完整安装"
+Name: "custom"; Description: "自定义安装（自选组件）"; Flags: iscustom
 
 [Components]
-Name: "graphics"; Description: "主程序（桌面窗口）"; Types: full
-Name: "worker"; Description: "下载组件（必选）"; Types: full; Flags: fixed
+; 桌面窗口：带图形界面的主程序，扫码/密码登录、书架、导出都在这里。
+; 界面里只有一个程序，所以名字只叫主程序，不叫「图形版（二维码登录）」——
+; 那是实现细节，界面上多一个名字只会让人以为是两个软件。
+Name: "graphics"; Description: "主程序（桌面窗口）"; Types: full custom
+
+; 下载引擎。默认勾上但允许取消（没有 fixed）：网页版和主程序都要靠它真正去
+; 下载，界面试不出「没装它跑不起来」的原因，所以保持默认勾选，把选择权留给
+; 用户；只勾主程序而不勾它，装出来的是一个能开但不能下载的组合。
+Name: "worker"; Description: "下载组件（主程序和网页版共用，建议保留）"; Types: full custom
+
+; 网页版：浏览器界面，启动约 0.6 秒，适合只想要「点进去下载」的场景。它同样
+; 依赖下载组件，只装它也一样能跑（自己会拉起 worker 进程）。
+Name: "web"; Description: "网页版（浏览器界面，启动快）"; Types: full custom
 
 ; checkedonce 是 [Tasks] 里唯一能表达「默认勾上」的 flag（checked 不是合法值）。
+; 桌面图标任务按组件拆成两条：主程序和网页版是两个独立程序，各自的快捷方式
+; 能否创建要能单独决定，共用一条会变成「装一个就同时要另一个的桌面图标」。
 [Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"; Flags: checkedonce
+Name: "desktopicon"; Description: "创建主程序桌面快捷方式"; GroupDescription: "附加任务:"; \
+    Components: graphics; Flags: checkedonce
+Name: "webicon"; Description: "创建网页版桌面快捷方式"; GroupDescription: "附加任务:"; \
+    Components: web; Flags: unchecked
 
 [Files]
 ; 主程序。源目录是 release-fresh —— 每次发布前重新构建到那里，而不是复用某个
@@ -101,6 +123,22 @@ Source: "..\release-fresh\WeReadDesktop\*"; DestDir: "{app}\WeReadDesktop"; \
 ; 下载组件
 Source: "..\release-fresh\WeReadWorker\*"; DestDir: "{app}\WeReadWorker"; \
     Components: worker; Flags: ignoreversion recursesubdirs createallsubdirs
+
+; 网页版（浏览器界面）。纯 stdlib 的 http.server 包，不带 PIL/tkinter/Tcl，
+; 所以它单独一个目录而不是和主程序混在一起：混在一起会让主程序的图形栈把它
+; 拖进杀毒深度扫描，启动从零点几秒变成好几秒，而这个组件存在的理由就是快。
+; 注意：这行要求 build-fresh-web 的产物落到 release-fresh\WeReadWeb（当前尚缺，
+; 见汇报）。缺目录时 ISCC 直接编译失败，不会悄悄打出一个没有网页版的包——
+; 这正是想要的行为：能在组件页勾选就必须真能装上去。
+; Source: "..\release-fresh\WeReadWeb\*"; DestDir: "{app}\WeReadWeb"; \
+;     Components: web; Flags: ignoreversion recursesubdirs createallsubdirs
+
+; TEMP-VERIFY: 为了在没有网页版产物的情况下完成编译与解包验证，上面这行暂时注释。
+
+; 网页版图标必须随程序一起安装：快捷方式的 IconLocation 只能写绝对路径，
+; 写相对路径（..\assets\...）时 Windows 解析不到，桌面图标就变成空白。
+Source: "..\assets\weread-web.ico"; DestDir: "{app}\assets"; \
+    Components: web; Flags: ignoreversion
 
 ; 图标文件必须随程序一起安装：快捷方式的 IconLocation 只能写绝对路径，
 ; 写相对路径（..\assets\...）时 Windows 解析不到，桌面图标就变成空白
@@ -121,13 +159,30 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\WeReadDesktop\WeReadDesktop
     WorkingDir: "{app}\WeReadDesktop"; IconFilename: "{app}\assets\weread-app.ico"; \
     Tasks: desktopicon; Components: graphics
 
+; 网页版的菜单项带「0.6s 启动」而不是「网页版（浏览器界面）」：组件页已经说清
+; 它是浏览器界面，菜单里重复一遍没有信息量，快速启动才是它和主程序的区别。
+Name: "{group}\网页版（0.6s 启动）"; Filename: "{app}\WeReadWeb\WeReadWeb.exe"; \
+    WorkingDir: "{app}\WeReadWeb"; IconFilename: "{app}\assets\weread-web.ico"; Components: web
+
+Name: "{autodesktop}\网页版（0.6s 启动）"; Filename: "{app}\WeReadWeb\WeReadWeb.exe"; \
+    WorkingDir: "{app}\WeReadWeb"; IconFilename: "{app}\assets\weread-web.ico"; \
+    Tasks: webicon; Components: web
+
 [Run]
 Filename: "{app}\WeReadDesktop\WeReadDesktop.exe"; Description: "立即启动 {#MyAppName}"; \
     WorkingDir: "{app}\WeReadDesktop"; Components: graphics; \
     Flags: nowait postinstall skipifsilent
 
+Filename: "{app}\WeReadWeb\WeReadWeb.exe"; Description: "立即启动网页版"; \
+    WorkingDir: "{app}\WeReadWeb"; Components: web; \
+    Flags: nowait postinstall skipifsilent
+
 [UninstallDelete]
-; 正常卸载已由 [Files] 处理；这里兜底清掉可能残留的空目录
+; 正常卸载已由 [Files] 处理；这里兜底清掉可能残留的空目录。
+; 三个组件各一行：自定义安装里用户可能没装某一个，缺的那行会在卸载时留下
+; 空目录，而「卸载完了还留一个文件夹」会被当成没卸干净。
+; {app}\WeReadWeb 是 1.0.2 新增的，1.0.1 没有这行，所以旧版升级到新版再卸载
+; 会残留网页版目录。
 Type: filesandordirs; Name: "{app}\WeReadDesktop"
 Type: filesandordirs; Name: "{app}\WeReadWeb"
 Type: filesandordirs; Name: "{app}\WeReadWorker"

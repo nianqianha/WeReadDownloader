@@ -93,6 +93,37 @@ def validate(api_key: str) -> str:
     return ""
 
 
+def _validate_creds(api_key: str, skey: str) -> str:
+    """Validate an inline-card submission.
+
+    Unlike validate(), wr_skey is optional here: the QR login fills it, so a
+    user who only has api_key must be able to save and then scan. Returns an
+    error message, or "" when the values are acceptable.
+    """
+    api_key = (api_key or "").strip()
+    skey = (skey or "").strip()
+    if not api_key:
+        return "请填写 API Key。"
+    if not api_key.startswith("wrk-"):
+        return "API Key 应以 wrk- 开头，请检查是否复制完整。"
+    if len(api_key) < 12:
+        return "API Key 看起来太短了，请确认复制完整。"
+    return ""
+
+
+def _build_settings_lua(api_key: str, skey: str = "",
+                        cookies: dict | None = None) -> str:
+    """Render the credential file, with or without a session.
+
+    cookies is preferred when given (it can carry wr_vid and the other session
+    keys the QR login produces); skey alone is the hand-entered fallback.
+    """
+    jar = dict(cookies or {})
+    if skey and not jar:
+        jar["wr_skey"] = skey
+    return build_settings_lua(api_key, cookies=jar)
+
+
 def write_settings(settings_path: Path, api_key: str,
                    cookies: dict | None = None) -> Path:
     """Write the credential file, creating the parent directory if needed."""
