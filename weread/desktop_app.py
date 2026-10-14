@@ -904,7 +904,7 @@ class DesktopApp:
         the whole folder while the readable book stays.
 
         The bundle zip embeds its own copy of the notes, so it goes too; the
-        reader can still re-download them later with 含想法 on.
+        reader can still re-download them later with the notes mode on.
         """
         folder = Path(path)
         targets = [folder / "reviews.jsonl", folder / "*.weread.zip"]
@@ -928,7 +928,7 @@ class DesktopApp:
         if not self._ask("askyesno", "删除想法数据",
                          "删除《%s》的想法数据（约 %.0f MB）？\n\n"
                          "EPUB 正文和划线会完整保留，只丢笔记正文与打包副本；\n"
-                         "之后勾选「含想法」重新下载可以再取回。\n\n继续吗？"
+                         "之后选「划线 + 想法」重新下载可以再取回。\n\n继续吗？"
                          % (folder.name, mb)):
             return
         removed, failed = 0, 0
@@ -1387,16 +1387,26 @@ class DesktopApp:
             button_hover_color=self.SUNKEN, variable=self.jobs, state="readonly")
         self.jobs_box.grid(row=0, column=2, sticky="e", padx=(0, 6), pady=(12, 0))
         self._make_combo_keyboard_reachable(self.jobs_box)
-        # 想法 is its own switch next to 并发: it changes how long an export takes
-        # far more than 并发 does, on the heavily annotated books that need it least.
-        self.thoughts_var = ctk.BooleanVar(value=False)
-        self.thoughts_box = ctk.CTkSwitch(
-            export, text="含想法", variable=self.thoughts_var, width=44,
-            height=22, corner_radius=11, progress_color=self.ACCENT,
-            button_color=self.CARD, button_hover_color=self.CARD,
-            text_color=self.FAINT, font=_font(12), fg_color=self.HAIRLINE)
-        self.thoughts_box.grid(row=0, column=3, sticky="w", padx=(0, 10), pady=(12, 0))
-        self.thoughts_box.configure(state="disabled")
+        # 标注 has three states, not two, because the note text and the highlights
+        # are separable. A plain-text export wants neither; --no-thoughts wants
+        # highlights but no notes; the default wants both. Two switches could not
+        # say that without an invalid combination (notes without highlights, since
+        # a note hangs off a highlight).
+        self.annotations_var = ctk.StringVar(value="both")
+        self.annotations_box = ctk.CTkComboBox(
+            export, values=("划线 + 想法", "只要划线", "纯正文"),
+            variable=self.annotations_var, width=104, height=28, state="readonly",
+            dropdown_font=_font(12), font=_font(12),
+            # Not fg_color="transparent": that is a Frame-only colour in
+            # CustomTkinter, and a CTkComboBox rejects it outright with
+            # "transparency is not allowed for this attribute". The top bar is
+            # CARD, so use that and let the border carry the outline.
+            fg_color=self.CARD, border_width=1, border_color=self.HAIRLINE,
+            text_color=self.INK, button_color=self.HAIRLINE,
+            button_hover_color=self.SUNKEN)
+        self.annotations_box.grid(row=0, column=3, sticky="e", padx=(0, 10), pady=(12, 0))
+        self._make_combo_keyboard_reachable(self.annotations_box)
+        self.annotations_box.configure(state="disabled")
         self.probe_button = ctk.CTkButton(
             export, text="先检查第一章", command=self.probe, height=36,
             corner_radius=6, fg_color=self.CARD, hover_color=self.SUNKEN,
@@ -1588,9 +1598,9 @@ class DesktopApp:
         self.job_seq += 1
         job = self.job_seq
         self.last_failure = False
-        # A running worker already carries its own --no-thoughts decision, so
-        # flipping the switch now would silently not apply to this job.
-        self.thoughts_box.configure(state="disabled")
+        # A running worker already carries its own annotation decision, so
+        # changing it now would silently not apply to this job.
+        self.annotations_box.configure(state="disabled")
         self.last_unresolved = False
         self.omissions = None
         self.pause_button.configure(state="normal" if action == "export" else "disabled")
@@ -1941,7 +1951,7 @@ class DesktopApp:
         self.process = None
         self.current_action = ""
         self.pause_button.configure(state="disabled")
-        self.thoughts_box.configure(state="normal")
+        self.annotations_box.configure(state="normal")
         try:
             if self.last_failure:
                 self._finish_failed_action(action)
@@ -2711,8 +2721,12 @@ class DesktopApp:
             self.status.set("当前有任务正在运行，等它结束再检查第一章。")
             return
         args = ["--probe-book", self.selected_id]
-        want_thoughts = bool(self.thoughts_var.get())
-        if not want_thoughts:
+        mode = self.annotations_var.get()
+        want_thoughts = mode != "plain"
+        want_underlines = mode != "plain"
+        if not want_underlines:
+            args.append("--no-annotations")
+        elif not want_thoughts:
             args.append("--no-thoughts")
         self._start_worker(args, "probe",
                            "正在检查这本书的第一章、划线"
@@ -2725,18 +2739,23 @@ class DesktopApp:
         if self._is_busy():
             self.status.set("当前有任务正在运行，等它结束再开始下载。")
             return
-        want_thoughts = bool(self.thoughts_var.get())
+        mode = self.annotations_var.get()
+        want_thoughts = mode != "plain"
+        want_underlines = mode != "plain"
+        marks = ("划线 + 想法", "只要划线", "纯正文（无划线）")[("both", "marks", "plain").index(mode)]
         if not self._ask("askyesno",
                 "开始下载",
                 f"准备下载：{self.selected_title}\n作者：{self.selected_author or '暂无信息'}\n\n"
-                f"想法（笔记正文）：{'包含' if want_thoughts else '跳过——划线仍会全部保留'}\n\n"
+                f"标注：{marks}\n\n"
                 "已有章节会自动续传。若微信读书返回空章节或无法确认的划线，会记录问题并继续检查其它章节；"
                 "有未解决章节时不会生成不完整 EPUB。继续吗？"):
             return
         self.progress.set(0)
         jobs = max(1, min(4, int(self.jobs.get())))
         args = [self.selected_id, "--jobs", str(jobs)]
-        if not want_thoughts:
+        if not want_underlines:
+            args.append("--no-annotations")
+        elif not want_thoughts:
             args.append("--no-thoughts")
         if not self._start_worker(args, "export",
                                   "正在准备下载并检查本地断点…"):
