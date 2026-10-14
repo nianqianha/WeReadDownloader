@@ -1,17 +1,16 @@
 -- weread-importer: import a desktop WeReadDownloader .weread.zip into
 -- KOReader without installing the full WeRead client plugin.
 --
--- Two loader contracts learned from crash.log:
---   02:41:22  "attempt to call a nil value"  -> addToMainMenu must be a METHOD
---             on a WidgetContainer subclass, not a function field on a table
---   02:50:33  "failed to register widget filemanagerweread-importer ... :25"
---             -> init() runs in the FILE MANAGER stage, where self.ui.menu
---             does not exist; registerToMainMenu belongs to reader-stage
---             plugins whose init runs later. A plugin that wants to appear in
---             BOTH menus implements only the addToMainMenu method and lets the
---             menu builder call it.
+-- Menu registration copied from lightnovel.koplugin, which works on this
+-- device: registerToMainMenu in init(), plus an addToMainMenu METHOD that
+-- delegates to the ui/widget/menu module. filemanagermenu.lua calls
+-- widget:addToMainMenu(menu_items) on every registered widget and
+-- WidgetContainer does not define it -- without the delegation KOReader logs
+-- "failed to register widget ... attempt to call a nil value" and shows
+-- nothing (three rounds of exactly that on 2026-10-15).
 
 local InfoMessage = require("ui/widget/infomessage")
+local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
@@ -22,18 +21,23 @@ local Importer = WidgetContainer:extend{
     version = "1.0.0",
 }
 
-function Importer:addToMainMenu(menu_table)
-    menu_table:add{
-        text = _("WeRead Importer"),
+function Importer:init()
+    self.ui.menu:registerToMainMenu(self)
+end
+
+function Importer:addToMainMenu(menu_items)
+    Menu.addToMainMenu(self, menu_items)
+    menu_items:add{
+        text = _("WeRead 导入器"),
         sub_item_table = {
             {
-                text = _("Import desktop bundle"),
+                text = _("导入桌面下载包"),
                 keep_menu_open = false,
                 callback = function()
                     local PathChooser = require("ui/widget/pathchooser")
                     local inbox = "/mnt/us/koreader/weread/bundle-inbox"
                     local chooser = PathChooser:new{
-                        title = _("Select .weread.zip"),
+                        title = _("选择 .weread.zip 导入包"),
                         show_hidden = false,
                         show_unsupported = true,
                         path = inbox,
@@ -45,13 +49,11 @@ function Importer:addToMainMenu(menu_table)
                                 end)
                                 if not ok then
                                     UIManager:show(InfoMessage:new{
-                                        text = _("Import failed: ")
-                                            .. tostring(result), })
+                                        text = _("导入失败：") .. tostring(result), })
                                     return
                                 end
                                 UIManager:show(InfoMessage:new{
-                                    text = _("Import finished: the book is in "
-                                        .. "your KOReader library."), })
+                                    text = _("导入完成！书已在 KOReader 书架中，划线想法已写入。"), })
                             end)
                         end,
                     }
