@@ -43,7 +43,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 ; 产物输出到项目内 release-installer\
 OutputDir=..\release-installer
-OutputBaseFilename=WeReadDesktop-Setup
+; 跟 AppName 一致。README 里写的是这个名字，改这里之前两边对不上，下载链接
+; 指的是一个不存在的文件。
+OutputBaseFilename=WeReadDownloader-Setup
 
 Compression=lzma2/ultra64
 SolidCompression=yes
