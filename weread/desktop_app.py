@@ -14,6 +14,7 @@ import json
 import datetime
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -598,27 +599,60 @@ class DesktopApp:
         return rows
 
     def _read_history(self):
-        """DONE lines from the worker log, newest first: (stamp, summary)."""
+        """DONE lines from every worker log, newest first: (stamp, summary).
+
+        Two mismatched conventions existed before this fix: the worker writes
+        per-book logs (desktop-<bookId>.log) whose DONE line carries a PATH, and
+        the history page read only desktop-general.log expecting a JSON payload.
+        The page was therefore always empty no matter how many downloads
+        succeeded -- this machine's first download had DONE/EPUB/IMPORT_BUNDLE
+        lines sitting in desktop-26796447.log while the page read a file that
+        never receives them.
+
+        Both shapes are accepted now, and every desktop-*.log is scanned:
+          DONE {json with title/chapters}   -> the payload the page was built for
+          DONE <path>                       -> what the worker actually prints
+        """
         rows = []
         try:
-            log_path = Path(LOG_DIR) / "desktop-general.log"
-            if not log_path.is_file():
+            if not LOG_DIR.is_dir():
                 return rows
-            for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                if not line.startswith("DONE "):
-                    continue
-                # DONE {json payload}; the title and chapter count are what a
-                # reader wants, not the internal dict dump.
+            logs = sorted(LOG_DIR.glob("desktop-*.log"))
+            # newest file first, so a book downloaded today outranks one from
+            # last week even before the per-line sort below
+            logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for log_path in logs:
                 try:
-                    payload = json.loads(line[5:])
-                    title = str(payload.get("title") or "未知书名")
-                    chapters = payload.get("chapters") or payload.get("total") or "?"
-                    rows.append(("完成", f"{title} · {chapters} 章"))
-                except (ValueError, TypeError):
-                    rows.append(("完成", line[5:120]))
+                    text = log_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for line in text.splitlines():
+                    if not line.startswith("DONE "):
+                        continue
+                    body = line[5:].strip()
+                    try:
+                        payload = json.loads(body)
+                        title = str(payload.get("title") or "未知书名")
+                        chapters = payload.get("chapters") or payload.get("total") or "?"
+                        rows.append(("完成", f"{title} · {chapters} 章"))
+                        continue
+                    except (ValueError, TypeError):
+                        pass
+                    # the path form: name the book from the export folder, and
+                    # say which artifact was produced
+                    p = Path(body.replace("/", "\\"))
+                    book = p.parent.name if p.parent.name else body
+                    if book.endswith(".work"):
+                        book = book[:-5]
+                    artifact = "EPUB" if body.lower().endswith(".epub") else (
+                        "导入包" if body.lower().endswith(".zip") else "文件")
+                    # strip a bookId suffix for display, as the scan page does
+                    display = re.sub(r"-\d{6,}$", "", book) or book
+                    rows.append(("完成", f"{display} · {artifact}"))
         except OSError:
             pass
-        return rows[:200]
+        # newest first by the file they came from; within one file, last line wins
+        return list(reversed(rows))[:200]
 
     def _read_annotation_notes(self):
         """Unplaced-underline decisions from the log, newest first."""
