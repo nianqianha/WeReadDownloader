@@ -28,17 +28,21 @@ import customtkinter as ctk
 from PIL import Image
 
 import weread_login
-# Three helpers from first_run, used by check_credentials_on_start() to say in
-# the status bar what is missing. The wizard itself is no longer a startup gate:
-# the main window always opens. first_run stays in the GUI bundle and is still
-# declared as a hiddenimport in WeReadDesktop.spec -- see the comment there for
-# why pyinstaller does not see the relative import on its own.
+SKILLS_URL = "https://weread.qq.com/r/weread-skills"
+# Helpers from first_run, used by check_credentials_on_start() to say in the
+# status bar what is missing, and by the inline credential card in the download
+# panel. The wizard itself is no longer a startup gate: the main window always
+# opens. first_run stays in the GUI bundle and is still declared as a
+# hiddenimport in WeReadDesktop.spec -- see the comment there for why pyinstaller
+# does not see the relative import on its own.
 try:
     from .first_run import (_settings_path, _credentials_usable, _has_api_key,
-                            _ensure_credentials_file)
+                            _validate_creds, _build_settings_lua,
+                            write_settings, _ensure_credentials_file)
 except ImportError:
     from first_run import (_settings_path, _credentials_usable, _has_api_key,
-                           _ensure_credentials_file)
+                           _validate_creds, _build_settings_lua,
+                           write_settings, _ensure_credentials_file)
 
 # Every user-facing sentence about a worker line lives in weread_core so the
 # web-mode server can reuse the exact same phrasing without pulling tkinter and
@@ -1431,6 +1435,79 @@ class DesktopApp:
         self.export_button.grid(row=1, column=1, columnspan=3, padx=(6, 18),
                                 pady=(6, 10), sticky="ew")
 
+        # --- credentials, inline ------------------------------------------------
+        # No dialog, no second window: when the credentials are incomplete this
+        # panel takes the place of the buttons and says what is missing. It
+        # hides itself again the moment load_credentials() would succeed, so the
+        # window is the only UI a new user ever has to look at.
+        self.creds_panel = ctk.CTkFrame(export, fg_color=self.SUNKEN,
+                                         corner_radius=8)
+        self.creds_panel.grid(row=1, column=0, columnspan=4, sticky="ew",
+                              padx=18, pady=(6, 10))
+        self.creds_panel.grid_remove()          # shown only when incomplete
+
+        ctk.CTkLabel(self.creds_panel, text="需要两个凭证才能下载",
+                     text_color=self.INK, anchor="w",
+                     font=_font(14, "bold")).pack(fill="x", padx=18, pady=(14, 4))
+
+        self.creds_hint = ctk.CTkLabel(
+            self.creds_panel, text="", text_color=self.FAINT, anchor="w",
+            font=_font(12), wraplength=560, justify="left")
+        self.creds_hint.pack(fill="x", padx=18)
+
+        # wr_skey only: the QR login fills it, so a field is the wrong control.
+        self.scan_only_frame = ctk.CTkFrame(self.creds_panel, fg_color="transparent")
+        ctk.CTkLabel(self.scan_only_frame,
+                     text="wr_skey 由「扫码登录」自动获取，无需手动填写。",
+                     text_color=self.FAINT, anchor="w", font=_font(12),
+                     wraplength=520, justify="left").pack(fill="x", pady=(10, 6))
+        self.scan_now_button = ctk.CTkButton(
+            self.scan_only_frame, text="去扫码登录", height=34, command=self.open_login,
+            corner_radius=6, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            text_color="#FFFFFF", font=_font(13))
+        self.scan_now_button.pack(anchor="w")
+
+        # Both fields: first run, or a credential file that cannot be read.
+        self.fields_frame = ctk.CTkFrame(self.creds_panel, fg_color="transparent")
+        ctk.CTkLabel(self.fields_frame, text="API Key（以 wrk- 开头）",
+                     text_color=self.INK, anchor="w",
+                     font=_font(12)).pack(fill="x", pady=(12, 0))
+        ctk.CTkLabel(self.fields_frame,
+                     text="在 weread.qq.com/r/weread-skills 登录后复制。不需要开开发者模式。",
+                     text_color=self.FAINT, anchor="w", font=_font(11)
+                     ).pack(fill="x", pady=(0, 4))
+        self.creds_api_entry = ctk.CTkEntry(self.fields_frame, width=520, height=34,
+                                            placeholder_text="wrk-xxxxxxxxxxxx")
+        self.creds_api_entry.pack(fill="x")
+        ctk.CTkLabel(self.fields_frame, text="wr_skey",
+                     text_color=self.INK, anchor="w",
+                     font=_font(12)).pack(fill="x", pady=(10, 0))
+        ctk.CTkLabel(self.fields_frame,
+                     text="扫码登录后自动填入；只有扫码失败时才需要手动粘贴。",
+                     text_color=self.FAINT, anchor="w", font=_font(11)
+                     ).pack(fill="x", pady=(0, 4))
+        self.creds_skey_entry = ctk.CTkEntry(self.fields_frame, width=520, height=34)
+        self.creds_skey_entry.pack(fill="x")
+        creds_buttons = ctk.CTkFrame(self.fields_frame, fg_color="transparent")
+        creds_buttons.pack(fill="x", pady=(12, 6))
+        ctk.CTkButton(creds_buttons, text="保存", width=96, height=32,
+                      command=self._save_creds_inline,
+                      corner_radius=6, fg_color=self.ACCENT,
+                      hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
+                      font=_font(13)).pack(side="left")
+        ctk.CTkButton(creds_buttons, text="打开 skills 页面", width=140, height=32,
+                      command=lambda: __import__("webbrowser").open(SKILLS_URL),
+                      corner_radius=6, fg_color=self.CARD, hover_color=self.SUNKEN,
+                      border_width=1, border_color="#D5D9DF",
+                      text_color=self.MUTED, font=_font(13)).pack(side="left",
+                                                                 padx=(10, 0))
+        self.creds_error = ctk.CTkLabel(self.fields_frame, text="", anchor="w",
+                                        text_color=self.RED, font=_font(12),
+                                        wraplength=520, justify="left")
+        self.creds_error.pack(fill="x", pady=(4, 10))
+        self.creds_api_entry.bind("<Return>", lambda _e: self.creds_skey_entry.focus_set())
+        self.creds_skey_entry.bind("<Return>", lambda _e: self._save_creds_inline())
+
         # progress + status live on the same card, below the buttons
         self.progress = ctk.CTkProgressBar(
             export, height=6, corner_radius=3, progress_color=self.ACCENT,
@@ -2687,6 +2764,16 @@ class DesktopApp:
         self.close_login()
 
     def _save_manual_credentials(self):
+        """Save a manually entered credential pair -- into BOTH files.
+
+        Why both: load_credentials() treats weread-live-settings.lua as the
+        mandatory base and raises "Credential file not found" when it is absent.
+        save_credentials() only writes the sealed session overlay, so a manual
+        save on a fresh install produced a session file with no base file -- the
+        save reported success and every later action failed. The inline card's
+        writer (first_run.write_settings) covers the base file, so this path
+        writes the base too, then the overlay, keeping the two-file contract.
+        """
         api_key = self.manual_api_key.get().strip()
         skey = self.manual_skey.get().strip()
         if not api_key:
@@ -2695,6 +2782,16 @@ class DesktopApp:
         if not skey:
             self.login_manual_status.configure(
                 text="请填写 wr_skey。缺少它无法下载章节正文。")
+            return
+        # The base file first: without it the overlay alone is unusable, and the
+        # icacls call inside save_credentials blocks the Tk thread for seconds,
+        # so anything that must be checked for this save to make sense is
+        # checked before that cost is paid.
+        try:
+            write_settings(_settings_path(), api_key,
+                           cookies={"wr_skey": skey})
+        except OSError as exc:
+            self.login_manual_status.configure(text=f"保存失败：{exc}")
             return
         credentials = {
             "cookies": {"wr_skey": skey},
@@ -2713,36 +2810,106 @@ class DesktopApp:
         self._refresh_logout_button()
         self.auth_badge.configure(text="登录有效", text_color=self.GREEN)
         self.status.set("凭证已保存。现在可以检查登录状态。")
+        self._refresh_creds_panel()
         self.close_login()
 
-    def check_credentials_on_start(self):
-        """Tell the user, in the window, what credentials are still missing.
+    def _refresh_creds_panel(self):
+        """Show the credential card when something is missing, hide it when not.
 
-        The main window always opens. This method looks at the credential file
-        once at startup and puts the answer in the status bar, so a new user sees
-        what to do next instead of a dialog that appeared and vanished.
-
-        No dialog, no extra window, no second popup: the message is one line in
-        the status bar, which is where the program reports everything else.
+        Three states, three layouts -- a field that does not apply is never
+        drawn, because an empty box the user cannot fill is worse than no box.
         """
         try:
             path = _settings_path()
-        except Exception:
-            return
-        if not path.is_file():
-            self.status.set("首次使用：点「登录 / 切换账号」填写 api_key，再扫码登录。")
-            return
-        try:
             usable = _credentials_usable(path)
             has_key = _has_api_key(path)
         except Exception:
             return
         if usable:
+            self.creds_panel.grid_remove()
+            self.probe_button.grid()
+            self.export_button.grid()
             return
+
+        # Something is missing: the card takes the place of the buttons.
+        self.probe_button.grid_remove()
+        self.export_button.grid_remove()
+        self.creds_panel.grid()
+        self.creds_error.configure(text="")
+
         if has_key:
-            self.status.set("凭证还差一步：点「登录 / 切换账号」扫码，拿到 wr_skey 后即可下载。")
+            # api_key is in place; only the session is missing, and that comes
+            # from the QR login -- so offer the button, not a form.
+            self.fields_frame.pack_forget()
+            self.scan_only_frame.pack(fill="x", padx=18)
+            self.creds_hint.configure(
+                text="api_key 已就绪。还差 wr_skey —— 点下面的按钮扫码即可。")
+            return
+
+        # Nothing usable on disk: both fields, with the reason if there is one.
+        self.scan_only_frame.pack_forget()
+        self.fields_frame.pack(fill="x", padx=18)
+        if path.is_file():
+            self.creds_hint.configure(
+                text="本机的凭证文件读不了（格式不对或已损坏），请重新填写。")
         else:
-            self.status.set("凭证文件读不了：点「登录 / 切换账号」重新填写 api_key。")
+            self.creds_hint.configure(
+                text="首次使用：填下面两个值。其中 wr_skey 由「扫码登录」自动获取，"
+                     "只有扫码失败时才需要手动粘贴。")
+        # Pre-fill api_key when the file has one, so a re-fill is not from scratch.
+        try:
+            from lupa.luajit21 import LuaRuntime
+            raw = path.read_bytes()
+            start = raw.find(b"\nreturn {")
+            if start >= 0:
+                lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+                table = lua.execute(raw[start + 1:])
+                key = table[b"api_key"]
+                if key:
+                    self.creds_api_entry.delete(0, "end")
+                    self.creds_api_entry.insert(0, key.decode(errors="replace"))
+        except Exception:
+            pass
+
+    def _save_creds_inline(self):
+        """Save what the inline card holds, then re-evaluate the panel."""
+        api_key = self.creds_api_entry.get().strip()
+        skey = self.creds_skey_entry.get().strip()
+        problem = _validate_creds(api_key, skey)
+        if problem:
+            self.creds_error.configure(text=problem)
+            return
+        try:
+            settings = _settings_path()
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            text_body = _build_settings_lua(
+                api_key, skey if skey else "",
+                cookies=({"wr_skey": skey} if skey else None))
+            temp = settings.with_suffix(settings.suffix + ".tmp")
+            temp.write_text(text_body, encoding="utf-8")
+            os.replace(temp, settings)
+        except OSError as exc:
+            self.creds_error.configure(text="无法写入凭证文件：%s" % exc)
+            return
+        self.status.set("凭证已保存。")
+        self._refresh_creds_panel()
+
+    def check_credentials_on_start(self):
+        """Show the credential card in the download panel when something is missing.
+
+        The main window always opens -- there is no dialog and no second window,
+        which is the whole point after a first-run flow that popped a window up,
+        resized it, and then vanished. Whatever is missing is shown as a card
+        inside the download panel, next to the buttons it replaces, so the user
+        acts on it in the one window they already have.
+        """
+        try:
+            self._refresh_creds_panel()
+        except Exception as exc:
+            # A card that fails to build must not stop the window from opening.
+            print("[FIRST_RUN] credential panel failed: %s: %s"
+                  % (type(exc).__name__, exc), file=sys.stderr)
+            self.status.set("凭证还没配好：点「登录 / 切换账号」填写后即可下载。")
 
     def check_auth(self):
         if self._is_busy():
