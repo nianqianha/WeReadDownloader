@@ -10,7 +10,7 @@ WHY THIS EXISTS
 
 THE TWO VALUES
     api_key   (wrk-...)  from https://weread.qq.com/r/weread-skills
-    user_vid  (digits)   the account id, also on that page
+    (nothing else -- the QR login fills in vid and wr_skey itself)
 
     wr_skey is NOT collected here: it only exists after a scan-login, which the
     main window performs. Until that happens the file is written with an empty
@@ -50,7 +50,7 @@ def _lua_quote(value: str) -> str:
     return "".join(out)
 
 
-def build_settings_lua(api_key: str, user_vid: str,
+def build_settings_lua(api_key: str,
                        cookies: dict | None = None,
                        wr_ticket: str = "",
                        wr_wrpa: str = "") -> str:
@@ -76,7 +76,7 @@ def build_settings_lua(api_key: str, user_vid: str,
     return "\n".join(lines)
 
 
-def validate(api_key: str, user_vid: str) -> str:
+def validate(api_key: str) -> str:
     """Return an error message, or "" when both values look usable.
 
     Deliberately strict about shape and silent about correctness: whether the
@@ -84,26 +84,21 @@ def validate(api_key: str, user_vid: str) -> str:
     next. Catching a typo here saves a round trip and a confusing error.
     """
     api_key = (api_key or "").strip()
-    user_vid = (user_vid or "").strip()
     if not api_key:
         return "请填写 api_key。"
     if not api_key.startswith("wrk-"):
         return "api_key 应以 wrk- 开头，请检查是否复制完整。"
     if len(api_key) < 12:
         return "api_key 看起来太短了，请确认复制完整。"
-    if not user_vid:
-        return "请填写 user_vid。"
-    if not user_vid.isdigit():
-        return "user_vid 应为纯数字（通常是 9 位左右）。"
     return ""
 
 
-def write_settings(settings_path: Path, api_key: str, user_vid: str,
+def write_settings(settings_path: Path, api_key: str,
                    cookies: dict | None = None) -> Path:
     """Write the credential file, creating the parent directory if needed."""
     settings_path = Path(settings_path)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    text = build_settings_lua(api_key.strip(), user_vid.strip(), cookies=cookies)
+    text = build_settings_lua(api_key.strip(), cookies=cookies)
     temp = settings_path.with_suffix(settings_path.suffix + ".tmp")
     with temp.open("w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
@@ -307,11 +302,6 @@ def _ensure_credentials_file(root) -> bool:
                                  placeholder_text="wrk-xxxxxxxxxxxxxxxxxxxx")
     api_key_entry.pack(padx=24, pady=(4, 12))
 
-    ctk.CTkLabel(dialog, text="user_vid（纯数字）", font=_font(12),
-                 anchor="w").pack(fill="x", padx=24)
-    user_vid_entry = ctk.CTkEntry(dialog, width=500, height=36,
-                                  placeholder_text="例如 123456789")
-    user_vid_entry.pack(padx=24, pady=(4, 6))
 
     status = ctk.CTkLabel(dialog, text="", font=_font(11), anchor="w",
                           text_color="#D9534F", justify="left", wraplength=500)
@@ -319,13 +309,12 @@ def _ensure_credentials_file(root) -> bool:
 
     def submit():
         api_key = api_key_entry.get().strip()
-        user_vid = user_vid_entry.get().strip()
-        problem = validate(api_key, user_vid)
+        problem = validate(api_key)
         if problem:
             status.configure(text=problem)
             return
         try:
-            write_settings(settings, api_key, user_vid)
+            write_settings(settings, api_key)
         except OSError as exc:
             status.configure(text="无法写入凭证文件：%s" % exc)
             return
@@ -343,7 +332,7 @@ def _ensure_credentials_file(root) -> bool:
                   command=on_close).pack(side="right", padx=(0, 10))
 
     # Enter submits from either field; the wizard is two fields, not a form.
-    for entry in (api_key_entry, user_vid_entry):
+    for entry in (api_key_entry,):
         entry.bind("<Return>", lambda _e: submit())
     api_key_entry.focus_set()
 
