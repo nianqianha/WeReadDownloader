@@ -20,6 +20,15 @@ from pathlib import Path
 # The program modules live in weread/ and import each other by bare name.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "weread"))
 
+# The merged-view check reads weread_login.CREDENTIAL_STATE. Point it at a
+# scratch path so the real profile's overlay (a genuine session on this machine)
+# cannot leak into fixtures that describe base-file states -- the same leak that
+# made these assertions fail while the program behaved correctly.
+_OVERLAY_ISOLATION = tempfile.TemporaryDirectory(prefix="weread-overlay-")
+import weread_login as _weread_login
+_weread_login.CREDENTIAL_STATE = (
+    Path(_OVERLAY_ISOLATION.name) / "session-cookies.json")
+
 HERE = Path(__file__).resolve().parent.parent / "weread"
 spec = importlib.util.spec_from_file_location("first_run", HERE / "first_run.py")
 first_run = importlib.util.module_from_spec(spec)
