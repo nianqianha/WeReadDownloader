@@ -320,18 +320,8 @@ class DesktopApp:
         self._stall_watcher.start()
         self.root.after(100, self._poll)
 
-    def _set_window_icon(self, root):
-        """Give the window the app icon, in both source and frozen layouts.
-
-        The exe's own icon is not enough: Tk draws its default widget icon in
-        the title bar and the taskbar unless iconphoto() is called. So the .ico
-        has to be found at run time as well.
-
-        The icon is a multi-size .ico (16..256) and Tk's PhotoImage only reads
-        one frame, so the frames are pulled out with PIL and handed over as
-        separate PhotoImages -- that is what makes the small sizes crisp rather
-        than a downscaled 256px blur.
-        """
+    def _app_icon_path(self):
+        """Locate weread-app.ico in both the source and the frozen layout."""
         candidates = []
         here = Path(__file__).resolve().parent
         if getattr(sys, "frozen", False):
@@ -346,26 +336,83 @@ class DesktopApp:
             # This module lives in weread/, while assets/ sits at the repo root.
             candidates.append(here.parent / "assets" / "weread-app.ico")
             candidates.append(here / "assets" / "weread-app.ico")
+        return next((c for c in candidates if c.is_file()), None)
 
-        path = next((c for c in candidates if c.is_file()), None)
+    def _app_icon_pil(self, size=32):
+        """One frame of the app icon as a PIL RGBA image, cached per size.
+
+        The .ico already carries 16..256px frames, so the real frame is pulled
+        out rather than downscaling the 256px one into a blur at 16px.
+        """
+        cache = getattr(self, "_icon_pil_cache", None)
+        if cache is None:
+            cache = self._icon_pil_cache = {}
+        if size in cache:
+            return cache[size]
+        path = self._app_icon_path()
         if path is None:
+            return None
+        try:
+            from PIL import Image
+            img = Image.open(path).convert("RGBA").resize(
+                (size, size), Image.LANCZOS)
+        except Exception:
+            return None
+        cache[size] = img
+        return img
+
+    def _app_icon_photo(self, size=32):
+        """The same icon as a Tk PhotoImage, which is what iconphoto() takes.
+
+        Tk's PhotoImage reads GIF/PPM/PGM but not raw RGBA bytes, so the frame is
+        re-encoded as GIF on the way through.
+        """
+        cache = getattr(self, "_icon_photo_cache", None)
+        if cache is None:
+            cache = self._icon_photo_cache = {}
+        if size in cache:
+            return cache[size]
+        img = self._app_icon_pil(size)
+        if img is None:
+            return None
+        try:
+            import tkinter as _tk
+            buf = io.BytesIO()
+            img.save(buf, format="GIF")
+            buf.seek(0)
+            photo = _tk.PhotoImage(data=buf.read())
+        except Exception:
+            return None
+        cache[size] = photo
+        return photo
+
+    def _set_window_icon(self, root):
+        """Give the window the app icon, in both source and frozen layouts.
+
+        The exe's own icon is not enough: Tk draws its default widget icon in
+        the title bar and the taskbar unless iconphoto() is called. So the .ico
+        has to be found at run time as well.
+        """
+        if self._app_icon_path() is None:
             print("[ICON] weread-app.ico not found; using the Tk default",
                   file=sys.stderr)
             return
+        frames = [self._app_icon_photo(s) for s in (48, 32, 24, 16)]
+        frames = [f for f in frames if f is not None]
+        if not frames:
+            print("[ICON] could not read any icon frame", file=sys.stderr)
+            return
         try:
-            from PIL import Image
-            import tkinter as _tk
-            frames = []
-            for size in (48, 32, 24, 16):
-                frame = Image.open(path).convert("RGBA").resize(
-                    (size, size), Image.LANCZOS)
-                # Tk's PhotoImage takes GIF/PPM/PGM, not raw RGBA bytes -- so
-                # each frame is re-encoded as GIF. Reopening the file per size
-                # keeps every frame crisp instead of downscaling the 256px one.
-                buf = io.BytesIO()
-                frame.save(buf, format="GIF")
-                buf.seek(0)
-                frames.append(_tk.PhotoImage(data=buf.read()))
+            # Clear CustomTkinter's default icon first. On Windows a window's
+            # iconbitmap (an HICON) outranks iconphoto, and CTk installs its own
+            # blue placeholder -- so setting the photo alone silently did
+            # nothing and the title bar kept showing CTk's icon. Verified by
+            # isolating it: tk.Tk() honoured iconphoto, ctk.CTk() did not until
+            # iconbitmap was cleared.
+            try:
+                root.iconbitmap("")
+            except Exception:
+                pass
             # keep them alive: a garbage-collected PhotoImage makes Tk raise
             # "image doesn't exist" on the next update
             self._icon_refs = frames
@@ -1136,17 +1183,13 @@ class DesktopApp:
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
 
-        brand = ctk.CTkFrame(side, fg_color="transparent", height=52)
-        brand.pack(fill="x", padx=16, pady=(10, 4))
-        brand.pack_propagate(False)
-        logo = ctk.CTkLabel(brand, text="读", width=24, height=24, corner_radius=6,
-                            fg_color=self.ACCENT, text_color="#FFFFFF",
-                            font=_font(12, "bold"))
-        logo.pack(side="left")
-        ctk.CTkLabel(brand, text=APP_TITLE, text_color=self.SIDE_TXT_HI,
-                     font=_font(13, "bold"), anchor="w").pack(side="left", padx=(10, 0))
+        # No brand block in the rail. The window title already carries the name,
+        # and this used to repeat it a second time right beside it. The logo that
+        # sat here was a CTkLabel painted with ACCENT -- a green "读" placeholder,
+        # not the artwork in weread-app.ico, so it matched neither the shortcut
+        # nor the title bar. One name and one icon, both in the title bar.
 
-        ctk.CTkFrame(side, height=1, fg_color="#2A3646").pack(fill="x", padx=16, pady=(4, 8))
+        ctk.CTkFrame(side, height=1, fg_color="#2A3646").pack(fill="x", padx=16, pady=(14, 10))
 
         nav = ctk.CTkFrame(side, fg_color="transparent")
         nav.pack(fill="both", expand=True, padx=10)

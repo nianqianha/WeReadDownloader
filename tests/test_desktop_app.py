@@ -978,7 +978,43 @@ def test_the_program_actually_runs_when_executed_as_a_script():
         "does nothing when run")
 
 
+def test_the_real_icon_beats_customtkinters_placeholder():
+    """iconbitmap must be cleared before iconphoto, or the icon silently loses.
+
+    CustomTkinter installs its own iconbitmap (an HICON) on the toplevel, and on
+    Windows a bitmap icon outranks a photo one -- so calling iconphoto alone left
+    the title bar showing CTk's blue placeholder no matter what artwork was
+    loaded. Found by screenshot: every test passed while the window displayed the
+    wrong icon. Isolated it by comparing tk.Tk() against ctk.CTk().
+    """
+    import customtkinter as ctk
+
+    root = ctk.CTk()
+    root.geometry("1120x680")
+    instance = app.DesktopApp(root)
+    root.update()
+    calls = []
+    try:
+        root.iconbitmap = lambda *a: calls.append(("iconbitmap", a))
+        root.iconphoto = lambda *a, **k: calls.append(("iconphoto", a))
+        instance._app_icon_photo = lambda size=32: object()
+        instance._set_window_icon(root)
+
+        assert calls, "the window icon was never applied"
+        first = calls[0]
+        assert first[0] == "iconbitmap", (
+            "iconphoto was set before clearing CTk's iconbitmap, so CTk's icon "
+            "wins: first call was %r" % (calls,))
+        assert first[1] == ("",), (
+            "iconbitmap must be cleared with an empty path, got %r" % (first[1],))
+        assert any(c[0] == "iconphoto" for c in calls), (
+            "the photo icon was never set: %r" % (calls,))
+    finally:
+        root.destroy()
+
+
 ALL_TESTS = [
+    test_the_real_icon_beats_customtkinters_placeholder,
     test_the_program_actually_runs_when_executed_as_a_script,
     test_wechat_rating_scale_formats_as_ten_point_score,
     test_common_errors_are_translated_to_actionable_chinese,
