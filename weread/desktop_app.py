@@ -28,10 +28,17 @@ import customtkinter as ctk
 from PIL import Image
 
 import weread_login
+# Three helpers from first_run, used by check_credentials_on_start() to say in
+# the status bar what is missing. The wizard itself is no longer a startup gate:
+# the main window always opens. first_run stays in the GUI bundle and is still
+# declared as a hiddenimport in WeReadDesktop.spec -- see the comment there for
+# why pyinstaller does not see the relative import on its own.
 try:
-    from .first_run import _ensure_credentials_file
+    from .first_run import (_settings_path, _credentials_usable, _has_api_key,
+                            _ensure_credentials_file)
 except ImportError:
-    from first_run import _ensure_credentials_file
+    from first_run import (_settings_path, _credentials_usable, _has_api_key,
+                           _ensure_credentials_file)
 
 # Every user-facing sentence about a worker line lives in weread_core so the
 # web-mode server can reuse the exact same phrasing without pulling tkinter and
@@ -2708,6 +2715,35 @@ class DesktopApp:
         self.status.set("凭证已保存。现在可以检查登录状态。")
         self.close_login()
 
+    def check_credentials_on_start(self):
+        """Tell the user, in the window, what credentials are still missing.
+
+        The main window always opens. This method looks at the credential file
+        once at startup and puts the answer in the status bar, so a new user sees
+        what to do next instead of a dialog that appeared and vanished.
+
+        No dialog, no extra window, no second popup: the message is one line in
+        the status bar, which is where the program reports everything else.
+        """
+        try:
+            path = _settings_path()
+        except Exception:
+            return
+        if not path.is_file():
+            self.status.set("首次使用：点「登录 / 切换账号」填写 api_key，再扫码登录。")
+            return
+        try:
+            usable = _credentials_usable(path)
+            has_key = _has_api_key(path)
+        except Exception:
+            return
+        if usable:
+            return
+        if has_key:
+            self.status.set("凭证还差一步：点「登录 / 切换账号」扫码，拿到 wr_skey 后即可下载。")
+        else:
+            self.status.set("凭证文件读不了：点「登录 / 切换账号」重新填写 api_key。")
+
     def check_auth(self):
         if self._is_busy():
             self.status.set("当前有任务正在运行，等它结束再检查登录。")
@@ -2862,42 +2898,21 @@ def main() -> int:
         # and two processes fighting over the same session file.
         return 0
     root = ctk.CTk()
-    root.withdraw()
-    # No credential file means every action in the main window would fail with
-    # "Credential file not found", so the wizard runs first and the main window
-    # only opens once it reports a file exists. Declining the wizard quits:
-    # opening a window that cannot do anything would just be a dead end.
-    #
-    # A wizard failure is NOT treated as consent. The first version of this
-    # defaulted to "ready" on any exception, so when the frozen bundle could not
-    # import the module the wizard depends on, it failed invisibly and the main
-    # window opened anyway -- the user then hit "Credential file not found" on
-    # every action with nothing on screen explaining why. Failing closed shows a
-    # dialog that names the problem instead.
+    # The main window opens immediately -- always. The earlier design hid the
+    # window and ran a credential wizard first, so a new user's first experience
+    # was a small dialog appearing, then nothing until it was dismissed, and on
+    # some paths it came back a second time for no visible reason. The window is
+    # the program; it is what the user asked for. Missing credentials are a
+    # state the window itself handles: the download panel says what is missing
+    # and offers the entry point, and nothing has to be filled in anywhere else.
+    app = DesktopApp(root)
     try:
-        ready = _ensure_credentials_file(root)
+        app.check_credentials_on_start()
     except Exception as exc:
-        import traceback
-        detail = "%s: %s" % (type(exc).__name__, exc)
-        print("[FIRST_RUN] wizard failed: " + detail, file=sys.stderr)
-        traceback.print_exc()
-        try:
-            from tkinter import messagebox
-            messagebox.showerror(
-                "无法启动",
-                "首次运行向导出错，程序不能继续。\n\n"
-                "错误：%s\n\n"
-                "请把这条信息发给开发者。日志位于：\n%s"
-                % (detail, LOG_DIR))
-        except Exception:
-            pass
-        root.destroy()
-        return 1
-    if not ready:
-        root.destroy()
-        return 0
-    root.deiconify()
-    DesktopApp(root)
+        # A credential check must never stop the window from opening. Logged and
+        # carried on: the panel's own state tells the user what to do next.
+        print("[FIRST_RUN] credential check failed: %s: %s"
+              % (type(exc).__name__, exc), file=sys.stderr)
     root.mainloop()
     return 0
 
