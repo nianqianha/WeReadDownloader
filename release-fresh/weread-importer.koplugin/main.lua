@@ -1,16 +1,14 @@
 -- weread-importer: import a desktop WeReadDownloader .weread.zip into
 -- KOReader without installing the full WeRead client plugin.
 --
--- Menu registration copied from lightnovel.koplugin, which works on this
--- device: registerToMainMenu in init(), plus an addToMainMenu METHOD that
--- delegates to the ui/widget/menu module. filemanagermenu.lua calls
--- widget:addToMainMenu(menu_items) on every registered widget and
--- WidgetContainer does not define it -- without the delegation KOReader logs
--- "failed to register widget ... attempt to call a nil value" and shows
--- nothing (three rounds of exactly that on 2026-10-15).
+-- addToMainMenu receives a PLAIN ARRAY (filemanagermenu.lua builds one and
+-- calls this method on every registered widget): entries go in with
+-- table.insert. Two earlier attempts failed on exactly this:
+--   menu_items:add{...}            -> "attempt to call method 'add'"
+--   Menu.addToMainMenu(...)        -> ui/widget/menu has no such static
+-- (lightnovel's Menu.addToMainMenu is lightnovel's OWN module, not this one.)
 
 local InfoMessage = require("ui/widget/infomessage")
-local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
@@ -26,8 +24,7 @@ function Importer:init()
 end
 
 function Importer:addToMainMenu(menu_items)
-    Menu.addToMainMenu(self, menu_items)
-    menu_items:add{
+    table.insert(menu_items, {
         text = _("WeRead 导入器"),
         sub_item_table = {
             {
@@ -53,7 +50,7 @@ function Importer:addToMainMenu(menu_items)
                                     return
                                 end
                                 UIManager:show(InfoMessage:new{
-                                    text = _("导入完成！书已在 KOReader 书架中，划线想法已写入。"), })
+                                    text = _("导入完成！书已在 KOReader 书架中。"), })
                             end)
                         end,
                     }
@@ -61,7 +58,7 @@ function Importer:addToMainMenu(menu_items)
                 end,
             },
         },
-    }
+    })
 end
 
 return Importer
