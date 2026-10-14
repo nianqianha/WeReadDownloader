@@ -28,6 +28,10 @@ import customtkinter as ctk
 from PIL import Image
 
 import weread_login
+try:
+    from .first_run import _ensure_credentials_file
+except ImportError:
+    from first_run import _ensure_credentials_file
 
 # Every user-facing sentence about a worker line lives in weread_core so the
 # web-mode server can reuse the exact same phrasing without pulling tkinter and
