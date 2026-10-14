@@ -2862,6 +2862,23 @@ def main() -> int:
         # and two processes fighting over the same session file.
         return 0
     root = ctk.CTk()
+    root.withdraw()
+    # No credential file means every action in the main window would fail with
+    # "Credential file not found", so the wizard runs first and the main window
+    # only opens once it reports a file exists. Declining the wizard quits:
+    # opening a window that cannot do anything would just be a dead end.
+    try:
+        ready = _ensure_credentials_file(root)
+    except Exception as exc:
+        # A wizard that crashes must not take the program down with it; the main
+        # window can still show its own login entry point.
+        print("[FIRST_RUN] wizard failed: %s: %s"
+              % (type(exc).__name__, exc), file=sys.stderr)
+        ready = True
+    if not ready:
+        root.destroy()
+        return 0
+    root.deiconify()
     DesktopApp(root)
     root.mainloop()
     return 0
