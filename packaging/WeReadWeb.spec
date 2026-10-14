@@ -29,7 +29,11 @@ if not os.path.isfile(FAVICON):
 
 a = Analysis(
     [os.path.join(SRC, "weread_web.py")],
-    pathex=[],
+    # The modules import each other by bare name (import weread_core); the file
+    # appends its own directory to sys.path at runtime, but PyInstaller's static
+    # analysis does not execute code, so the path must be declared here or the
+    # sibling modules are left out of the bundle.
+    pathex=[SRC],
     binaries=[],
     datas=[(os.path.join(SRC, "webui.html"), "."), (FAVICON, ".")],
     hiddenimports=[],

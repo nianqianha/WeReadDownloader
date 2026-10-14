@@ -1,4 +1,4 @@
-﻿; ============================================================================
+; ============================================================================
 ;  WeReadDownloader —— Inno Setup 6 安装脚本
 ;
 ;  设计要点：
@@ -19,7 +19,10 @@
 ; ============================================================================
 
 #define MyAppName "WeReadDownloader"
-#define MyAppVersion "1.0.0"
+; 1.0.1 修掉一个发布级缺陷：1.0.0 的首运行向导是空壳（函数体只剩 pass），
+; 而且因为 weread/ 不是包、相对导入被 except 吞掉，first_run 模块根本没被打进
+; 包。结果是全新安装后程序只报 "Credential file not found" 而没有出路。
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "Kindle 桌面端项目"
 
 [Setup]
@@ -33,7 +36,9 @@ VersionInfoVersion={#MyAppVersion}
 ; 安装位置：默认 Program Files（写入需要管理员权限）。允许命令行用
 ; /CURRENTUSER 降级为「仅为我安装」，此时 {autopf} 解析到
 ; %LOCALAPPDATA%\Programs，非管理员机器/无提权环境下也能装上并测试。
-DefaultDirName={autopf}\WeReadDesktop
+; 目录名与 AppName 保持一致：之前叫 WeReadDesktop，而产品名已是
+; WeReadDownloader，开始菜单里两个名字对不上，用户会以为是两个软件。
+DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
@@ -87,12 +92,14 @@ Name: "worker"; Description: "下载组件（必选）"; Types: full; Flags: fix
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"; Flags: checkedonce
 
 [Files]
-; 主程序
-Source: "..\release-qrlogin\WeReadDesktop\*"; DestDir: "{app}\WeReadDesktop"; \
+; 主程序。源目录是 release-fresh —— 每次发布前重新构建到那里，而不是复用某个
+; 历史 release-* 目录：之前指向 release-qrlogin，那个目录停留在几轮改动之前，
+; 装出来的程序和仓库里的源码根本不是一回事。
+Source: "..\release-fresh\WeReadDesktop\*"; DestDir: "{app}\WeReadDesktop"; \
     Components: graphics; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; 下载组件
-Source: "..\release-qrlogin\WeReadWorker\*"; DestDir: "{app}\WeReadWorker"; \
+Source: "..\release-fresh\WeReadWorker\*"; DestDir: "{app}\WeReadWorker"; \
     Components: worker; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; 图标文件必须随程序一起安装：快捷方式的 IconLocation 只能写绝对路径，
@@ -124,3 +131,9 @@ Filename: "{app}\WeReadDesktop\WeReadDesktop.exe"; Description: "立即启动 {#
 Type: filesandordirs; Name: "{app}\WeReadDesktop"
 Type: filesandordirs; Name: "{app}\WeReadWeb"
 Type: filesandordirs; Name: "{app}\WeReadWorker"
+
+[InstallDelete]
+; 1.0.0 把程序装在 {autopf}\WeReadDesktop，1.0.1 起目录名与产品名统一为
+; WeReadDownloader。留着旧目录会让人以为还装着另一个版本，所以升级时清掉它。
+; 只删程序目录，不动 %LOCALAPPDATA%\WeReadDesktop（那是用户的导出与凭证）。
+Type: filesandordirs; Name: "{autopf}\WeReadDesktop"

@@ -19,7 +19,18 @@ if not os.path.isfile(ICON):
 
 datas = []
 binaries = []
-hiddenimports = []
+hiddenimports = [
+    # desktop_app.py imports this through a try/except pair:
+    #     try:    from .first_run import _ensure_credentials_file
+    #     except ImportError: from first_run import _ensure_credentials_file
+    # weread/ has no __init__.py, so the relative form cannot resolve and the
+    # ImportError branch is silently what runs. PyInstaller's static analysis
+    # follows only what it can resolve, so first_run was absent from every
+    # bundle built before this line existed -- the wizard was not merely a stub,
+    # the module was never packaged at all. Declared explicitly rather than
+    # relying on the absolute import being traced.
+    "first_run",
+]
 for package in ("customtkinter", "darkdetect", "qrcode"):
     tmp_ret = collect_all(package)
     datas += tmp_ret[0]
@@ -28,7 +39,9 @@ for package in ("customtkinter", "darkdetect", "qrcode"):
 
 a = Analysis(
     [os.path.join(SRC, "desktop_app.py")],
-    pathex=[],
+    # The modules import each other by bare name (import weread_login), so the
+    # directory holding them must be on the analysis path.
+    pathex=[SRC],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

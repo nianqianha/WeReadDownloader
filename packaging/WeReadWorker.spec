@@ -55,7 +55,10 @@ hiddenimports += tmp_ret[2]
 
 a = Analysis(
     [os.path.join(SRC, "weread_worker.py")],
-    pathex=[],
+    # The worker loads weread_desktop.py by path at runtime and imports the
+    # sibling modules by bare name; the analysis path must name weread/ or the
+    # static pass cannot see them.
+    pathex=[SRC],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

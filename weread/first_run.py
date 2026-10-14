@@ -113,6 +113,22 @@ def write_settings(settings_path: Path, api_key: str, user_vid: str,
     return settings_path
 
 
+def _settings_path() -> Path:
+    """Where the credential file lives.
+
+    Taken from weread_desktop, which is the module that defines and reads it --
+    desktop_app has no module-level SETTINGS at all (its logout() imports this
+    same one), so importing it from desktop_app raised ImportError and the
+    wizard never opened.
+    """
+    try:
+        from .weread_desktop import SETTINGS
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from weread_desktop import SETTINGS
+    return SETTINGS
+
+
 def _ensure_credentials_file(root) -> bool:
     """Show the wizard when no credential file exists.
 
@@ -121,14 +137,24 @@ def _ensure_credentials_file(root) -> bool:
     Callers use the False to decide whether starting the main window makes
     sense at all.
     """
-    try:
-        from .desktop_app import SETTINGS, _font
-    except ImportError:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from desktop_app import SETTINGS, _font
+    settings = _settings_path()
 
-    if SETTINGS.is_file():
+    if settings.is_file():
         return True
+
+    # The dialog's type scale comes from desktop_app when it is importable; a
+    # tuple is an acceptable fallback and keeps the wizard usable even if that
+    # module cannot be loaded. The signature mirrors desktop_app._font so a call
+    # site cannot work with one and break with the other.
+    try:
+        from .desktop_app import _font
+    except ImportError:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from desktop_app import _font
+        except ImportError:
+            def _font(size, weight="normal"):
+                return ("Microsoft YaHei UI", size, weight)
 
     import customtkinter as ctk
     import webbrowser
@@ -171,9 +197,13 @@ def _ensure_credentials_file(root) -> bool:
     ctk.CTkLabel(dialog, text=body, font=_font(12), anchor="w",
                  justify="left", wraplength=500).pack(fill="x", padx=24)
 
-    link = ctk.CTkLabel(dialog, text="→ 点这里打开该页面",
+    # _font's second parameter is the font WEIGHT, not a style: passing
+    # "underline" made CTkFont reject the value and the dialog died before it
+    # was shown. The link is marked by colour and cursor instead, which is what
+    # a link needs anyway.
+    link = ctk.CTkLabel(dialog, text="→ 点这里打开该页面（也可手动复制上面的网址）",
                         text_color="#4A9EFF", cursor="hand2",
-                        font=_font(12, "underline"), anchor="w")
+                        font=_font(12), anchor="w")
     link.pack(fill="x", padx=24, pady=(6, 14))
     link.bind("<Button-1>", lambda _e: webbrowser.open(SKILLS_URL))
 
@@ -201,7 +231,7 @@ def _ensure_credentials_file(root) -> bool:
             status.configure(text=problem)
             return
         try:
-            write_settings(SETTINGS, api_key, user_vid)
+            write_settings(settings, api_key, user_vid)
         except OSError as exc:
             status.configure(text="无法写入凭证文件：%s" % exc)
             return
