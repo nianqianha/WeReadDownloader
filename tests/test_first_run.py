@@ -22,6 +22,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "weread"))
 
 HERE = Path(__file__).resolve().parent.parent / "weread"
+
+# A deliberately self-describing fixture: it carries the word "fake" so
+# the repository's privacy gate classifies it as a stub rather than a
+# leaked credential, and so a reader knows it is not one.
+FAKE_KEY = "wrk-fake-0000000000000000"
 spec = importlib.util.spec_from_file_location("first_run", HERE / "first_run.py")
 first_run = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(first_run)
@@ -36,26 +41,26 @@ def test(fn):
 
 @test
 def test_validate_accepts_a_well_formed_pair():
-    assert first_run.validate("wrk-abcdefghijklmnop", "123456789") == ""
+    assert first_run.validate(FAKE_KEY, "123456789") == ""
 
 
 @test
 def test_validate_rejects_the_typos_a_user_actually_makes():
     assert "api_key" in first_run.validate("", "123456789")
     assert "wrk-" in first_run.validate("abcdefghijklmnop", "123456789")
-    assert "短" in first_run.validate("wrk-abc", "123456789")
-    assert "user_vid" in first_run.validate("wrk-abcdefghijklmnop", "")
-    assert "数字" in first_run.validate("wrk-abcdefghijklmnop", "abc123")
+    assert "短" in first_run.validate("wrk-fake-1", "123456789")
+    assert "user_vid" in first_run.validate(FAKE_KEY, "")
+    assert "数字" in first_run.validate(FAKE_KEY, "abc123")
     # whitespace from a copy-paste must not be treated as a typo
-    assert first_run.validate("  wrk-abcdefghijklmnop  ", " 123456789 ") == ""
+    assert first_run.validate("  " + FAKE_KEY + "  ", " 123456789 ") == ""
 
 
 @test
 def test_the_written_file_parses_as_lua_and_carries_both_values():
     """The real check: run the text through the same LuaJIT the loader uses."""
-    text = first_run.build_settings_lua("wrk-abcdefghijklmnop", "123456789")
+    text = first_run.build_settings_lua(FAKE_KEY, "123456789")
     assert "\nreturn {" in text, "load_credentials() looks for this exact prefix"
-    assert 'api_key = "wrk-abcdefghijklmnop"' in text
+    assert 'api_key = "%s"' % FAKE_KEY in text
     try:
         from lupa.luajit21 import LuaRuntime
     except ImportError:
@@ -65,7 +70,7 @@ def test_the_written_file_parses_as_lua_and_carries_both_values():
     start = text.encode("utf-8").find(b"\nreturn {")
     lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
     table = lua.execute(text.encode("utf-8")[start + 1:])
-    assert table[b"api_key"].decode() == "wrk-abcdefghijklmnop"
+    assert table[b"api_key"].decode() == FAKE_KEY
     assert isinstance(table[b"cookies"], object)
     assert table[b"wr_ticket"].decode() == ""
 
@@ -73,7 +78,7 @@ def test_the_written_file_parses_as_lua_and_carries_both_values():
 @test
 def test_quotes_and_backslashes_in_values_do_not_break_the_lua():
     """A key pasted with a quote in it must not produce an unparseable file."""
-    nasty = 'wrk-a"b\\c'
+    nasty = 'wrk-fake-a"b\\c'
     text = first_run.build_settings_lua(nasty, "1")
     try:
         from lupa.luajit21 import LuaRuntime
@@ -89,7 +94,7 @@ def test_quotes_and_backslashes_in_values_do_not_break_the_lua():
 def test_write_settings_is_atomic_and_leaves_no_tmp_behind():
     with tempfile.TemporaryDirectory(prefix="weread-firstrun-") as tmp:
         target = Path(tmp) / "sub" / "weread-live-settings.lua"
-        first_run.write_settings(target, "wrk-abcdefghijklmnop", "123456789")
+        first_run.write_settings(target, FAKE_KEY, "123456789")
         assert target.is_file()
         assert not list(target.parent.glob("*.tmp")), "temp file left behind"
         assert target.read_text(encoding="utf-8").startswith("--")
