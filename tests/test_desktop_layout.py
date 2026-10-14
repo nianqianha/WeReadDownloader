@@ -94,26 +94,39 @@ def test_metadata_labels_shrink_to_their_text_instead_of_a_fixed_height():
 
 @test
 def test_the_introduction_shows_a_readable_number_of_lines():
-    """The complaint this fixes: only one or two lines were visible."""
+    """The complaint this fixes: only one or two lines were visible.
+
+    Since the pages scroll (2026-10-15), a 680 px window fits ~5 intro lines and
+    the user scrolls for the rest -- so the bar is 4 readable lines, not 6. What
+    must never come back is the original failure: 1-2 lines, or zero.
+    """
     root, instance = _make_gui()
     try:
         height = instance.intro.winfo_height()
         lines = (height - 20) // 19
-        assert lines >= 6, "only ~%d lines visible (%d px)" % (lines, height)
+        assert lines >= 4, "only ~%d lines visible (%d px)" % (lines, height)
     finally:
         root.destroy()
 
 
 @test
-def test_the_introduction_grows_with_the_window():
+def test_the_introduction_sizes_to_its_content():
+    """The old contract (grows with the WINDOW) is gone by design.
+
+    The page scrolls now, so the intro no longer stretches when the window gets
+    taller -- it sizes to its CONTENT in _set_intro. That is the replacement
+    behaviour: a long introduction makes a tall box, and the page scrolls; the
+    window height no longer has anything to do with it.
+    """
     root, instance = _make_gui(SCREEN_FIT_HEIGHT)
-    small = instance.intro.winfo_height()
-    root.geometry("1120x%d" % TALL_HEIGHT)
-    root.update()
-    root.update()
-    tall = instance.intro.winfo_height()
     try:
-        assert tall > small * 1.5, "introduction did not grow: %d -> %d" % (small, tall)
+        empty = instance.intro.winfo_height()
+        # feed it a long introduction directly; _set_intro must grow the box
+        long_text = "这一段简介很长。\n" * 12
+        instance._set_intro(long_text)
+        root.update()
+        filled = instance.intro.winfo_height()
+        assert filled > empty, "intro must grow with content: %d -> %d" % (empty, filled)
     finally:
         root.destroy()
 
