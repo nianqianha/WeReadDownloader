@@ -720,13 +720,21 @@ class WeRead:
         return xhtml, css
 
     def annotations(self, book_id: str, chapter_uid: Any,
-                    want_thoughts: bool = True) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+                    want_thoughts: bool = True,
+                    want_underlines: bool = True
+                    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Fetch underlines and reviews. Neither is required for the chapter.
 
         Underlines and reviews are annotations layered on top of the text, so a
         failure here must cost the annotation, not the prose. Previously one bad
         batch of readreviews raised and discarded the chapter along with the
         batches that had already succeeded.
+
+        want_underlines=False skips both calls entirely. That is the only way to
+        get a plain-text export: want_thoughts=False still has to make the
+        readreviews round trip, because that call is what carries the placement
+        data. Skipping it here is safe precisely because the caller has said it
+        does not want underlines in the first place.
 
         want_thoughts=False drops the NOTE TEXT but keeps the readreviews call.
         That call cannot be skipped, and this is the reason:
@@ -745,6 +753,11 @@ class WeRead:
         having on a 1,483-chapter book where thoughts run into the hundreds of
         megabytes of JSON, and the reason reviews are still fetched in batches.
         """
+        if not want_underlines:
+            # Caller asked for a plain-text export: no underline pass, no
+            # readreviews round trip, nothing to inject. Cheaper and smaller than
+            # --no-thoughts, which still pays for both calls to place highlights.
+            return {"underlines": [], "chapterUid": chapter_uid}, []
         try:
             underlines = self.gateway("/book/underlines", {"bookId": book_id,
                                                                "chapterUid": chapter_uid})
@@ -1318,7 +1331,8 @@ def probe_book(book_id: str, chapter_uid: str | None, settings: dict[str, Any],
     chapter = next((row for row in chapters if str(row["chapterUid"]) == str(chapter_uid)), None) if chapter_uid else chapters[0]
     if chapter is None: raise RuntimeError("chapter UID is not present in the book catalog")
     raw_xhtml, _css = api.chapter_html(book, chapter)
-    underlines, reviews = api.annotations(book_id, chapter["chapterUid"], want_thoughts)
+    underlines, reviews = api.annotations(book_id, chapter["chapterUid"], want_thoughts,
+                                                 want_underlines)
     injected, _annotation_css = lua.globals()[b"_EXPORT"][b"inject"](
         raw_xhtml.encode("utf-8"), lua_table(lua, underlines),
         lua_table(lua, reviews), str(book_id).encode("utf-8"))
@@ -1512,7 +1526,8 @@ def resolve_export_workspace(output: Path, book_id: str, package_name: str) -> P
 
 
 def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int = 1,
-                want_thoughts: bool = True) -> Path:
+                want_thoughts: bool = True,
+                want_underlines: bool = True) -> Path:
     secure_output_directory(output)
     lua = lua_runtime()
     api = WeRead(settings, lua)
@@ -1577,7 +1592,8 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     thread_context = threading.local()
     state_lock = threading.Lock()
 
-    def download_one(index: int, chapter: dict[str, Any]) -> None:
+    def download_one(index: int, chapter: dict[str, Any],
+                     want_underlines: bool = True) -> None:
         body_path = chapter_paths[index - 1]
         review_path = review_paths[index - 1]
         css_path = css_paths[index - 1]
@@ -1598,7 +1614,8 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             raise RuntimeError(
                 f"Chapter {chapter['chapterUid']} is marked paid ({chapter.get('price')}) but returned only a placeholder body; credentials/access did not provide the paid text"
             )
-        underlines, reviews = worker_api.annotations(book_id, chapter["chapterUid"], want_thoughts)
+        underlines, reviews = worker_api.annotations(book_id, chapter["chapterUid"], want_thoughts,
+                                                     want_underlines)
         injected_xhtml, annotation_css = worker_lua.globals()[b"_EXPORT"][b"inject"](
             raw_xhtml.encode("utf-8"), lua_table(worker_lua, underlines),
             lua_table(worker_lua, reviews), book_id.encode("utf-8"))
@@ -1720,7 +1737,8 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
 
     def fetch_with_retries(index: int, chapter: dict[str, Any]) -> None:
         uid = str(chapter["chapterUid"])
-        run_chapter_with_retries(uid, lambda: download_one(index, chapter),
+        run_chapter_with_retries(uid, lambda: download_one(index, chapter,
+                                                          want_underlines),
                                  throttle, unresolved)
 
     if jobs == 1:
@@ -1975,8 +1993,20 @@ def main() -> int:
                         help="Skip idea/review fetching. Underlines are still placed; "
                              "only the idea text and [n] badges are omitted. Much "
                              "faster on heavily annotated books.")
+    parser.add_argument("--no-annotations", action="store_true",
+                        help="Skip annotations entirely: no underlines, no thoughts. "
+                             "Skips the underline and readreviews calls altogether, so "
+                             "it is the fastest and smallest of the three modes. Plain "
+                             "text only -- the exported EPUB has no highlights. Implies "
+                             "--no-thoughts.")
     args = parser.parse_args()
     want_thoughts = not args.no_thoughts
+    want_underlines = not args.no_annotations
+    if not want_underlines:
+        # No underlines means there is nothing for a thought to hang off, so the
+        # note-text switch would be meaningless. Say so once rather than letting
+        # --no-annotations --no-thoughts look like two separate decisions.
+        want_thoughts = False
     if not args.check_auth and not args.search and not args.book_info and not args.probe_book and not args.shelf and not args.book_id:
         parser.error("book_id is required unless --check-auth, --search, or --probe-book is used")
     if args.jobs < 1 or args.jobs > 4:
@@ -2019,12 +2049,14 @@ def main() -> int:
             book_info(args.book_info, settings)
             return 0
         if args.probe_book:
-            probe_book(args.probe_book, args.probe_chapter, settings, want_thoughts)
+            probe_book(args.probe_book, args.probe_chapter, settings, want_thoughts,
+             want_underlines)
             return 0
         if args.shelf:
             shelf_books(settings)
             return 0
-        result = export_book(args.book_id, args.output, settings, args.jobs, want_thoughts)
+        result = export_book(args.book_id, args.output, settings, args.jobs, want_thoughts,
+                       want_underlines)
         print("DONE", result, flush=True)
         return 0
     except Exception as exc:
