@@ -682,11 +682,17 @@ class DesktopApp:
             os.startfile(str(target))
 
     def _create_page(self, page_name: str):
-        """Create page content on demand.
+        """Create or REFRESH page content.
 
         All pages live under the same content area (self.page_host, the frame
-        below the top bar). The download workshop is built eagerly in _build;
-        the other five are built here on first visit and cached.
+        below the top bar). The download workshop is built eagerly in _build.
+
+        The four data pages (bookshelf / history / statistics / highlights)
+        rebuild EVERY visit: their content is a snapshot of disk and log state,
+        and a first-visit cache showed the user yesterday's emptiness after a
+        fresh download had landed -- exports dir had the EPUB, the page said
+        nothing was there. Rebuilding is cheap (a handful of rows from a log
+        scan); being wrong was not.
         """
         builders = {
             "我的书架": self._create_bookshelf_page,
@@ -696,8 +702,14 @@ class DesktopApp:
             "设置": self._create_settings_page,
         }
         builder = builders.get(page_name)
-        if builder is not None and page_name not in self.pages:
-            builder(self.page_host)
+        if builder is None:
+            return
+        if page_name in self.pages:
+            # destroy the stale snapshot so the builder starts clean; _page_scaffold
+            # re-registers the new frame under the same key
+            self.pages[page_name].destroy()
+            del self.pages[page_name]
+        builder(self.page_host)
 
     def _page_scaffold(self, host, title: str):
         """Shared chrome for the non-workshop pages: heading + one card."""
