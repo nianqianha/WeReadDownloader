@@ -161,18 +161,33 @@ tracef("2 require archiver")
     local Archiver = require("ffi/archiver")
     local allowed = { ["bundle.json"] = true, ["manifest.json"] = true,
         ["reviews.jsonl"] = true }
-tracef("3 archiver new")
+    local import_dir = settings.data_dir .. "/imports"
+    mkdir(import_dir)
+    local token = tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
+    stage_epub = import_dir .. "/" .. token .. ".epub"
+    stage_reviews = import_dir .. "/" .. token .. ".reviews.jsonl"
+    local meta_bundle_path = import_dir .. "/bundle.json.tmp"
+    local meta_manifest_path = import_dir .. "/manifest.json.tmp"
+
+    tracef("3 archiver new")
     local archive = Archiver.Reader:new()
     local sizes, count = {}, 0
     local ok, result = xpcall(function()
         tracef("4 archive open")
         if not archive:open(bundle_path) then error(archive.err or "cannot open desktop bundle") end
-        tracef("5 iterate begin")
+        tracef("5 single-pass stream: iterate + extract as we go")
+        -- ONE pass, extraction immediately after each header read -- the
+        -- canonical libarchive flow. No seek(), no second walk: seek() makes
+        -- the reader re-walk the archive with a reused entry struct, and
+        -- THIS device's libarchive build hard-crashes there (traced 3x).
+        local epub_staged, descriptor, manifest
+        local stage_targets = {
+            ["bundle.json"] = meta_bundle_path,
+            ["manifest.json"] = meta_manifest_path,
+            ["reviews.jsonl"] = stage_reviews,
+        }
         for entry in archive:iterate() do
-            if entry.mode == "directory" then
-                -- Directory entries carry no content and are ignored; file
-                -- members remain restricted to the flat allowlist below.
-            elseif entry.mode == "file" then
+            if entry.mode == "file" then
                 count = count + 1
                 local is_epub = type(entry.path) == "string"
                     and entry.path:lower():match("%.epub$") ~= nil
@@ -184,16 +199,26 @@ tracef("3 archiver new")
                 sizes[entry.path] = tonumber(entry.size) or 0
                 if entry.path == "bundle.json" and sizes[entry.path] > MAX_DESCRIPTOR_BYTES then error("bundle descriptor is too large") end
                 if entry.path == "manifest.json" and sizes[entry.path] > MAX_MANIFEST_BYTES then error("bundle manifest is too large") end
+                local dest = stage_targets[entry.path]
+                if dest then
+                    tracef("5x extract " .. entry.path)
+                    if not archive:extractToPath(entry.path, dest) then
+                        error(archive.err or "cannot stage " .. entry.path)
+                    end
+                elseif is_epub and not epub_staged then
+                    tracef("5x extract epub")
+                    if not archive:extractToPath(entry.path, stage_epub) then
+                        error(archive.err or "cannot stage EPUB")
+                    end
+                    epub_staged = true
+                end
             end
         end
-        for name in pairs(allowed) do if not sizes[name] then error("bundle is missing " .. name) end end
-        if sizes["bundle.json"] <= 0 or sizes["manifest.json"] <= 0 then error("bundle metadata is empty") end
-        tracef("6a fresh-reader stage bundle.json")
-        local meta_bundle_path = import_dir .. "/bundle.json.tmp"
-        extract_one(bundle_path, "bundle.json", meta_bundle_path)
-        tracef("6b fresh-reader stage manifest.json")
-        local meta_manifest_path = import_dir .. "/manifest.json.tmp"
-        extract_one(bundle_path, "manifest.json", meta_manifest_path)
+        tracef("5y stream done; parse metadata")
+        for name in pairs(allowed) do
+            if not sizes[name] then error("bundle is missing " .. name) end
+            if name ~= "reviews.jsonl" and sizes[name] <= 0 then error("bundle metadata is empty") end
+        end
         local fb = io.open(meta_bundle_path, "rb")
         if not fb then error("cannot read staged bundle descriptor") end
         local descriptor_bytes = fb:read("*a"); fb:close(); os.remove(meta_bundle_path)
@@ -222,21 +247,12 @@ tracef("3 archiver new")
             valid_chapters[uid] = true
         end
 
-        local token = tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
-        stage_epub = import_dir .. "/" .. token .. ".epub"
-        stage_reviews = import_dir .. "/" .. token .. ".reviews.jsonl"
-        tracef("8 close pass1")
-        archive:close()
-        tracef("9a fresh-reader stage epub")
-        extract_one(bundle_path, epub_name, stage_epub)
-        tracef("9b fresh-reader stage reviews")
-        extract_one(bundle_path, "reviews.jsonl", stage_reviews)
-        local archive = Archiver.Reader:new()  -- keep the cleanup-path variable defined
         if tonumber(manifest.epub_size)
             and lfs.attributes(stage_epub, "size") ~= tonumber(manifest.epub_size) then
             error("bundle EPUB size mismatch")
         end
         if read_prefix(stage_epub, 4) ~= "PK\003\004" then error("bundle EPUB is invalid") end
+        tracef("12 epub archiver")
         tracef("12 epub archiver")
         local epub_archive = Archiver.Reader:new()
         tracef("13 epub open")
