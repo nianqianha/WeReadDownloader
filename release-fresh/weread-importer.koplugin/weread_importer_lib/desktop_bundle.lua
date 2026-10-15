@@ -71,11 +71,22 @@ function M.import(settings, bundle_dir)
     -- but no data_dir/cache_dir. The full plugin gets those from its own
     -- Settings wrapper; the importer derives them from KOReader's
     -- DataStorage once, here, so every later use sees a complete object.
-    if not settings.data_dir then
-        local DataStorage = require("datastorage")
-        settings.data_dir = DataStorage:getDataDir()
+    if not settings.data_dir or settings.data_dir == "." then
+        -- Anchor to THIS file's absolute location: the plugin lives at
+        -- <koreader>/plugins/weread-importer.koplugin/weread_importer_lib/,
+        -- so four dirnames up is the KOReader root (/mnt/us/koreader).
+        -- DataStorage:getDataDir() returned "." on this build (CWD-relative),
+        -- which made every write land in a non-existent relative dir.
+        local source = debug.getinfo(1, "S").source or ""
+        local here = source:sub(1, 1) == "@" and source:sub(2) or source
+        local up = here
+        for _ = 1, 4 do
+            up = up:match("^(.*)[/\\][^/\\]+$") or up
+        end
+        settings.data_dir = up
+        tracef("0 data_dir anchored to " .. settings.data_dir)
     end
-    if not settings.cache_dir then
+    if not settings.cache_dir or settings.cache_dir == "./book-cache" then
         settings.cache_dir = settings.data_dir .. "/book-cache"
     end
     assert(type(bundle_dir) == "string" and bundle_dir ~= "", "bundle path required")
