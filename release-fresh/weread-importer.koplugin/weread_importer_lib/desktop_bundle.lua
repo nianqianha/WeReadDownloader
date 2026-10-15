@@ -71,29 +71,36 @@ function M.import(settings, bundle_dir)
     -- but no data_dir/cache_dir. The full plugin gets those from its own
     -- Settings wrapper; the importer derives them from KOReader's
     -- DataStorage once, here, so every later use sees a complete object.
-    if not settings.data_dir or settings.data_dir == "." then
-        -- Anchor to THIS file's absolute location: the plugin lives at
-        -- <koreader>/plugins/weread-importer.koplugin/weread_importer_lib/,
-        -- so four dirnames up is the KOReader root (/mnt/us/koreader).
-        -- DataStorage:getDataDir() returned "." on this build (CWD-relative),
-        -- which made every write land in a non-existent relative dir.
+    if not settings.data_dir or settings.data_dir == "." or settings.data_dir == "/" then
+        -- Resolve the KOReader data root robustly: plugins must work on any
+        -- device layout (/mnt/us/koreader, /mnt/onboard/.adds/koreader,
+        -- /media/kindle/koreader...). The loader may hand main.lua a
+        -- RELATIVE source (traced: 'plugins/...'), so the file-path anchor
+        -- is only usable when absolute. Otherwise probe the known roots for
+        -- the marker: <root>/plugins/weread-importer.koplugin must exist.
+        local candidates = {}
         local source = debug.getinfo(1, "S").source or ""
         local here = source:sub(1, 1) == "@" and source:sub(2) or source
-        local up = here
-        for _ = 1, 4 do
-            up = up:match("^(.*)[/\\][^/\\]+$") or up
+        if here:sub(1, 1) == "/" then
+            local up = here
+            for _ = 1, 4 do
+                up = up:match("^(.*)[/\\][^/\\]+$") or up
+            end
+            candidates[#candidates + 1] = up
         end
-        -- On this build the loader hands main.lua a RELATIVE source
-        -- ('plugins/weread-importer.koplugin/...'), so the walk-up above
-        -- produced 'plugins' -- a bogus root (traced 19:17). Only an
-        -- ABSOLUTE anchor is usable; otherwise fall back to this device's
-        -- known KOReader root.
-        if up:sub(1, 1) == "/" and up:match("^/mnt/") then
-            settings.data_dir = up
-        else
-            settings.data_dir = "/mnt/us/koreader"
+        candidates[#candidates + 1] = "/mnt/us/koreader"
+        candidates[#candidates + 1] = "/mnt/onboard/.adds/koreader"
+        candidates[#candidates + 1] = "/media/kindle/koreader"
+        for _, root in ipairs(candidates) do
+            if lfs.attributes(root .. "/plugins/weread-importer.koplugin", "mode") == "directory" then
+                settings.data_dir = root
+                break
+            end
         end
-        tracef("0 data_dir anchored to " .. settings.data_dir)
+        if not settings.data_dir or settings.data_dir == "/" then
+            error("cannot locate the KOReader data root -- is the plugin inside <koreader>/plugins/?")
+        end
+        tracef("0 data_dir resolved to " .. settings.data_dir)
     end
     if not settings.cache_dir or settings.cache_dir == "./book-cache" then
         settings.cache_dir = settings.data_dir .. "/book-cache"
@@ -182,8 +189,10 @@ function M.import(settings, bundle_dir)
     -- The standalone importer has no bookshelf UI of its own: the book
     -- must land in the user's document folder so the library shows it.
     -- The annotation store stays under the KOReader data root (invisible).
-    local docs_dir = "/mnt/us/documents/weread-imports"
-    mkdir("/mnt/us/documents")
+    local base_parent = settings.data_dir:match("^(.*)[/\\][^/\\]+$")
+        or settings.data_dir
+    local docs_dir = base_parent .. "/documents/weread-imports"
+    mkdir(base_parent .. "/documents")
     mkdir(docs_dir)
     mkdir(settings.data_dir)
     mkdir(settings.data_dir .. "/annotation-cache")
