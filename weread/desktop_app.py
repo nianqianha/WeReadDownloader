@@ -2853,6 +2853,21 @@ class DesktopApp:
             self._set_login_otp_enabled(False)
 
     def _finish_login(self, credentials: dict):
+        # The engine treats weread-live-settings.lua as the mandatory base;
+        # save_credentials below writes only the sealed overlay. A fresh
+        # install + QR login used to end here with no base file, and every
+        # worker failed with "Credential file not found" (external report
+        # 2026-10-15). Write the base lua first -- the payload already
+        # carries api_key -- then the overlay, mirroring the manual path.
+        try:
+            from first_run import write_settings as _write_base
+            cookies = dict(credentials.get("cookies") or {})
+            if cookies.get("wr_skey") and credentials.get("api_key"):
+                _write_base(_settings_path(), str(credentials["api_key"]), cookies)
+        except Exception:
+            # The overlay save still proceeds; if the base write fails the
+            # user sees the login card with a concrete error next launch.
+            pass
         try:
             weread_login.save_credentials(credentials)
         except OSError as exc:
