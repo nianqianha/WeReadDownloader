@@ -64,8 +64,17 @@ function Importer:addToMainMenu(menu_items)
                                                 .. PluginUtil.display_error(result), })
                                         return
                                     end
-                                    -- Refresh whatever UI is open so the
-                                    -- new book shows up WITHOUT a restart.
+                                    -- Make the book VISIBLE immediately:
+                                    -- 1) the home screen's 最近书籍 wall
+                                    --    reads ReadHistory (never-opened
+                                    --    files don't appear), so register
+                                    --    the import as a history entry;
+                                    -- 2) refresh an open FileManager view.
+                                    pcall(function()
+                                        local ReadHistory =
+                                            require("readhistory")
+                                        ReadHistory:addItem(result.path)
+                                    end)
                                     pcall(function()
                                         local FileManager =
                                             require("apps/filemanager/filemanager")
