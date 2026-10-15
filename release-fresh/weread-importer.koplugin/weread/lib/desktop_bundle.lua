@@ -138,47 +138,21 @@ function M.import(settings, bundle_dir)
     end
     if read_prefix(stage_epub, 4) ~= "PK\003\004" then error("bundle EPUB is invalid") end
 
-    tracef("4 validate epub chapters")
-    local epub_archive = require("ffi/archiver").Reader:new()
-    -- NOTE: iterate-only on the staged EPUB is safe (iterate never crashed);
-    -- extraction is NOT used here.
-    local ok_iter = pcall(function()
-        if not epub_archive:open(stage_epub) then error("cannot open imported EPUB") end
-        local required = { ["mimetype"] = false, ["OEBPS/content.opf"] = false,
-            ["OEBPS/nav.xhtml"] = false }
-        local epub_chapters = {}
-        for index = 1, #manifest.chapters do
-            epub_chapters[string.format("OEBPS/text/chapter-%04d.xhtml", index)] = false
-        end
-        for epub_entry in epub_archive:iterate() do
-            if epub_entry.mode == "file" then
-                if required[epub_entry.path] ~= nil then required[epub_entry.path] = true end
-                if epub_chapters[epub_entry.path] ~= nil then epub_chapters[epub_entry.path] = true end
-            end
-        end
-        epub_archive:close()
-        for name, present in pairs(required) do
-            if not present then error("EPUB is missing " .. name) end
-        end
-        for name, present in pairs(epub_chapters) do
-            if not present then error("EPUB is missing chapter " .. name) end
-        end
-    end)
-    if not ok_iter then error("EPUB validation failed") end
-    -- mimetype check: read first 20 bytes of the STORED mimetype via seek
-    local mf = io.open(stage_epub, "rb")
-    if mf then
-        local head = mf:read(200)
-        mf:close()
-        if not head or not head:find("application/epub%+zip", 1, true) then
-            -- mimetype is the first stored member in our exports; a light check
-            -- on the raw header is enough here
-        end
-    end
+    tracef("4 epub sanity (no FFI: size + magic only)")
+    -- Chapter-level validation was removed with the libarchive dependency:
+    -- the EPUB is produced by the PC exporter, the size check above and the
+    -- PK magic below cover transport integrity, and CRE reports any real
+    -- defect when the book is opened.
 
     tracef("5 commit epub")
     local title = tostring(manifest.title or book_id)
     local destination_name = filename_safe(title .. " - full - " .. book_id .. ".epub")
+    -- lfs.mkdir creates one level only: build every parent first
+    mkdir(settings.data_dir)
+    mkdir(settings.data_dir .. "/annotation-cache")
+    mkdir(settings.cache_dir)
+    mkdir(Paths.book_cache_dir(settings, book_id))
+    mkdir(Paths.annotation_cache_dir(settings, book_id))
     final_path = settings.cache_dir .. "/" .. destination_name
     local book = { book_id = book_id, title = title,
         author = tostring(manifest.author or ""), cached_full_book = final_path,
@@ -217,17 +191,32 @@ function M.import(settings, bundle_dir)
     settings_committed = true
     settings:flush()
 
-    tracef("7 thought db")
+    tracef("7 thought db (optional -- book commits regardless)")
+    local thoughts_result = "skipped: thought database unavailable"
     local review_file, review_err = io.open(stage_reviews, "rb")
-    if not review_file then error(review_err or "cannot open staged review stream") end
-    local db = ThoughtDB.open(Paths.annotation_cache_dir(settings, book_id))
-    if not db then review_file:close(); error("cannot open WeRead thought database") end
-    local db_ok, db_err = ThoughtDB.importReviewStream(db, review_file,
-        valid_chapters, function(line)
-            return decode_json(line, "chapter thought record")
-        end)
-    review_file:close(); ThoughtDB.close(db)
-    if not db_ok then error(db_err, 0) end
+    if review_file then
+        local db = ThoughtDB.open(Paths.annotation_cache_dir(settings, book_id))
+        if db then
+            local db_ok, db_err = ThoughtDB.importReviewStream(db, review_file,
+                valid_chapters, function(line)
+                    return decode_json(line, "chapter thought record")
+                end)
+            if db_ok then
+                thoughts_result = "imported"
+            else
+                thoughts_result = "failed: " .. tostring(db_err)
+            end
+            ThoughtDB.close(db)
+        else
+            -- Diagnostic for the lua-ljsqlite3 discovery problem: dump the
+            -- relevant package.path segment into the trace file.
+            tracef("7a ThoughtDB.open failed; package.path=")
+            tracef(tostring(package.path))
+        end
+        review_file:close()
+    else
+        thoughts_result = "skipped: no review stream"
+    end
 
     tracef("8 library db (optional)")
     local library_ok, LibraryDB = pcall(require, "weread.lib.library_db")
@@ -249,10 +238,10 @@ function M.import(settings, bundle_dir)
     end
 
     os.remove(stage_epub); os.remove(stage_reviews)
-    tracef("9 done")
+    tracef("9 done: " .. thoughts_result)
     if backup_path then os.remove(backup_path) end
     return { book_id = book_id, title = title, path = final_path,
-        chapters = #manifest.chapters }
+        chapters = #manifest.chapters, thoughts = thoughts_result }
 end
 
 return M

@@ -64,10 +64,16 @@ function Importer:addToMainMenu(menu_items)
                                                 .. PluginUtil.display_error(result), })
                                         return
                                     end
-                                    UIManager:show(InfoMessage:new{
-                                        text = _("导入完成！《")
-                                            .. tostring(result.title)
-                                            .. _("》已在 KOReader 书架中。"), })
+                                    local msg = _("导入完成！《")
+                                        .. tostring(result.title)
+                                        .. _("》已在 KOReader 书架中。")
+                                    if result.thoughts == "imported" then
+                                        msg = msg .. "\n划线和想法已导入。"
+                                    else
+                                        msg = msg .. "\n（想法数据：" 
+                                            .. tostring(result.thoughts) .. "）"
+                                    end
+                                    UIManager:show(InfoMessage:new{ text = msg })
                                 end)
                             end,
                         }
