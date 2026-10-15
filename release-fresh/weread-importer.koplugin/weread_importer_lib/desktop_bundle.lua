@@ -14,9 +14,9 @@ local M = {}
 local MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 local MAX_ENTRIES = 4096
 
-local Content = require("weread.lib.content")
-local ThoughtDB = require("weread.lib.thought_db")
-local Paths = require("weread.lib.importer_paths")
+local Content = require("weread_importer_lib.content")
+local ThoughtDB = require("weread_importer_lib.thought_db")
+local Paths = require("weread_importer_lib.importer_paths")
 
 local function decode_json(bytes, what)
     local Json = require("rapidjson")
@@ -219,7 +219,7 @@ function M.import(settings, bundle_dir)
     end
 
     tracef("8 library db (optional)")
-    local library_ok, LibraryDB = pcall(require, "weread.lib.library_db")
+    local library_ok, LibraryDB = pcall(require, "weread_importer_lib.library_db")
     if library_ok then
         local db_ok2, db2 = pcall(LibraryDB.new, LibraryDB, settings)
         if db_ok2 and db2 then

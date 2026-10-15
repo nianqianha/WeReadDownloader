@@ -1,5 +1,5 @@
-local I18n = require("weread.lib.i18n")
-local logger = require("weread.lib.logger")
+local I18n = require("weread_importer_lib.i18n")
+local logger = require("weread_importer_lib.logger")
 local time = require("ui/time")
 local T = require("ffi/util").template
 

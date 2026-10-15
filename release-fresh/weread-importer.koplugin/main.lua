@@ -17,7 +17,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
-local PluginUtil = require("weread.lib.plugin_util")
+local PluginUtil = require("weread_importer_lib.plugin_util")
 
 local Importer = WidgetContainer:extend{
     name = "weread-importer",
@@ -55,7 +55,7 @@ function Importer:addToMainMenu(menu_items)
                                         return
                                     end
                                     local ok, result = pcall(function()
-                                        return require("weread.lib.desktop_bundle").import(
+                                        return require("weread_importer_lib.desktop_bundle").import(
                                             G_reader_settings, bundle_path)
                                     end)
                                     if not ok then

@@ -1,7 +1,7 @@
 -- One database per WeRead book. Source data and download progress are shared;
 -- document-specific XPointers are disposable projections in the same database.
-local LegacyDB = require("weread.lib.external_annotations_db")
-local Crypto = require("weread.lib.crypto")
+local LegacyDB = require("weread_importer_lib.external_annotations_db")
+local Crypto = require("weread_importer_lib.crypto")
 local ok_json, json = pcall(require, "json")
 if not ok_json then json = require("rapidjson") end
 
