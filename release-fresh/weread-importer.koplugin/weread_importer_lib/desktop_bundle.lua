@@ -191,8 +191,7 @@ function M.import(settings, bundle_dir)
     -- The annotation store stays under the KOReader data root (invisible).
     local base_parent = settings.data_dir:match("^(.*)[/\\][^/\\]+$")
         or settings.data_dir
-    local docs_dir = base_parent .. "/documents/weread-imports"
-    mkdir(base_parent .. "/documents")
+    local docs_dir = base_parent .. "/documents"
     mkdir(docs_dir)
     mkdir(settings.data_dir)
     mkdir(settings.data_dir .. "/annotation-cache")
@@ -200,7 +199,7 @@ function M.import(settings, bundle_dir)
     final_path = docs_dir .. "/" .. destination_name
     local book = { book_id = book_id, title = title,
         author = tostring(manifest.author or ""), cached_full_book = final_path,
-        cached_file = final_path, cache_dir = Paths.book_cache_dir(settings, book_id),
+        cached_file = final_path, cache_dir = Paths.annotation_cache_dir(settings, book_id),
         cached_chapters = {}, chapters = manifest.chapters,
         chapter_cache_dir = nil,
         reader_url = "weread-importer" }
@@ -227,10 +226,23 @@ function M.import(settings, bundle_dir)
     epub_committed = true
 
     tracef("6 settings commit")
-    -- The settings record only feeds the full weread plugin's bookshelf
-    -- view. On patched KOReader builds G_reader_settings may be a proxy
-    -- without get/set/flush -- the book is ALREADY committed to book-cache
-    -- above, so a settings failure is logged and skipped, never fatal.
+    -- THE book record for the full weread plugin lives in
+    -- settings/weread.lua (its own LuaSettings store) -- NOT in
+    -- G_reader_settings. The reader-side underline tap resolves the thought
+    -- database through THIS record (cached_full_book/annotation_documents),
+    -- so the importer writes a complete entry here. Failures degrade: the
+    -- book is already committed.
+    pcall(function()
+        local LuaSettings = require("luasettings")
+        local weread_settings = LuaSettings:open(settings.data_dir
+            .. "/settings/weread.lua")
+        local books = weread_settings:get("books", {}) or {}
+        -- drop any stale record pointing at the old book-cache location
+        books[book_id] = book
+        weread_settings:set("books", books)
+        weread_settings:flush()
+        settings_committed = true
+    end)
     pcall(function()
         previous_books = settings:get("books", {})
         local books = {}
