@@ -83,16 +83,23 @@
 ## 导入 Kindle
 
 导出的 `书名 - full.weread.zip` 就是给 KOReader 用的。**Kindle 原生系统不支持它**，
-必须配合 KOReader 使用。
+必须配合 KOReader 使用。两条路，按你是否装了完整版微信读书插件选择：
 
-### 怎么导
+### 方式 A：装了 weread.koplugin（完整版插件用户）
 
-1. 把 `.weread.zip` 通过各种方式弄到 KOReader 能读到的位置（数据线拷贝、网盘同步、
-   或用 KOReader 联网传书功能）
-2. KOReader 里进 **WeRead → Import desktop WeRead bundle**
-3. 选中刚拷进去的那个 `.weread.zip`
+1. 把 `.weread.zip` 弄到 KOReader 能读到的位置（数据线拷贝、网盘同步均可）
+2. KOReader 菜单 → **WeRead → 导入桌面端微信读书数据**
+3. 选中刚拷进去的 `.weread.zip` 或解压后的文件夹
 
-导入全程**不访问网络**。
+### 方式 B：没装微信读书插件 —— 独立导入器（290 KB）
+
+不想装 2.6 MB 完整插件的用户，用独立的 **weread-importer.koplugin**：
+无账号、不联网，只做一件事——把导入包装进书库。
+
+1. 从 [Releases](../../releases) 下载 `weread-importer.koplugin.zip`，解压
+2. 把解压出的 `weread-importer.koplugin` 文件夹拷进 KOReader 的 `plugins/` 目录
+3. 重启 KOReader → 工具菜单 → **WeRead 导入器 → 导入桌面下载包**
+4. 选中 `.weread.zip`（或解压后的文件夹），书和划线想法直接进书库
 
 ### 原理是什么
 
@@ -108,37 +115,39 @@
 | `manifest.json` | 章节清单、缺失说明 |
 | `bundle.json` | 索引，指明上面三个文件叫什么 |
 
-KOReader 的导入器读 `bundle.json`，取出书装进书库，再按 `reviews.jsonl` 里的区间把
+导入器读 `bundle.json`，取出书装进书库，再按 `reviews.jsonl` 里的区间把
 划线贴回去，点开划线还能看到你当时写的笔记。
 
 ---
 
 ## 登录
 
-**这是两步走，缺一不可：**
+**两步，共一分钟：**
 
-1. **先拿 `api_key`（只做一次）**
+1. **拿一次 `api_key`（只做一次，长期有效）**
    - 浏览器打开 [weread.qq.com/r/weread-skills](https://weread.qq.com/r/weread-skills)
-   - 登录后页面会给你 `api_key`（形如 `wrk-...`）和 `user_vid`
-   - 在 `%LOCALAPPDATA%\WeReadDesktop\` 下新建 `weread-live-settings.lua`，按格式填进去（程序启动会检查，缺了直接报错）
+   - 登录后页面会给你一个 `api_key`（形如 `wrk-...`），复制下来
 
 2. **打开程序，扫码登录**
-   - 点右上角账号按钮 → 「扫码」
-   - 微信扫一扫，按提示确认
-   - 程序自动拿到 `wr_skey`，用 Windows DPAPI 加密存进 `session-cookies.json`
+   - 点右上角账号按钮 → 「扫码」→ 微信扫一扫确认
+   - 程序自动把 `api_key` 和扫码得到的 `wr_skey` 一起存好
+     （cookie 用 Windows DPAPI 加密），不需要你手动建任何文件
 
 | 东西 | 来源 | 存哪 | 过期/失效 |
 |---|---|---|---|
-| `api_key` (`wrk-...`) | 网页版手动抄 | `weread-live-settings.lua` | 长期有效，除非你在网页版“注销其它设备” |
-| `wr_skey` / cookie | 扫码登录 / 手动填 | `session-cookies.json` (DPAPI 加密) | 会过期，需重新扫码 |
+| `api_key` (`wrk-...`) | 网页版手动抄 | `weread-live-settings.lua`（登录时自动创建） | 长期有效，除非你在网页版“注销其它设备” |
+| `wr_skey` / cookie | 扫码登录 | `session-cookies.json` (DPAPI 加密) | 会过期，重新扫码即可 |
 
-**退出登录** 只删 `session-cookies.json`（扫码得来的 cookie），`weread-live-settings.lua` 里的 `api_key` 留着，下次打开不用重新扫码。想彻底清净，手动删两个文件：
+**退出登录** 只删扫码 cookie，`api_key` 留着，下次打开不用重新扫码。想彻底
+清净，手动删两个文件：
 ```
 %LOCALAPPDATA%\WeReadDesktop\session-cookies.json
 %LOCALAPPDATA%\WeReadDesktop\weread-live-settings.lua
 ```
 
-> **为什么不扫码自动搞定 `api_key`？** 微信读书官方没给第三方“扫码后自动下发 `api_key`”的接口，只给扫码换 `wr_skey`。所以第一步必须你自己去网页版抄一次。
+> **为什么还要抄一次 `api_key`？** 微信读书官方没给第三方“扫码后自动下发
+> `api_key`”的接口，只给扫码换 `wr_skey`。所以第一次必须去网页版抄一次，
+> 之后程序会在每次登录时自动维护这两个文件——包括全新安装，扫码即可用。
 
 凭证用 Windows DPAPI 加密后存在本机，**不进日志、不进安装包、不进仓库**。
 仓库里有一条 pre-push 钩子，每次推送前自动扫描硬编码密钥和凭证文件。
@@ -161,7 +170,7 @@ KOReader 的导入器读 `bundle.json`，取出书装进书库，再按 `reviews
 
 - 一本书同一时间只能有一个导出任务在跑
 - 标注选「只要划线」时，想法数据仍会从服务器拉取（划线落点依赖它），只是不写入成品
-- 退出登录只删扫码会话，`weread-live-settings.lua` 里的 `api_key` 保留，想彻底清净需手动删两个文件
+- 「彻底清除凭证」选项会连基础凭证一起删，之后需重新扫码 + 重新抄 `api_key`（见登录一节）
 
 ### 以后也许会做的
 
