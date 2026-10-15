@@ -179,12 +179,16 @@ function M.import(settings, bundle_dir)
     local title = tostring(manifest.title or book_id)
     local destination_name = filename_safe(title .. " - full - " .. book_id .. ".epub")
     -- lfs.mkdir creates one level only: build every parent first
+    -- The standalone importer has no bookshelf UI of its own: the book
+    -- must land in the user's document folder so the library shows it.
+    -- The annotation store stays under the KOReader data root (invisible).
+    local docs_dir = "/mnt/us/documents/weread-imports"
+    mkdir("/mnt/us/documents")
+    mkdir(docs_dir)
     mkdir(settings.data_dir)
     mkdir(settings.data_dir .. "/annotation-cache")
-    mkdir(settings.cache_dir)
-    mkdir(Paths.book_cache_dir(settings, book_id))
     mkdir(Paths.annotation_cache_dir(settings, book_id))
-    final_path = settings.cache_dir .. "/" .. destination_name
+    final_path = docs_dir .. "/" .. destination_name
     local book = { book_id = book_id, title = title,
         author = tostring(manifest.author or ""), cached_full_book = final_path,
         cached_file = final_path, cache_dir = Paths.book_cache_dir(settings, book_id),
