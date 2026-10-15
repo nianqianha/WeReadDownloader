@@ -135,6 +135,22 @@ function M.import(settings, bundle_path)
         if f then f:write(os.date("%H:%M:%S ") .. step .. "\n") f:close() end
     end
     tracef("enter import: " .. tostring(bundle_path))
+    -- The device's libarchive faults on any SECOND extraction from one
+    -- Reader (memory AND path modes, traced 2026-10-15 16:26 and 16:32).
+    -- Safe pattern here: one fresh Reader per extraction.
+    local function extract_one(bundle, member, dest_path)
+        local ar = Archiver.Reader:new()
+        if not ar:open(bundle) then
+            error(ar.err or "cannot reopen bundle for " .. tostring(member))
+        end
+        local ok_ex, err_ex = ar:extractToPath(member, dest_path)
+        ar:close()
+        if not ok_ex then
+            error(err_ex or ar.err or "cannot extract " .. tostring(member))
+        end
+        return true
+    end
+
     local lfs = require("libs/libkoreader-lfs")
 tracef("1 lfs.attributes")
     local attr = lfs.attributes(bundle_path)
@@ -172,11 +188,18 @@ tracef("3 archiver new")
         end
         for name in pairs(allowed) do if not sizes[name] then error("bundle is missing " .. name) end end
         if sizes["bundle.json"] <= 0 or sizes["manifest.json"] <= 0 then error("bundle metadata is empty") end
-        tracef("6 stage bundle.json (path)")
-        local descriptor_bytes = archive:extractToMemory("bundle.json")
-        tracef("7 stage manifest.json (path)")
-        local manifest_bytes = archive:extractToMemory("manifest.json")
-        if not descriptor_bytes or not manifest_bytes then error("cannot read bundle metadata") end
+        tracef("6a fresh-reader stage bundle.json")
+        local meta_bundle_path = import_dir .. "/bundle.json.tmp"
+        extract_one(bundle_path, "bundle.json", meta_bundle_path)
+        tracef("6b fresh-reader stage manifest.json")
+        local meta_manifest_path = import_dir .. "/manifest.json.tmp"
+        extract_one(bundle_path, "manifest.json", meta_manifest_path)
+        local fb = io.open(meta_bundle_path, "rb")
+        if not fb then error("cannot read staged bundle descriptor") end
+        local descriptor_bytes = fb:read("*a"); fb:close(); os.remove(meta_bundle_path)
+        local fm = io.open(meta_manifest_path, "rb")
+        if not fm then error("cannot read staged bundle manifest") end
+        local manifest_bytes = fm:read("*a"); fm:close(); os.remove(meta_manifest_path)
         local descriptor = decode_json(descriptor_bytes, "bundle descriptor")
         local manifest = decode_json(manifest_bytes, "bundle manifest")
         if tonumber(descriptor.version) ~= 1 or tonumber(manifest.version) ~= 1 then error("unsupported bundle version") end
@@ -204,13 +227,11 @@ tracef("3 archiver new")
         stage_reviews = import_dir .. "/" .. token .. ".reviews.jsonl"
         tracef("8 close pass1")
         archive:close()
-        archive = Archiver.Reader:new()
-        tracef("9 reopen")
-        if not archive:open(bundle_path) then error(archive.err or "cannot reopen desktop bundle") end
-        tracef("10 stage epub")
-        if not archive:extractToPath(epub_name, stage_epub) then error(archive.err or "cannot stage EPUB") end
-        tracef("11 stage reviews")
-        if not archive:extractToPath("reviews.jsonl", stage_reviews) then error(archive.err or "cannot stage thought data") end
+        tracef("9a fresh-reader stage epub")
+        extract_one(bundle_path, epub_name, stage_epub)
+        tracef("9b fresh-reader stage reviews")
+        extract_one(bundle_path, "reviews.jsonl", stage_reviews)
+        local archive = Archiver.Reader:new()  -- keep the cleanup-path variable defined
         if tonumber(manifest.epub_size)
             and lfs.attributes(stage_epub, "size") ~= tonumber(manifest.epub_size) then
             error("bundle EPUB size mismatch")
