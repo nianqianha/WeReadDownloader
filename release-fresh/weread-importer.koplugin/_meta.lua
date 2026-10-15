@@ -1,5 +1,5 @@
 -- weread-importer: cut-down weread.koplugin (import only).
-local I18n = require("weread.lib.i18n")
+local I18n = require("weread_importer_lib.i18n")
 local _ = function(text) return I18n.tr(text) end
 
 return {

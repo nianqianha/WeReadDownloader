@@ -5,7 +5,7 @@
 划线 range 格式：如 "383-415"，表示 HTML 字符串的 rune 索引（包含所有标签）。
 --]] --
 
-local logger = require("weread.lib.logger")
+local logger = require("weread_importer_lib.logger")
 
 local Annotations = {}
 
@@ -630,7 +630,7 @@ local function injectUnderlinesCore(html, underlines, thought_reviews, chapter_u
     -- 的可见文本，再在当前 XHTML 中定位；绝不把 range 直接当 HTML 坐标。
     local index = visibleTextIndex(html)
     local source_spans
-    local ok_source, Source = pcall(require, "weread.lib.annotation_source")
+    local ok_source, Source = pcall(require, "weread_importer_lib.annotation_source")
     if ok_source and Source and type(Source.index) == "function" then
         local ok_index, value = pcall(Source.index, html)
         if ok_index then source_spans = value end

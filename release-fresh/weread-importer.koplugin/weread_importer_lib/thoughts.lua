@@ -1,6 +1,6 @@
-local Annotations = require("weread.lib.annotations")
+local Annotations = require("weread_importer_lib.annotations")
 
-local logger = require("weread.lib.logger")
+local logger = require("weread_importer_lib.logger")
 
 local Thoughts = {}
 
@@ -55,9 +55,9 @@ function Thoughts.apply_data(settings, book_id, chapter_uid, xhtml, underlines_d
             -- Background full-book workers embed the reviews into the EPUB but
             -- must not contend with the foreground reader's shared SQLite DB.
         else
-            local Content = require("weread.lib.content")
+            local Content = require("weread_importer_lib.content")
             local book_dir = Content.annotation_resolved_dir(settings, book_id, book)
-            local ThoughtDB = require("weread.lib.thought_db")
+            local ThoughtDB = require("weread_importer_lib.thought_db")
             if rebuild_db then
                 ThoughtDB.remove_db(book_dir)
             end
