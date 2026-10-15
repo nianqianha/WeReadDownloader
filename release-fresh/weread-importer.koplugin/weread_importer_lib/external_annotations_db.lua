@@ -3,8 +3,8 @@
 -- This data is intentionally kept out of settings/weread.lua: bindings,
 -- XPointer ranges, quotations, and thoughts can grow with every synced book.
 
-local logger = require("weread.lib.logger")
-local Crypto = require("weread.lib.crypto")
+local logger = require("weread_importer_lib.logger")
+local Crypto = require("weread_importer_lib.crypto")
 
 local ok_json, json = pcall(require, "json")
 if not ok_json then

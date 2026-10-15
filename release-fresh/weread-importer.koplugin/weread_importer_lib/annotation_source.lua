@@ -24,7 +24,7 @@
 -- the term is ADDED, not subtracted, and no fixture ever showed +4.)
 local Source = {}
 
-local logger = require("weread.lib.logger")
+local logger = require("weread_importer_lib.logger")
 
 local WHITESPACE = {
     [" "] = true, ["\t"] = true, ["\r"] = true, ["\n"] = true,

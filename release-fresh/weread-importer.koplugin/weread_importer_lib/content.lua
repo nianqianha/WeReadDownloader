@@ -1,7 +1,7 @@
-local Crypto = require("weread.lib.crypto")
-local ReaderState = require("weread.lib.reader_state")
-local WeRead = require("weread.lib.protocol")
-local logger = require("weread.lib.logger")
+local Crypto = require("weread_importer_lib.crypto")
+local ReaderState = require("weread_importer_lib.reader_state")
+local WeRead = require("weread_importer_lib.protocol")
+local logger = require("weread_importer_lib.logger")
 
 local Content = {}
 local MAX_CHAPTER_XHTML_BYTES = 8 * 1024 * 1024
@@ -1978,7 +1978,7 @@ end
 -- chapter can never display underlines, count badges, or thought links.
 local function apply_chapter_annotations(client, settings, book, chapter, xhtml, css,
     include_annotations, annotation_opts)
-    local Thoughts = require("weread.lib.thoughts")
+    local Thoughts = require("weread_importer_lib.thoughts")
     local cache = settings:get("cache", {})
     local force_annotations = cache.seamless_chapter_reading == true
         or include_annotations == true
@@ -2003,8 +2003,8 @@ end
 function Content.cache_annotation_source(settings, book, chapter, xhtml, raw_text)
     if book._content_format == "txt" and not raw_text then return end
     local ok, err = pcall(function()
-        local Source = require("weread.lib.annotation_source")
-        require("weread.lib.annotation_store"):new(settings):put(
+        local Source = require("weread_importer_lib.annotation_source")
+        require("weread_importer_lib.annotation_store"):new(settings):put(
             book.book_id or book.bookId, "original", tostring(chapter.chapterUid or chapter.chapterId),
             raw_text and Source.plain(xhtml) or Source.index(xhtml),
             tostring(chapter.chapterUid or chapter.chapterId))
