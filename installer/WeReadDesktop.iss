@@ -29,7 +29,7 @@
 ;   * [Files]/[Icons]/[Tasks] 增加 web 段，网页版有独立的开始菜单项、桌面
 ;     快捷方式和「立即启动网页版」勾选项；
 ;   * [UninstallDelete] 补上 {app}\WeReadWeb，卸载时把这个目录一起清掉。
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.3"
 #define MyAppPublisher "Kindle 桌面端项目"
 
 [Setup]

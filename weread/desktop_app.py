@@ -3116,7 +3116,7 @@ class DesktopApp:
                 "退出登录",
                 "是否彻底清除所有本地凭证？\n\n"
                 "• 是：删除 session-cookies.json 和 weread-live-settings.lua\n"
-                "      下次启动需重新扫码 + 填 api_key/user_vid\n\n"
+                "      下次启动需重新扫码 + 重抄一次 api_key\n\n"
                 "• 否：仅删除 session-cookies.json（刷新重置）\n"
                 "      weread-live-settings.lua 保留，下次打开直接可用"):
             return
@@ -3154,7 +3154,7 @@ class DesktopApp:
         self._set_login_identity(None)
         self.logout_button.configure(state="disabled")
         self._persist_log("[LOGOUT] session-cookies.json and weread-live-settings.lua removed by the user")
-        self.status.set("已彻底清除本地凭证。下次启动需重新配置 api_key/user_vid 并扫码登录。")
+        self.status.set("已彻底清除本地凭证。下次启动需重新扫码 + 重抄一次 api_key。")
         self._persist_log("[LOGOUT] full credential wipe completed by the user")
 
     def _refresh_logout_button(self):
