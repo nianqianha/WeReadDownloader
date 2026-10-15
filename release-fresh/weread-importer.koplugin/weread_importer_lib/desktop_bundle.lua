@@ -267,7 +267,11 @@ function M.import(settings, bundle_dir)
             package.path = abs_common .. package.path
         end
         tracef("7pre package.path prepended with " .. abs_common)
-        local db = ThoughtDB.open(Paths.annotation_cache_dir(settings, book_id))
+        local weread_ann_dir = settings.data_dir .. "/weread/annotation-cache/"
+        mkdir(settings.data_dir .. "/weread")
+        mkdir(weread_ann_dir)
+        mkdir(weread_ann_dir .. book_id)
+        local db = ThoughtDB.open(weread_ann_dir .. book_id)
         if db then
             local db_ok, db_err = ThoughtDB.importReviewStream(db, review_file,
                 valid_chapters, function(line)
