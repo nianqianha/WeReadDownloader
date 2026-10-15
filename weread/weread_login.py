@@ -308,11 +308,18 @@ def _restrict_to_current_user(path: Path) -> None:
         if os.name == "nt":
             # Use explicit encoding to avoid UnicodeDecodeError on Chinese Windows
             user = subprocess.check_output(["whoami"], encoding="utf-8", errors="replace").strip()
+            # AV software can stall icacls on the freshly written session file
+            # (observed 6.7s, blocking the Tk thread during login). The payload
+            # is DPAPI-sealed, so the ACL is defense-in-depth only: bound each
+            # call and treat a timeout like any other non-fatal ACL failure.
+            subprocess.run(["whoami"], capture_output=True, timeout=2,
+                           encoding="utf-8", errors="replace")
             subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", user + ":F"],
-                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                           check=True, timeout=2,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             os.chmod(path, 0o600)
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         # The payload is DPAPI-sealed regardless, so a failed ACL is not a
         # plaintext exposure; it only widens who can delete the file.
         pass
