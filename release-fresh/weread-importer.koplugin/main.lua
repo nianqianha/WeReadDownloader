@@ -38,6 +38,7 @@ function Importer:addToMainMenu(menu_items)
                             show_hidden = false,
                             show_unsupported = true,
                             path = "/mnt/us/koreader/weread/bundle-inbox",
+                        show_files = true,
                             onConfirm = function(bundle_path)
                                 UIManager:nextTick(function()
                                     local ok, result = pcall(function()
