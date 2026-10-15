@@ -67,6 +67,17 @@ end
 -- bundle.json, manifest.json, reviews.jsonl and one .epub.
 function M.import(settings, bundle_dir)
     tracef("enter dir-import: " .. tostring(bundle_dir))
+    -- G_reader_settings is KOReader's plain LuaSettings: it has get/set/flush
+    -- but no data_dir/cache_dir. The full plugin gets those from its own
+    -- Settings wrapper; the importer derives them from KOReader's
+    -- DataStorage once, here, so every later use sees a complete object.
+    if not settings.data_dir then
+        local DataStorage = require("datastorage")
+        settings.data_dir = DataStorage:getDataDir()
+    end
+    if not settings.cache_dir then
+        settings.cache_dir = settings.data_dir .. "/book-cache"
+    end
     assert(type(bundle_dir) == "string" and bundle_dir ~= "", "bundle path required")
     local stage_epub, stage_reviews, final_path, backup_path
     local had_previous, epub_committed, settings_committed = false, false, false
