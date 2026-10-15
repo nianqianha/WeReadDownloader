@@ -64,9 +64,19 @@ function Importer:addToMainMenu(menu_items)
                                                 .. PluginUtil.display_error(result), })
                                         return
                                     end
+                                    -- Refresh whatever UI is open so the
+                                    -- new book shows up WITHOUT a restart.
+                                    pcall(function()
+                                        local FileManager =
+                                            require("apps/filemanager/filemanager")
+                                        if FileManager.instance then
+                                            FileManager.instance:refreshPath(
+                                                "/mnt/us/documents/weread-imports")
+                                        end
+                                    end)
                                     local msg = _("导入完成！《")
                                         .. tostring(result.title)
-                                        .. _("》已在 KOReader 书架中。")
+                                        .. _("》已在书库中。")
                                     if result.thoughts == "imported" then
                                         msg = msg .. "\n划线和想法已导入。"
                                     else
