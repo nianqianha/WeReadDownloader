@@ -205,13 +205,19 @@ function M.import(settings, bundle_dir)
     epub_committed = true
 
     tracef("6 settings commit")
-    previous_books = settings:get("books", {})
-    local books = {}
-    for id, record in pairs(previous_books or {}) do books[id] = record end
-    books[book_id] = book
-    settings:set("books", books)
-    settings_committed = true
-    settings:flush()
+    -- The settings record only feeds the full weread plugin's bookshelf
+    -- view. On patched KOReader builds G_reader_settings may be a proxy
+    -- without get/set/flush -- the book is ALREADY committed to book-cache
+    -- above, so a settings failure is logged and skipped, never fatal.
+    pcall(function()
+        previous_books = settings:get("books", {})
+        local books = {}
+        for id, record in pairs(previous_books or {}) do books[id] = record end
+        books[book_id] = book
+        settings:set("books", books)
+        settings_committed = true
+        settings:flush()
+    end)
 
     tracef("7 thought db (optional -- book commits regardless)")
     local thoughts_result = "skipped: thought database unavailable"
