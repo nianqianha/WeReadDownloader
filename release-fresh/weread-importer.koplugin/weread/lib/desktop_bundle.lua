@@ -128,18 +128,30 @@ function M.import(settings, bundle_path)
     local stage_epub, stage_reviews, final_path, backup_path
     local had_previous, epub_committed, settings_committed = false, false, false
     local previous_books
+    -- TRACE (remove after diagnosis): step log for the hard-crash hunt
+    local tracef
+    tracef = function(step)
+        local f = io.open("/mnt/us/koreader/importer_trace.txt", "a")
+        if f then f:write(os.date("%H:%M:%S ") .. step .. "\n") f:close() end
+    end
+    tracef("enter import: " .. tostring(bundle_path))
     local lfs = require("libs/libkoreader-lfs")
+tracef("1 lfs.attributes")
     local attr = lfs.attributes(bundle_path)
     if not attr or attr.mode ~= "file" then error("bundle file not found") end
     if tonumber(attr.size or 0) > MAX_BUNDLE_BYTES then error("bundle exceeds size limit") end
 
+tracef("2 require archiver")
     local Archiver = require("ffi/archiver")
     local allowed = { ["bundle.json"] = true, ["manifest.json"] = true,
         ["reviews.jsonl"] = true }
+tracef("3 archiver new")
     local archive = Archiver.Reader:new()
     local sizes, count = {}, 0
     local ok, result = xpcall(function()
+        tracef("4 archive open")
         if not archive:open(bundle_path) then error(archive.err or "cannot open desktop bundle") end
+        tracef("5 iterate begin")
         for entry in archive:iterate() do
             if entry.mode == "directory" then
                 -- Directory entries carry no content and are ignored; file
@@ -160,7 +172,9 @@ function M.import(settings, bundle_path)
         end
         for name in pairs(allowed) do if not sizes[name] then error("bundle is missing " .. name) end end
         if sizes["bundle.json"] <= 0 or sizes["manifest.json"] <= 0 then error("bundle metadata is empty") end
+        tracef("6 stage bundle.json (path)")
         local descriptor_bytes = archive:extractToMemory("bundle.json")
+        tracef("7 stage manifest.json (path)")
         local manifest_bytes = archive:extractToMemory("manifest.json")
         if not descriptor_bytes or not manifest_bytes then error("cannot read bundle metadata") end
         local descriptor = decode_json(descriptor_bytes, "bundle descriptor")
@@ -185,22 +199,26 @@ function M.import(settings, bundle_path)
             valid_chapters[uid] = true
         end
 
-        local import_dir = settings.data_dir .. "/imports"
-        mkdir(import_dir)
         local token = tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
         stage_epub = import_dir .. "/" .. token .. ".epub"
         stage_reviews = import_dir .. "/" .. token .. ".reviews.jsonl"
+        tracef("8 close pass1")
         archive:close()
         archive = Archiver.Reader:new()
+        tracef("9 reopen")
         if not archive:open(bundle_path) then error(archive.err or "cannot reopen desktop bundle") end
+        tracef("10 stage epub")
         if not archive:extractToPath(epub_name, stage_epub) then error(archive.err or "cannot stage EPUB") end
+        tracef("11 stage reviews")
         if not archive:extractToPath("reviews.jsonl", stage_reviews) then error(archive.err or "cannot stage thought data") end
         if tonumber(manifest.epub_size)
             and lfs.attributes(stage_epub, "size") ~= tonumber(manifest.epub_size) then
             error("bundle EPUB size mismatch")
         end
         if read_prefix(stage_epub, 4) ~= "PK\003\004" then error("bundle EPUB is invalid") end
+        tracef("12 epub archiver")
         local epub_archive = Archiver.Reader:new()
+        tracef("13 epub open")
         if not epub_archive:open(stage_epub) then error(epub_archive.err or "cannot open imported EPUB") end
         local required = { ["mimetype"] = false, ["OEBPS/content.opf"] = false,
             ["OEBPS/nav.xhtml"] = false }
@@ -209,6 +227,7 @@ function M.import(settings, bundle_path)
             epub_chapters[string.format("OEBPS/text/chapter-%04d.xhtml", index)] = false
         end
         local epub_entries = 0
+        tracef("14 epub iterate")
         for epub_entry in epub_archive:iterate() do
             if epub_entry.mode == "file" then
                 epub_entries = epub_entries + 1
@@ -224,7 +243,14 @@ function M.import(settings, bundle_path)
         for name, present in pairs(required) do
             if not present then error("EPUB is missing " .. name) end
         end
-        if epub_archive:extractToMemory("mimetype") ~= "application/epub+zip" then
+        local mime_path = import_dir .. "/mimetype.check"
+        if not epub_archive:extractToPath("mimetype", mime_path) then
+            error(epub_archive.err or "cannot extract EPUB mimetype")
+        end
+        local mf = io.open(mime_path, "rb")
+        if not mf then error("cannot read EPUB mimetype") end
+        local mime = mf:read("*a"); mf:close(); os.remove(mime_path)
+        if mime ~= "application/epub+zip" then
             error("EPUB mimetype is invalid")
         end
         for name, present in pairs(epub_chapters) do
@@ -275,8 +301,10 @@ function M.import(settings, bundle_path)
         -- one SQL transaction and replaces each included chapter's old rows.
         local review_file, review_err = io.open(stage_reviews, "rb")
         if not review_file then error(review_err or "cannot open staged review stream") end
+        tracef("15 thought db open")
         local db = ThoughtDB.open(Content.annotation_cache_dir(settings, book_id))
         if not db then review_file:close(); error("cannot open WeRead thought database") end
+        tracef("16 import review stream")
         local db_ok, db_err = ThoughtDB.importReviewStream(db, review_file,
             valid_chapters, function(line)
                 if #line > MAX_REVIEW_LINE_BYTES then error("chapter thought record exceeds size limit") end
