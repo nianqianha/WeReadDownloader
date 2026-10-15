@@ -83,7 +83,16 @@ function M.import(settings, bundle_dir)
         for _ = 1, 4 do
             up = up:match("^(.*)[/\\][^/\\]+$") or up
         end
-        settings.data_dir = up
+        -- On this build the loader hands main.lua a RELATIVE source
+        -- ('plugins/weread-importer.koplugin/...'), so the walk-up above
+        -- produced 'plugins' -- a bogus root (traced 19:17). Only an
+        -- ABSOLUTE anchor is usable; otherwise fall back to this device's
+        -- known KOReader root.
+        if up:sub(1, 1) == "/" and up:match("^/mnt/") then
+            settings.data_dir = up
+        else
+            settings.data_dir = "/mnt/us/koreader"
+        end
         tracef("0 data_dir anchored to " .. settings.data_dir)
     end
     if not settings.cache_dir or settings.cache_dir == "./book-cache" then
