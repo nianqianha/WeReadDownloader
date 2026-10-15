@@ -3,6 +3,8 @@
 -- so the importer does not ship content.lua, whose header requires the
 -- network-side modules (protocol/crypto/reader_state) that have no business
 -- in an offline importer.
+local Content = {}
+
 local function basename_safe(value)
     value = tostring(value or ""):gsub("[^%w%._-]", "_")
     if value == "" then
