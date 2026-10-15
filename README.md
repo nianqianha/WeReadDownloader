@@ -91,15 +91,10 @@
 2. KOReader 菜单 → **WeRead → 导入桌面端微信读书数据**
 3. 选中刚拷进去的 `.weread.zip` 或解压后的文件夹
 
-### 方式 B：没装微信读书插件 —— 独立导入器（290 KB）
+### 方式 B：没装微信读书插件 —— 独立导入器（开发中）
 
-不想装 2.6 MB 完整插件的用户，用独立的 **weread-importer.koplugin**：
-无账号、不联网，只做一件事——把导入包装进书库。
-
-1. 从 [Releases](../../releases) 下载 `weread-importer.koplugin.zip`，解压
-2. 把解压出的 `weread-importer.koplugin` 文件夹拷进 KOReader 的 `plugins/` 目录
-3. 重启 KOReader → 工具菜单 → **WeRead 导入器 → 导入桌面下载包**
-4. 选中 `.weread.zip`（或解压后的文件夹），书和划线想法直接进书库
+一个只做导入的迷你插件（290 KB，无账号、不联网）正在开发中，完成后会
+发布到 [Releases](../../releases)。目前请先用方式 A。
 
 ### 原理是什么
 
