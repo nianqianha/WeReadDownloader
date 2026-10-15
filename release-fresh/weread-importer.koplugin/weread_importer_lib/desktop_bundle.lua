@@ -245,6 +245,16 @@ function M.import(settings, bundle_dir)
     local thoughts_result = "skipped: thought database unavailable"
     local review_file, review_err = io.open(stage_reviews, "rb")
     if review_file then
+        -- lua-ljsqlite3 lives in <root>/common/, and package.path's
+        -- 'common/?.lua' entry is CWD-relative -- which drifts on this
+        -- build. Prepend the ABSOLUTE common path so require() finds it
+        -- regardless of where KOReader's CWD points.
+        local abs_common = settings.data_dir .. "/common/?.lua;"
+            .. settings.data_dir .. "/common/?/init.lua;"
+        if not package.path:find(abs_common, 1, true) then
+            package.path = abs_common .. package.path
+        end
+        tracef("7pre package.path prepended with " .. abs_common)
         local db = ThoughtDB.open(Paths.annotation_cache_dir(settings, book_id))
         if db then
             local db_ok, db_err = ThoughtDB.importReviewStream(db, review_file,
