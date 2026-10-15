@@ -223,7 +223,7 @@ WeReadWorker.exe (CLI 引擎)
 
 ### 2026-10-15 (3) KOReader 独立导入器 weread-importer.koplugin（**开发中，未发布**）
 
-**Added**（配套 Kindle 侧交付，详见 Kindle 文档同日条目）
+**Added**（配套 Kindle 侧交付；**设备部署细节、FileBrowser+ 端点坑、验证清单见 Kindle 文档 §四 2026-10-16 条目**）
 
 - 独立迷你导入器（17 个 lua，290 KB / 完整版 11%），无账号、不联网：
   把 PC 端导出的导入包（目录形态）装进 KOReader 书库并回贴划线想法。
