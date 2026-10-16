@@ -5,7 +5,8 @@ name: CI
 #   privacy-gate  拦"凭证/第三方素材/超大文件进仓库"。确定性行为，本地已验证
 #                 PASS，所以它是**拦合并**的。
 #   tests         跑 tests/ 下的 pytest 套件。当前**不拦合并**，原因见文末
-#                 「已知抖动」一节——拦了也只会变成一道人人无视的红灯。
+#                 「为什么 tests 作业还不拦合并」——拦了也只会变成一道人人无视
+#                 的红灯。
 #
 # 只有 pull_request 和 master 的 push 会触发：给协作者的分支跑检查，同时避免
 # 在每条 fix/* 分支上重复烧额度（公开仓库的 Actions 分钟数免费且不限量，但排队
@@ -77,30 +78,37 @@ jobs:
         # 一个 "fixture 'fn' not found"。
 
 # ---------------------------------------------------------------------------
-# 已知抖动（把 continue-on-error 去掉之前必须先解决）
+# 为什么 tests 作业还不拦合并（做完下面这些再打开）
 #
-# 2026-10-16 本地实测：tests/test_desktop_logout.py 连跑 3 次得到
-# 1 failed / 9 passed / 1 failed，失败的那个用例每次都不同。单独跑该文件里的
-# 每个用例又是稳定通过的。这与 Tk 有关：这些 GUI 测试每个用例都新建一个
-# CTk root 再 destroy，同一个进程里反复创建/销毁 Tcl 解释器时
-# customtkinter 的全局状态会互相干扰，偶发 _tkinter.TclError。
+# 2026-10-16 实测，在一个没有插件目录的检出上（等价于 CI 环境）跑了之前报错的
+# 那 15 个文件：3 failed / 122 passed / 27 skipped。改动前这 15 个文件是在收集
+# 阶段就崩掉、整个 pytest 运行被中断。
 #
-# 全量一次跑（单进程）当时的成绩：386 passed / 11 failed / 4 skipped，约 6 分钟；
-# 那 11 个失败里多数属于这一类，另有 1 个与 Tk 无关的既有失败
-# （test_desktop_app.py::test_export_while_worker_busy_is_rejected_before_dialog）。
+# 27 个 skip 是真正需要那个外部 Lua 插件目录的用例，由 tests/conftest.py 带原因
+# 跳过。同一个文件在本机（有插件）跑是 0 skipped，所以这不是把测试静音。
 #
-# 建议的下一步（做完再把 continue-on-error 去掉，并把它加进分支规则集的
-# required status checks）：
-#   1. 给这些 GUI 测试加上"一个进程只建一个 root"的复用，或改用进程级隔离；
-#   2. 修掉那个既有失败；
-#   3. 然后这个作业才配当一道真正的门。
+# 剩余 3 个失败与插件无关，都是既有的：
+#   test_multi_account_isolation.py::test_acquire_export_lock_prevents_concurrent_export
+#   test_underline_placement.py::test_real_corpus_placement_still_verifies
+#   test_weread_retry_resume.py::test_export_resumes_from_parent_output_and_refuses_epub_when_chapter_stays_empty
+#     └ 这条自己捕获了 RuntimeError 再断言它，所以 conftest 的跳过覆盖不到，
+#       需要单独加判断。
+#
+# 另外 GUI 测试存在抖动：tests/test_desktop_logout.py 连跑 3 次得到
+# 1 failed / 9 passed / 1 failed，失败的那个用例每次都不同，而单独跑每个用例是
+# 稳定通过的。成因是这些用例各自新建再销毁一个 CTk root，同一进程内反复创建/
+# 销毁 Tcl 解释器时 customtkinter 的全局状态互相干扰，偶发 _tkinter.TclError。
+#
+# 一道会被随机染红的门只会变成人人无视的红灯，所以在这三件事处理干净之前，
+# 这个作业只出报告、不拦人。做完之后：去掉 continue-on-error，再把它加进
+# protect-master 规则集的 required status checks，这道门才算真关上。
 #
 # ---------------------------------------------------------------------------
 # 关于依赖版本
 #
-# 现在是不锁版本安装。这个项目发布的是用 PyInstaller 冻结的 exe，依赖漂移会先
-# 在打包结果上表现出来；所以合理做法是补一个 requirements-dev.txt 把版本钉死
-# （本地实测可用的一组见下），再让这里 pip install -r 它。
+# 现在不锁版本安装。这个项目发布的是 PyInstaller 冻结的 exe，依赖漂移会先在打包
+# 结果上表现出来；所以合理做法是补一个 requirements-dev.txt 把版本钉死（本地实测
+# 可用的一组见下），再让这里 pip install -r 它。
 #
 #   lupa 2.8 · lxml 6.1.0 · requests 2.32.5 · customtkinter 5.2.2
 #   darkdetect 0.8.0 · pillow 11.3.0 · qrcode 8.2 · pytest 8.4.2
