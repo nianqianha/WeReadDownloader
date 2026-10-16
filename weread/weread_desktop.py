@@ -1562,30 +1562,24 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     chapter_uids = [str(chapter["chapterUid"]) for chapter in chapters]
     state = {"version": 1, "book_id": book_id, "title": book.get("title"),
              "total": len(chapters), "chapter_uids": chapter_uids, "completed": 0,
-             "want_thoughts": bool(want_thoughts)}
-    if state_path.exists():
-        try:
-            old = json.loads(state_path.read_text(encoding="utf-8"))
-            if old.get("book_id") == book_id:
-                state.update(old)
-                state["total"] = len(chapters)
-                state["chapter_uids"] = chapter_uids
-                # A checkpoint written by the other mode cannot be resumed into this
-                # one: its chapters already carry (or lack) the thought markers that
-                # this run would add or skip, so merging them yields a book whose
-                # notes depend on download order. Refuse the mix and start clean.
-                if bool(old.get("want_thoughts", True)) != bool(want_thoughts):
-                    print(f"[THOUGHTS] checkpoint was written with "
-                          f"want_thoughts={bool(old.get('want_thoughts', True))}, "
-                          f"this run asks for {bool(want_thoughts)}; re-exporting "
-                          f"from scratch rather than mixing two modes", flush=True)
-                    for stale in list(workspace.glob("chapter-uid-*")):
-                        stale.unlink(missing_ok=True)
-                    state["completed"] = 0
-                    state["want_thoughts"] = bool(want_thoughts)
-                state["want_thoughts"] = bool(want_thoughts)
-        except (OSError, ValueError):
-            pass
+             "want_thoughts": bool(want_thoughts), "want_underlines": bool(want_underlines)}
+    try:
+        old = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = {}
+    # Older states did not distinguish marks from plain text; their mode is
+    # unknown, so refresh once instead of silently publishing the wrong book.
+    compatible = (isinstance(old, dict) and old.get("book_id") == book_id
+                  and all(old.get(key) is state[key]
+                          for key in ("want_thoughts", "want_underlines")))
+    if not compatible:
+        stale = [path for path in workspace.glob("chapter-*")
+                 if path.suffix in (".body", ".json", ".css")]
+        if stale:
+            print("[ANNOTATIONS] checkpoint mode differs or is unknown; "
+                  "refreshing staged chapters for the requested mode", flush=True)
+            for path in stale:
+                path.unlink()
     cached_by_uid = discover_checkpoint_files(workspace, chapters)
     chapter_paths: list[Path] = []
     review_paths: list[Path] = []
