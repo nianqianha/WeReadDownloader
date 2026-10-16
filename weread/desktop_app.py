@@ -1491,7 +1491,7 @@ class DesktopApp:
         # highlights but no notes; the default wants both. Two switches could not
         # say that without an invalid combination (notes without highlights, since
         # a note hangs off a highlight).
-        self.annotations_var = ctk.StringVar(value="both")
+        self.annotations_var = ctk.StringVar(value="划线 + 想法")
         self.annotations_box = ctk.CTkComboBox(
             export, values=("划线 + 想法", "只要划线", "纯正文"),
             variable=self.annotations_var, width=104, height=28, state="readonly",
@@ -2123,7 +2123,7 @@ class DesktopApp:
         self.process = None
         self.current_action = ""
         self.pause_button.configure(state="disabled")
-        self.annotations_box.configure(state="normal")
+        self.annotations_box.configure(state="readonly")
         try:
             if self.last_failure:
                 self._finish_failed_action(action)
@@ -3047,8 +3047,8 @@ class DesktopApp:
             return
         args = ["--probe-book", self.selected_id]
         mode = self.annotations_var.get()
-        want_thoughts = mode != "plain"
-        want_underlines = mode != "plain"
+        want_thoughts = mode == "划线 + 想法"
+        want_underlines = mode != "纯正文"
         if not want_underlines:
             args.append("--no-annotations")
         elif not want_thoughts:
@@ -3065,13 +3065,12 @@ class DesktopApp:
             self.status.set("当前有任务正在运行，等它结束再开始下载。")
             return
         mode = self.annotations_var.get()
-        want_thoughts = mode != "plain"
-        want_underlines = mode != "plain"
-        marks = ("划线 + 想法", "只要划线", "纯正文（无划线）")[("both", "marks", "plain").index(mode)]
+        want_thoughts = mode == "划线 + 想法"
+        want_underlines = mode != "纯正文"
         if not self._ask("askyesno",
                 "开始下载",
                 f"准备下载：{self.selected_title}\n作者：{self.selected_author or '暂无信息'}\n\n"
-                f"标注：{marks}\n\n"
+                f"标注：{mode}\n\n"
                 "已有章节会自动续传。若微信读书返回空章节或无法确认的划线，会记录问题并继续检查其它章节；"
                 "有未解决章节时不会生成不完整 EPUB。继续吗？"):
             return
