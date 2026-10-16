@@ -1340,7 +1340,7 @@ def acquire_export_lock(workspace: Path, book_id: str) -> Path:
 
 
 def probe_book(book_id: str, chapter_uid: str | None, settings: dict[str, Any],
-               want_thoughts: bool = True) -> None:
+               want_thoughts: bool = True, want_underlines: bool = True) -> None:
     lua = lua_runtime()
     api = WeRead(settings, lua)
     book, chapters = api.fetch_book(book_id)
