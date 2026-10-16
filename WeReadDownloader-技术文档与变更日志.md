@@ -25,23 +25,28 @@
 
 | 项 | 状态 | 备注 |
 |---|---|---|
-| 安装版本 | 1.0.3（ installer `installer\WeReadDesktop.iss`，SHA8 `AFCB864C`） | v25 修复版已构建未分发安装；桌面 `WeReadDownloader-Setup.exe` 为 1.0.3 |
+| 安装版本 | 1.0.4（安装包 SHA8 `DA420F0E`，53,021,646 B，在桌面） | **待用户实测**；含 §四 2026-10-16 (2) 的 9 个 PR + (3) 的 W10 修复；**无组件选择界面、不含网页版**（按用户要求） |
 | 凭证状态 | ✅ 可用（api_key + 扫码会话） | §6.3 凭证位置；wr_skey 会过期，重新扫码即可 |
-| 运行入口（推荐） | ✅ `WeReadWorkerPatched\WeReadWorker.exe`（工作区副本，含死链图片缓存补丁） | §四 2026-10-15 (2)；GUI「开始下载」「先检查第一章」按钮有 bug，用 CLI 绕过 |
-| GUI 可用性 | ⚠️ 搜索/书架可用；下载按钮报错 | `export` 回调 `tuple.index` 崩溃（问题 W3）+ `probe_book` 参数 bug（问题 W4） |
-| 本地补丁 | ✅ `_internal\weread_desktop.py` `9BEC87F6`（原版 `C4275775`） | 副本位于 `C:\Users\asus\dsh-workspace\WeReadWorkerPatched\`；正式修复待上游（问题 W1） |
+| 上游 master | ✅ 9 个 PR 已合入（协作者 8 个 + 测试/CI 1 个），issue #1–#8 已关闭 | §四 2026-10-16 (2)；#13 按 squash 后重放，master 末笔 `47f26dd`，本机工作副本已同步 |
+| 运行入口（推荐） | ✅ `WeReadWorkerPatched\WeReadWorker.exe`（工作区副本，含死链图片缓存补丁） | §四 2026-10-15 (2)；仓库 master 已修 GUI 下载链，但 W1 提速补丁仍未入仓 |
+| GUI 可用性 | ✅ 下载链已修（master）：标注模式、探针参数、凭证就绪、书架失败态 | W3/W4 由 PR #10/#11 修复；1.0.3 安装版仍带旧代码，打包 1.0.4 后才对安装版生效 |
+| 本地补丁 | ✅ `_internal\weread_desktop.py` `9BEC87F6`（原版 `C4275775`） | 副本位于 `C:\Users\asus\dsh-workspace\WeReadWorkerPatched\`；搬回仓库仍待定（问题 W1） |
 | 下载进度 | 《战国策校注》✅ 23/23 已打包；《后汉书》136/155、《汉书》147/171 已暂停 | 断点在 `%LOCALAPPDATA%\WeReadDesktop\exports\`，续传不重复下载 |
 | 提速补丁效果 | 约 10 倍（1.5 分/章 → 约 5~6 章/分，双书并行 jobs=2） | §四 2026-10-15 (2) 实测数据 |
 
-### 0.2 四条铁律（违反就会踩已知坑）
+### 0.2 五条铁律（违反就会踩已知坑）
 
 1. **改完代码必须更新本文件**——§四加条目、§0.1改看板、§7.1记 sha、新故障进 §6.5。
-2. **强杀 worker 后必须清 `export.lock`**——`atexit` 清理不会执行，残留锁会让下次
+2. **未经用户明确批准，禁止 git push、禁止发布 Release/安装包**——本仓库关联公开
+   GitHub（origin: nianqianha/WeReadDownloader）。补丁、修复、文档一律先落在本地，
+   是否推送/发布由用户逐次决定；文档与日志里不得写"已推送/已发布"，除非用户当轮
+   明确要求过。`pre-push` 钩子只扫凭证，拦不住内容变更，这条只能靠自觉遵守本铁律。
+3. **强杀 worker 后必须清 `export.lock`**——`atexit` 清理不会执行，残留锁会让下次
    启动直接 `SystemError` 失败（§6.5 排障第一行）。
-3. **凭证文件是两份契约**——`weread-live-settings.lua`（api_key 基础文件，缺失即
+4. **凭证文件是两份契约**——`weread-live-settings.lua`（api_key 基础文件，缺失即
    "Credential file not found"）+ `session-cookies.json`（扫码 overlay，DPAPI 密封）。
    任何只写其一的登录方式都是坏的（§四 2026-10-14 上游条目）。
-4. **速率限制是按账号的**——双书并行 + jobs=2 的聚合吞吐优于串行；被 426 限流时
+5. **速率限制是按账号的**——双书并行 + jobs=2 的聚合吞吐优于串行；被 426 限流时
    程序自动降并发退避，被拒章节保留断点，冷却 60s 后重跑即可（§6.5）。
 
 ### 0.3 文件布局速查（"我要改的东西在哪"）
@@ -180,6 +185,28 @@ WeReadWorker.exe (CLI 引擎)
 
 ## 四、变更日志（Keep a Changelog 格式）
 
+### 2026-10-16 (2) 协作者 8 个 PR 全量合入 + 本仓库测试/CI 首次可跑（**已合并上游 master，未发版**）
+
+**Added / Fixed**（**高**——覆盖 GUI 下载链、断点续传正确性、凭证就绪、书架失败态）
+
+- **合入范围**：协作者 Wu-Wh0 的 8 个 PR（#10–#17）+ 本机实现的测试/CI PR（#18），issue #1–#8 全部关闭；#9 被 #10–#13 取代，关闭未合并。
+  - #10 `probe_book(..., want_underlines=...)`：调用方传 5 个参数、签名只收 4 个 →「先检查第一章」必崩（问题 W4）。
+  - #11 GUI 标注三模式：默认值 `both` → `划线 + 想法`、下拉框 `state="normal"` → `"readonly"`、模式比较改按中文串、删掉 `("both","marks","plain").index(mode)` 的 ValueError（问题 W3，即下载按钮崩溃）。
+  - #12 断点按标注模式隔离：state.json 增写 `want_underlines`，`state.update(old)` 改为兼容性判定（模式不一致即刷新暂存章节，不再混排）。
+  - #13 断点校验统一：`discover_checkpoint_files` 用「正文非空」替代 `wr-underline` 计数，`download_one` 用 `(body, review, css)` 三元组比对缓存 uid。
+  - #14 扫码成功后刷新凭证卡片；#15 `_credentials_usable` 改为自写 Lua 字面量解析（`first_run._settings_literal`），GUI 就绪判定与 worker 的 `load_credentials` 对齐；#16 书架失败态收尾（`_show_shelf_error` 5 处调用点，不再卡在「加载中」）；#17 `ERRORS_ZH` 补「基础凭证缺失」的明确文案（原来是误导性的下载失败提示）。
+- **合入前的实测风险处置**：#12 会作废缺 `want_underlines` 的旧断点（4 本书约 399 章）。按证据逐本补写——三字经、战国策校注 `true`（work 目录有 reviews.jsonl / `wr-underline` 标记），后汉书、汉书 `false`（两者都没有）——备份在 `%TEMP%\weread-state-backup-20261016`；补后 4 本均判定「兼容，断点保留」。
+- **协作者此前无法跑测试的根因（本机修好）**：
+  - `pytest.ini` 加 `python_functions = test_*`。各测试文件用 `def test(fn)` 装饰器注册用例，pytest 默认模式 `test*` 把这个装饰器本身当用例收集，30 多个文件各报一个 `fixture 'fn' not found`——修掉后全套 386 passed。
+  - `tests/conftest.py` + `weread_desktop.py` 插件探测改惰性：仓库外没有 Lua 插件目录时原先 import 即 `RuntimeError`（约 200 行测试跑不了，协作者只能用 AST 抽取绕过），现在按 README 的「宁可降级也不失败」就地 skip。
+  - `tests/test_annotation_modes.py` 的写死绝对路径改为 `__file__` 定位。
+- **CI**：`.github/workflows/ci.yml` 两任务——`privacy-gate`（ubuntu，阻塞，13–15s 通过）+ `tests`（windows，暂 `continue-on-error`，受 W10 影响）。
+- **修复「登出会删真实凭证」（本机踩到，严重）**：`desktop_app.py` 的 `logout()` 里 `from .weread_desktop import SETTINGS` 在 `weread/` 无 `__init__.py` 时必然失败，于是「测试环境 fallback」是唯一会执行的分支，按 `%LOCALAPPDATA%` 手拼路径 → 任何测试重定向都拦不住，跑 `tests/test_desktop_logout.py` 会删掉开发者本人的 `weread-live-settings.lua`。改为统一走 `first_run._settings_path()`（资料目录唯一所有者），测试同时 patch 该路径并加断言。真实凭证已用 `session-cookies.json` + `first_run.build_settings_lua` 还原，`--check-auth` 输出 `AUTH_OK; shelf entries: 7`。
+
+**未做（等决定）**
+
+- W1 死链图片缓存未入仓（`_DEAD_IMAGE_URLS` 只在 `WeReadWorkerPatched` 副本里）。
+- W10：`weread_desktop.py::process_is_alive` 的 `os.kill(pid, 0)` 在 Windows 上`signal.CTRL_C_EVENT == 0`，CPython 会转成 `GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)`，等于给整个进程组发 Ctrl+C——CI 两次都在跑到一半时 `KeyboardInterrupt` 中断。
 ### 2026-10-16 (1) 全新安装扫码登录后不可用：QR 登录从不创建基础凭证 lua（外部用户反馈）（**已修复，v1.0.3 未分发**）
 
 **Fixed**（**严重**——全新用户完全无法使用）
@@ -223,7 +250,7 @@ WeReadWorker.exe (CLI 引擎)
 
 ### 2026-10-15 (3) KOReader 独立导入器 weread-importer.koplugin（**开发中，未发布**）
 
-**Added**（配套 Kindle 侧交付，详见 Kindle 文档同日条目）
+**Added**（配套 Kindle 侧交付；**设备部署细节、FileBrowser+ 端点坑、验证清单见 Kindle 文档 §四 2026-10-16 条目**）
 
 - 独立迷你导入器（17 个 lua，290 KB / 完整版 11%），无账号、不联网：
   把 PC 端导出的导入包（目录形态）装进 KOReader 书库并回贴划线想法。
@@ -305,15 +332,16 @@ WeReadWorker.exe (CLI 引擎)
 
 | # | 严重度 | 问题 | 状态 |
 |---|---|---|---|
-| W1 | 中（性能） | note.png 类死链图片每章重复请求拖慢整书下载 ~10 倍（§四 10-15 (2)） | ✅ 本地副本已补丁；**安装版与上游未修** |
+| W1 | 中（性能） | note.png 类死链图片每章重复请求拖慢整书下载 ~10 倍（§四 10-15 (2)） | ✅ 本地副本已补丁；**安装版与上游仓库未修** |
 | W2 | 严重（全新机不可用） | 手动登录只写 overlay 不写基础文件（上游 10-14 已修，**1.0.2 安装版仍带旧代码**） | ⚠️ 用扫码登录可绕过 |
-| W3 | 中 | GUI `export` 回调 `tuple.index` 崩溃（§四 10-15 (0)） | ⚠️ CLI 绕过 |
-| W4 | 低 | `--probe-book` 参数个数 bug（§四 10-15 (0)） | ⚠️ 未修，不影响下载路径 |
+| W3 | 中 | GUI `export` 回调 `tuple.index` 崩溃（§四 10-15 (0)） | ✅ 已修（PR #11，master `47f26dd` 前）；1.0.3 安装版未含 |
+| W4 | 低 | `--probe-book` 参数个数 bug（§四 10-15 (0)） | ✅ 已修（PR #10，master）；1.0.3 安装版未含 |
 | W5 | 低 | Program Files 安装位不可写，热补丁必须走工作区副本 | 已有固定流程（§0.3） |
 | W6 | 外部 | 微信读书限流（HTTP 426）：双书并行首 8 分钟内出现，程序自动降并发退避；被拒章节保留断点 | 属服务端行为，冷却后续传即可 |
 | W7 | 外部 | 分片 MD5 校验失败（shard mismatch）：个别章节 4 次重试后标记 INCOMPLETE 跳过 | 程序 fail-closed 拒绝出版；重跑续传补齐 |
 | W8 | 外部 | 古文「注」角标不支持（README 已知限制；后汉书类书籍只有正文） | 上游设计如此 |
 | W9 | 外部 | 旧 KOReader 备份里的 wr_skey 已过期（9-10 快照），只能用于恢复 api_key | 属会话时效，预期行为 |
+| W10 | 低（测试/CI） | Windows 下 `process_is_alive` 的 `os.kill(pid, 0)` 被当成 CTRL_C_EVENT 发给进程组，CI 测试跑到中途 `KeyboardInterrupt`（两次实测） | ⚠️ 未修，待决定 |
 
 ---
 
@@ -372,11 +400,12 @@ Get-ChildItem "$env:LOCALAPPDATA\WeReadDesktop\exports" -Recurse -Filter export.
 | `426 Upgrade Required` / `[THROTTLE]` | 微信读书限流（按账号） | 程序自动退避；结束时报 unresolved 则等 60s 重跑续传 |
 | `Shard MD5 mismatch after 4 attempts` | 分片校验失败（服务端偶发） | 同上，重跑续传自动补 |
 | `N chapter(s) remain unresolved; … EPUB publication was refused` | 缺章 fail-closed，拒绝出版 | 重跑续传至 0 unresolved，自动打包 |
-| GUI 点下载报 `tuple.index(x): x not in tuple` | 问题 W3（GUI bug） | 用 §6.1 CLI 流程 |
-| GUI「先检查第一章」报 `probe_book() … 5 were given` | 问题 W4（CLI 入口 bug） | 同上 |
+| GUI 点下载报 `tuple.index(x): x not in tuple` | 问题 W3（GUI bug） | master 已修（PR #11）；1.0.3 安装版仍用 §6.1 CLI 流程 |
+| GUI「先检查第一章」报 `probe_book() … 5 were given` | 问题 W4（CLI 入口 bug） | master 已修（PR #10）；1.0.3 安装版同上 |
 | 每章下载 1 分钟以上 | 安装版无死链缓存（W1） | 用 `WeReadWorkerPatched` 副本跑 |
 | 全新安装扫码登录后全部功能报 `Credential file not found` | QR 登录不写基础凭证 lua（v25 前的设计缺口） | 升级到 v1.0.3+；旧机器手工恢复一次或重新扫码（v25 起自动创建） |
 | 登录时 UI 冻结 5–8 秒（STALL_STACK 指向 `_restrict_to_current_user`） | 杀毒软件扫描新会话文件阻塞 icacls（v25 前无超时） | 升级到 v1.0.3+（2s 超时降级）；或登录前临时停 AV 实时扫描 |
+| 测试/CI 跑到一半突然 `KeyboardInterrupt`（栈顶 `weread_desktop.py` 的 `process_is_alive`） | W10：Windows 上 `os.kill(pid, 0)` = 向进程组发 Ctrl+C | 未修；重跑，或用 `-k` 排除涉及进程存活判断的用例 |
 | EPUB 下载完成但有 `[MODAL] 有内容缺失` | `manifest.json` 的 omissions 明细（缺图/缺划线锚点等） | 正文 `text_complete: true` 即可放心用；细节看 manifest |
 
 ### 6.6 已知坏值与契约（改代码前先看）
@@ -385,7 +414,7 @@ Get-ChildItem "$env:LOCALAPPDATA\WeReadDesktop\exports" -Recurse -Filter export.
   wr_skey 缺一不可（api_key 只认 lua 基础文件，**不认** overlay）。
 - `-2010/-2012/2010` 或 errMsg 含「登录」→ 一律按会话过期处理（fetch_book 内判定）。
 - 限流 status_forcelist `(408, 425, 429, 500, 502, 503, 504)` + 426 特判降并发。
-- state.json 的 `want_thoughts` 与本次运行模式不一致时会重置续传（两模式断点不通用）。
+- state.json 的 `want_thoughts` / `want_underlines` 与本次运行模式不一致时会重置续传（标注模式不同的断点不通用；PR #12 起缺字段的旧断点按「不兼容」处理 → 刷新暂存章节）。
 
 ### 6.7 环境重建（换电脑/重装后恢复）
 
@@ -415,7 +444,22 @@ Get-ChildItem "$env:LOCALAPPDATA\WeReadDesktop\exports" -Recurse -Filter export.
 | 10-16 | `installer\WeReadDesktop.iss` | `D1BBA4A5` | 版本号 1.0.3，11,650 B |
 | 10-16 | `WeReadDownloader-Setup.exe`（1.0.3） | `AFCB864C` | 57,240,774 B，含 v25 + ACL 修复 |
 
-### 7.2 实测数据（吞吐对照）
+| 10-16 | `weread/weread_desktop.py` | `7198E280` | W10 修复（OpenProcess + WaitForSingleObject），114,735 B |
+| 10-16 | `weread/desktop_app.py` | `1CC7784D` | #11 标注模式 + #14 凭证卡刷新 + #16 书架失败态 + 登出走 _settings_path，166,498 B |
+| 10-16 | `weread/first_run.py` | `AFEF15D0` | #15 `_settings_literal`/`_read_base_settings`，18,456 B |
+| 10-16 | `weread/weread_login.py` | `D81AEB0F` | #15 就绪判定来源，18,710 B |
+| 10-16 | `pytest.ini` | `F997CA96` | 新增：`python_functions = test_*`，563 B |
+| 10-16 | `.github/workflows/ci.yml` | `AE1B280F` | W10 已修后的说明重写，6,779 B |
+| 10-16 | `release-installer/WeReadDownloader-Setup.exe` | `DA420F0E` | 1.0.4 安装包（去组件界面+网页版），53,021,646 B |
+| 10-16 | `release-fresh/WeReadWorker/WeReadWorker.exe` | `B3467379` | 1.0.4 下载组件，14,425,844 B |
+| 10-16 | `release-fresh/WeReadDesktop/WeReadDesktop.exe` | `C21EC6A7` | 1.0.4 主程序，3,522,864 B |
+| 10-16 | `release-fresh/WeReadWeb/WeReadWeb.exe` | `8D0C5079` | 1.0.4 网页版（**1.0.4 起不再进安装包**，仍构建供单独分发），1,339,129 B |
+| 10-16 | `installer/WeReadDesktop.iss` | `175A4C4C` | 版本号 1.0.3 → 1.0.4，11,650 B |
+| 10-16 | `tests/test_disk_edge_cases.py` | `E4085844` | W10 防回归断言（Windows 探针不含 os.kill），34,062 B |
+
+> 以上 sha 对应本机工作副本（= 上游 master `47f26dd` + 两个本地文档提交）。合入用的上游提交：`47f26dd`（#13）、`8586746`（#18），#10–#12/#14–#17 在 `8586746` 之前。
+
+
 
 | 场景 | 吞吐 | 来源 |
 |---|---|---|
@@ -432,6 +476,7 @@ Get-ChildItem "$env:LOCALAPPDATA\WeReadDesktop\exports" -Recurse -Filter export.
 
 ### 7.4 待办（未做）
 
-- 上游 PR：死链图片缓存（W1）、probe_book 参数（W4）、export 回调容错（W3）
+- 上游 PR：死链图片缓存（W1）仍未入仓；W3/W4 已随 PR #10/#11 合入 master；W10 已随 §四 2026-10-16 (3) 修在本地工作副本（尚未推送，待用户决定）
 - 后汉书剩 19 章 / 汉书剩 24 章续传并出版（断点保留中）
+- ~~把今晚合入的 9 个 PR（含 W3/W4/GUI 下载链）打成 1.0.4 安装包并分发~~ → **已构建**（SHA8 `DA420F0E`），等用户实测通过后决定是否推送/发布
 - 安装版热补丁的提权方案（或等上游合并后重装）

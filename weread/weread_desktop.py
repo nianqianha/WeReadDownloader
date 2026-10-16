@@ -1199,14 +1199,47 @@ def process_started_at(pid: int) -> float | None:
             except Exception: pass
 
 
+def _nt_process_signaled(pid: int) -> bool | None:
+    """True if the process is still alive, False if it has exited, None if unknown.
+
+    Windows-only: opens the process and waits on the handle. os.kill(pid, 0) must
+    not be used here -- on Windows signal 0 is CTRL_C_EVENT, so CPython calls
+    GenerateConsoleCtrlEvent against the pid, which delivers a real Ctrl+C to the
+    whole process group rather than probing liveness. When the lock file's pid
+    belongs to the runner's own console group (the CI case), checking a lock
+    therefore killed the test run mid-suite.
+    """
+    SYNCHRONIZE = 0x00100000
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel.OpenProcess(SYNCHRONIZE, 0, pid)
+    if not handle:
+        # Access denied means the process exists but belongs to someone else;
+        # anything else means it is gone.
+        return True if ctypes.get_last_error() == 5 else False
+    try:
+        # WaitForSingleObject returns immediately (WAIT_OBJECT_0) once the
+        # process has exited, and times out (WAIT_TIMEOUT) while it is running.
+        return kernel.WaitForSingleObject(handle, 0) != 0
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def process_is_alive(pid: int, started: int | None = None) -> bool:
     if pid <= 0: return False
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
-        pass
-    except OSError:
-        return False
+    if os.name == "nt":
+        alive = _nt_process_signaled(pid)
+        if alive is None: return True
+        if not alive: return False
+    else:
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            pass
+        except OSError:
+            return False
     if started and os.name == "nt":
         created = process_started_at(pid)
         # If Windows cannot query process age, conservatively retain the lock.
