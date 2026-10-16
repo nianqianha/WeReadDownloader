@@ -12,6 +12,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "weread"))
 PLUGIN = Path(__file__).resolve().parents[2] / "Kindle" / "03_插件源码与解压文件" / "weread.koplugin"
 BUNDLE = PLUGIN / "weread" / "lib" / "desktop_bundle.lua"
 
+# 这个用例读的是仓库外部的 Lua 插件树（它在 Kindle 目录里，不随仓库分发）。缺席时
+# 必须跳过而不是崩：否则 pytest 在收集阶段就 FileNotFoundError，报出来像"代码坏了"，
+# 实际只是这台机器/这个 runner 没有那个目录。与 test_desktop_bundle_lua.py 同一约定。
+if not BUNDLE.is_file():
+    import pytest
+    pytest.skip("本机没有外部 Lua 插件目录（可用 WEREAD_KINDLE_ROOT 指定）",
+                allow_module_level=True)
+
 
 def test_bundle_schema_validation():
     try:

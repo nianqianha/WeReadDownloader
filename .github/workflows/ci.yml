@@ -7,7 +7,6 @@ name: CI
 #   tests         跑 tests/ 下的 pytest 套件。当前**不拦合并**，原因见文末
 #                 「为什么 tests 作业还不拦合并」——拦了也只会变成一道人人无视
 #                 的红灯。
-#
 # 只有 pull_request 和 master 的 push 会触发：给协作者的分支跑检查，同时避免
 # 在每条 fix/* 分支上重复烧额度（公开仓库的 Actions 分钟数免费且不限量，但排队
 # 和噪音仍然要省）。
@@ -53,7 +52,8 @@ jobs:
     # 必须用 Windows：被测代码依赖 DPAPI、icacls、单实例互斥体和
     # CREATE_NO_WINDOW，这些在 Linux 运行器上不存在。
     runs-on: windows-latest
-    # 暂不拦合并。见文末「已知抖动」。
+    # 暂不拦合并。见文末「为什么 tests 作业还不拦合并」——拦了也只会变成一道人人无视
+    # 的红灯。
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -80,43 +80,33 @@ jobs:
 # ---------------------------------------------------------------------------
 # 为什么 tests 作业还不拦合并（做完下面这些再打开）
 #
-# 两个独立的问题，第一个是硬阻塞。
+# 原先的硬阻塞——套件跑到一半被自己发出的 Ctrl+C 打断——已经修掉了：
 #
-# 【1】套件跑到一半被中断，只跑了 188 / 401 个用例
+#   weread_desktop.py 的 process_is_alive() 以前在 Windows 上用 os.kill(pid, 0)
+#   判断进程存活。signal.CTRL_C_EVENT 的整数值是 0，所以 CPython 在 Windows 上把
+#   这次调用转成 GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)，即往该进程组发一个
+#   真的 Ctrl+C。导出锁（export.lock）记录的是上一个导出进程的 pid，当那个 pid 与
+#   运行器自己的控制台进程组重合时，检查锁 = 把 Ctrl+C 打给自己，pytest 抛
+#   KeyboardInterrupt 中止整个运行（两次独立复现，各只跑完 188/401 个用例）。
+#   现在 Windows 分支改为 OpenProcess(SYNCHRONIZE) + WaitForSingleObject(0)，
+#   与同文件 process_started_at() 的 ctypes 写法一致；tests/test_disk_edge_cases.py
+#   里有断言守着"Windows 探针不再出现 os.kill"。
 #
-# 两次独立运行（38860197427 及其重跑）都在同一个位置停住：
-#   !!!!!!!!!!!!!!!!!!!!!! KeyboardInterrupt !!!!!!!!!!!!!!!!!!!!!!
-#   第一次落在 pathlib.py:1354，第二次落在 weread/weread_desktop.py:1205
-#   13~14 failed, 168~169 passed, 6 skipped   ← 只有 188 个，全套有 401 个
+# 剩下的是**运行器环境**问题，都与代码无关，但需要逐个定性后才好决定处置：
 #
-# 落点随机、中断点固定，说明是异步信号。源头在 weread_desktop.py:1205：
-#
-#     def process_is_alive(pid, started=None):
-#         ...
-#         os.kill(pid, 0)        # ← 这行
-#
-# Windows 上 os.kill(pid, 0) 不是"检查进程是否存在"：signal.CTRL_C_EVENT 的整数值
-# 就是 0，CPython 因此走 GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid) 分支——即
-# 往进程组 pid 发一个 Ctrl+C。当锁文件里记的 pid 与当前控制台的进程组号重合时
-# （CI 运行器上就会），这个 Ctrl+C 送到了测试进程自己身上，Python 抛
-# KeyboardInterrupt，pytest 中止整个运行。
-#
-# 这不只是测试问题：这个函数是导出锁（export.lock）的存活判断，在用户机器上同样
-# 可能把 Ctrl+C 打给应用自己。正确的 Windows 存活判断是
-# OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) + GetExitCodeProcess——
-# 同文件的 process_started_at() 已经有 OpenProcess 的 ctypes 写法可以照抄。
-#
-# 这一处没有擅自改：它属于导出锁的并发安全逻辑（§6.2 的强杀残留锁判定依赖它），
-# 按"发现设计缺陷先对齐"的规矩，改法由用户定。
-#
-# 【2】GUI 测试在运行器上跑不起来 / 结果不稳
-#
-#   · _tkinter.TclError: Can't find a usable init.tcl —— 运行器上的 Tk 初始化
-#     失败，凡是建窗口的用例都倒。本机偶发同一条错误（"couldn't read file
-#     .../tcl8.6/auto.tcl"），说明这不是某一台机器的问题。
-#   · test_desktop_bundle.py 假定插件在 <repo>/../Kindle/...，即
-#     D:\a\WeReadDownloader\Kindle\...，那里没有。
-#   · 用例间会互相干扰：同一批用例单独跑通过、连在一起跑失败，失败项每次还不同。
+#   1. DPAPI 相关 3 个（test_desktop_secrets.py）
+#      CryptProtectData / CryptUnprotectData 在托管运行器上不能往返（KeyError:
+#      'cookies'）。这类用例本质上是"只有真实 Windows 用户会话里才成立"的契约。
+#   2. Tk 建不了窗口 7 个（test_desktop_logout.py 等）
+#      运行器上 _tkinter.TclError: invalid command name "tcl_findLibrary"。
+#      本机偶发同一条错误，说明是 Tk 初始化环境，不是被测代码。
+#   3. DPI / 字体差异 2 个（test_desktop_combo 焦点、test_desktop_layout 行数）
+#      断言写死了像素与焦点目标，字体度量一变就倒。
+#   4. 外部插件目录（test_desktop_bundle.py / test_desktop_bundle_lua.py）
+#      已在代码里改成 allow_module_level 跳过：那两处读的是仓库外的 Kindle 插件树，
+#      缺席是"这台机器没有该目录"，不是"代码坏了"。
+#   5. 用例间互相干扰：同一批用例单独跑通过、连在一起跑失败，失败项每次还不同
+#      （本机全量与单独跑的失败集不同，同一文件三次跑同一项也时过时不过）。
 #
 # 修干净之后再：去掉 continue-on-error，把它加进 protect-master 规则集的
 # required status checks，这道门才算真关上。
