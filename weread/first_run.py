@@ -177,7 +177,9 @@ def _settings_path() -> Path:
 
 def _settings_literal(text: str) -> dict:
     """Read the data-table format written by build_settings_lua without Lua."""
-    token_re = re.compile(r"[ \t\r\n\f\v]+|--[^\r\n]*|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[A-Za-z_][A-Za-z_0-9]*|[{}\[\]=,;]")
+    token_re = re.compile(
+        r"[ \t\r\n\f\v]+|--[^\r\n]*|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'"
+        r"|[A-Za-z_][A-Za-z_0-9]*|[{}\[\]=,;]")
     tokens = []
     pos = 0
     while pos < len(text):
@@ -250,12 +252,15 @@ def _read_base_settings(settings: Path) -> dict:
         else:
             lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
             table = lua.execute(raw[start + 1:])
-            values = {"api_key": (table[b"api_key"] or b"").decode("utf-8"),
-                      "cookies": {k.decode("utf-8"): v.decode("utf-8")
-                                  for k, v in table[b"cookies"].items()}}
+            values = {key.decode(): (table[key] or b"").decode("utf-8")
+                      for key in (b"api_key", b"wr_ticket", b"wr_wrpa")}
+            values["cookies"] = {k.decode("utf-8"): v.decode("utf-8")
+                                 for k, v in table[b"cookies"].items()}
         if not isinstance(values.get("api_key"), str) or not isinstance(values.get("cookies"), dict):
             return {}
         if not all(isinstance(k, str) and isinstance(v, str) for k, v in values["cookies"].items()):
+            return {}
+        if any(key in values and not isinstance(values[key], str) for key in ("wr_ticket", "wr_wrpa")):
             return {}
         return values
     except Exception:

@@ -90,6 +90,10 @@ class CredentialReadinessTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     first_run._settings_literal(text)
 
+    def test_invalid_optional_credential_fields_do_not_pass_readiness(self):
+        self.check('\nreturn {api_key="wrk-fake-readiness",cookies={wr_skey="fake-session"},wr_ticket={}}',
+                   {}, False, False)
+
 
 if __name__ == "__main__":
     unittest.main()
