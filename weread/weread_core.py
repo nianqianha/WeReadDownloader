@@ -103,6 +103,8 @@ ERRORS_ZH = (
      "这本书的某个章节需要购买或当前账号没有阅读权限。已保留已下载章节；请先在微信读书确认该章可读，再点“继续下载”。"),
     ("Private credentials need",
      "没有找到本机微信读书登录信息。请检查登录配置后重试。"),
+    ("Credential file not found",
+     "还没有配置微信读书基础凭证。请点顶栏「登录 / 切换账号」完成登录后重试。"),
     ("already running",
      "同一本书已有导出任务正在运行；请等待当前任务结束。"),
     ("cannot acquire desktop export lock",
