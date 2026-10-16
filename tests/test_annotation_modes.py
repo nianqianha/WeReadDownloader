@@ -19,7 +19,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-PROJ = Path(r"C:\Users\asus\Desktop\各类\weread-downloader")
+# 以前这里是写死的绝对路径（C:\Users\asus\Desktop\各类\weread-downloader），
+# 于是这个文件在别人机器上、在 CI 上都在收集阶段就 FileNotFoundError。仓库里
+# 另外七个测试文件都用 __file__ 定位，这里统一成同一种写法。
+PROJ = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJ / "weread"))
 spec = importlib.util.spec_from_file_location("weread_desktop", PROJ / "weread" / "weread_desktop.py")
 mod = importlib.util.module_from_spec(spec)
