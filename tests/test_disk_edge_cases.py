@@ -57,6 +57,7 @@ def patched_run(cmd, *args, **kwargs):
 subprocess.run = patched_run
 
 # Import functions under test
+import weread_desktop
 from weread_desktop import (
     _set_private_acl,
     secure_output_directory,
@@ -781,6 +782,41 @@ class TestDiscoverCheckpointFiles(unittest.TestCase):
 
         found = discover_checkpoint_files(workspace, chapters)
         self.assertIn("ch1", found)
+
+
+class TestProcessIsAlive(unittest.TestCase):
+    """The lock's liveness probe must not signal the process it is probing.
+
+    On Windows, signal 0 is CTRL_C_EVENT: CPython's os.kill turns the probe into
+    GenerateConsoleCtrlEvent, which delivers a real Ctrl+C to the pid's process
+    group. The export lock records the pid of whichever process was exporting, so
+    on a runner whose own shell shares that group, merely checking the lock
+    killed the test run mid-suite (seen twice in CI: KeyboardInterrupt inside
+    process_is_alive). The Windows path therefore has to go through
+    OpenProcess/WaitForSingleObject and must never call os.kill.
+    """
+
+    def test_nt_probe_does_not_call_os_kill(self):
+        if os.name != "nt":
+            self.skipTest("Windows-specific behaviour")
+        source = Path(weread_desktop.__file__).read_text(encoding="utf-8")
+        self.assertIn("_nt_process_signaled", source,
+                      "the Windows liveness probe helper is gone")
+        probe = source.split("def _nt_process_signaled")[1].split("def ")[0]
+        # Skip the docstring: it names os.kill precisely to explain why it is banned.
+        body = probe.split('"""')[2] if probe.count('"""') >= 2 else probe
+        code = "\n".join(line for line in body.splitlines()
+                         if not line.lstrip().startswith("#"))
+        self.assertNotIn("os.kill", code,
+                         "the Windows probe must not use os.kill: signal 0 sends Ctrl+C there")
+
+    def test_running_process_is_alive(self):
+        self.assertTrue(process_is_alive(os.getpid()))
+
+    def test_dead_process_is_not_alive(self):
+        # A pid that cannot exist: 0 is invalid and the API rejects negatives.
+        self.assertFalse(process_is_alive(0))
+        self.assertFalse(process_is_alive(-1))
 
 
 if __name__ == "__main__":
