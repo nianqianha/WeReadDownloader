@@ -1,0 +1,136 @@
+name: CI
+
+# 两个作业，性质完全不同，所以分开：
+#
+#   privacy-gate  拦"凭证/第三方素材/超大文件进仓库"。确定性行为，本地已验证
+#                 PASS，所以它是**拦合并**的。
+#   tests         跑 tests/ 下的 pytest 套件。当前**不拦合并**，原因见文末
+#                 「为什么 tests 作业还不拦合并」——拦了也只会变成一道人人无视
+#                 的红灯。
+#
+# 只有 pull_request 和 master 的 push 会触发：给协作者的分支跑检查，同时避免
+# 在每条 fix/* 分支上重复烧额度（公开仓库的 Actions 分钟数免费且不限量，但排队
+# 和噪音仍然要省）。
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# 最小权限：这两个作业都只需要读代码。没有这一步，GITHUB_TOKEN 默认带的写权限
+# 会让一个被改过的 workflow 文件有机会推送回仓库。
+permissions:
+  contents: read
+
+# 同一分支连着推几次时，取消还没跑完的旧运行，只留最新一次。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  privacy-gate:
+    name: privacy gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # privacy_gate.py 只读工作区文件（git ls-files / git diff --cached /
+        # git cat-file HEAD:<file>），不需要完整历史，所以浅克隆就够。
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+        # 与 mise.toml / PyInstaller 打包用的解释器保持同一个大版本。
+
+      - name: 扫描凭证、第三方素材与超大文件
+        run: python weread/privacy_gate.py
+        # 不加 --strict：--strict 会把测试里刻意埋的假凭证（wrk-fake-… 之类）
+        # 也算作拦截项，那正是本地 pre-push 钩子省略它的原因。发布前要更严的话，
+        # 在这里改成 `python weread/privacy_gate.py --strict`。
+
+  tests:
+    name: tests (Windows / Python 3.9)
+    # 必须用 Windows：被测代码依赖 DPAPI、icacls、单实例互斥体和
+    # CREATE_NO_WINDOW，这些在 Linux 运行器上不存在。
+    runs-on: windows-latest
+    # 暂不拦合并。见文末「已知抖动」。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install lupa lxml requests customtkinter darkdetect pillow qrcode pytest
+        # 仓库目前没有任何依赖声明文件（无 requirements.txt / pyproject.toml），
+        # 这份清单是从 import 反推的。版本故意不锁：先看清干净环境能不能装上，
+        # 锁版本是要单独决定的事（见下）。
+
+      - name: 跑测试
+        run: python -m pytest -q
+        # 收集规则来自仓库根目录的 pytest.ini。那里的 python_functions = test_*
+        # 不是可有可无的：测试文件用名为 `test` 的装饰器自我登记，pytest 默认
+        # 规则 `test*` 会把这个装饰器本身也当用例收集，然后在三十来个文件里各报
+        # 一个 "fixture 'fn' not found"。
+
+# ---------------------------------------------------------------------------
+# 为什么 tests 作业还不拦合并（做完下面这些再打开）
+#
+# 两个独立的问题，第一个是硬阻塞。
+#
+# 【1】套件跑到一半被中断，只跑了 188 / 401 个用例
+#
+# 两次独立运行（38860197427 及其重跑）都在同一个位置停住：
+#   !!!!!!!!!!!!!!!!!!!!!! KeyboardInterrupt !!!!!!!!!!!!!!!!!!!!!!
+#   第一次落在 pathlib.py:1354，第二次落在 weread/weread_desktop.py:1205
+#   13~14 failed, 168~169 passed, 6 skipped   ← 只有 188 个，全套有 401 个
+#
+# 落点随机、中断点固定，说明是异步信号。源头在 weread_desktop.py:1205：
+#
+#     def process_is_alive(pid, started=None):
+#         ...
+#         os.kill(pid, 0)        # ← 这行
+#
+# Windows 上 os.kill(pid, 0) 不是"检查进程是否存在"：signal.CTRL_C_EVENT 的整数值
+# 就是 0，CPython 因此走 GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid) 分支——即
+# 往进程组 pid 发一个 Ctrl+C。当锁文件里记的 pid 与当前控制台的进程组号重合时
+# （CI 运行器上就会），这个 Ctrl+C 送到了测试进程自己身上，Python 抛
+# KeyboardInterrupt，pytest 中止整个运行。
+#
+# 这不只是测试问题：这个函数是导出锁（export.lock）的存活判断，在用户机器上同样
+# 可能把 Ctrl+C 打给应用自己。正确的 Windows 存活判断是
+# OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) + GetExitCodeProcess——
+# 同文件的 process_started_at() 已经有 OpenProcess 的 ctypes 写法可以照抄。
+#
+# 这一处没有擅自改：它属于导出锁的并发安全逻辑（§6.2 的强杀残留锁判定依赖它），
+# 按"发现设计缺陷先对齐"的规矩，改法由用户定。
+#
+# 【2】GUI 测试在运行器上跑不起来 / 结果不稳
+#
+#   · _tkinter.TclError: Can't find a usable init.tcl —— 运行器上的 Tk 初始化
+#     失败，凡是建窗口的用例都倒。本机偶发同一条错误（"couldn't read file
+#     .../tcl8.6/auto.tcl"），说明这不是某一台机器的问题。
+#   · test_desktop_bundle.py 假定插件在 <repo>/../Kindle/...，即
+#     D:\a\WeReadDownloader\Kindle\...，那里没有。
+#   · 用例间会互相干扰：同一批用例单独跑通过、连在一起跑失败，失败项每次还不同。
+#
+# 修干净之后再：去掉 continue-on-error，把它加进 protect-master 规则集的
+# required status checks，这道门才算真关上。
+#
+# 附：本次已修好、不再需要处理的部分 —— 插件缺席的用例现在由 tests/conftest.py
+# 带原因跳过（本机有插件时 0 skipped，没有把测试静音）；原先 15 个文件在收集阶段
+# 直接崩的情况已消除。
+#
+# ---------------------------------------------------------------------------
+# 关于依赖版本
+#
+# 现在不锁版本安装。这个项目发布的是 PyInstaller 冻结的 exe，依赖漂移会先在打包
+# 结果上表现出来；所以合理做法是补一个 requirements-dev.txt 把版本钉死（本地实测
+# 可用的一组见下），再让这里 pip install -r 它。
+#
+#   lupa 2.8 · lxml 6.1.0 · requests 2.32.5 · customtkinter 5.2.2
+#   darkdetect 0.8.0 · pillow 11.3.0 · qrcode 8.2 · pytest 8.4.2

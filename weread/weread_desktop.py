@@ -54,10 +54,16 @@ else:
             ROOT = root
             break
     else:
-        raise RuntimeError(
-            "未找到微信读书 Lua 插件目录。它应位于 <各类>/Kindle/03_插件源码与解压文件/weread.koplugin；"
-            "若你移动过它，请设置环境变量 WEREAD_KINDLE_ROOT 指向 Kindle 目录。")
-PLUGIN = ROOT / "03_插件源码与解压文件" / "weread.koplugin"
+        # 找不到插件不在这里抛错，只记成 None。以前这个位置直接 raise，代价是
+        # 整个模块在仓库之外无法 import：协作者克隆仓库后既跑不了测试，也用不了
+        # 搜索和书架（这两条路根本不经过 Lua），只能绕成 AST 抽取之类的写法。
+        # 改成惰性后只有真正需要 Lua 的地方才要求插件——与 README 写的
+        # "宁可降级也不失败"一致。
+        ROOT = None
+PLUGIN = (ROOT / "03_插件源码与解压文件" / "weread.koplugin") if ROOT else None
+PLUGIN_MISSING = (
+    "未找到微信读书 Lua 插件目录。它应位于 <各类>/Kindle/03_插件源码与解压文件/weread.koplugin；"
+    "若你移动过它，请设置环境变量 WEREAD_KINDLE_ROOT 指向 Kindle 目录。")
 PRIVATE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "WeReadDesktop"
 SETTINGS = PRIVATE / "weread-live-settings.lua"
 COOKIE_STATE = PRIVATE / "session-cookies.json"
@@ -141,6 +147,9 @@ def _load_lua_module(lua: LuaRuntime, module: str, path: Path) -> None:
 
 
 def lua_runtime() -> LuaRuntime:
+    # 插件只在真正需要 Lua 时才必须存在（见文件上方 PLUGIN 的说明）。
+    if PLUGIN is None:
+        raise RuntimeError(PLUGIN_MISSING)
     lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
     lua.globals()._json_decode_python = lambda raw: json.loads(raw.decode("utf-8"))
     lua.execute(b'''package.loaded["json"] = {decode=function(v) return _json_decode_python(v) end}
