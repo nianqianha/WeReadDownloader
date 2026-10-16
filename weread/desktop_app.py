@@ -884,6 +884,17 @@ class DesktopApp:
             return
         if not self._start_worker(["--shelf"], "shelf", "正在读取微信书架…"):
             self.status.set("书架读取没有启动。请检查登录状态后重试。")
+            self._show_shelf_error()
+
+    def _show_shelf_error(self):
+        if not hasattr(self, "shelf_frame") or not self.shelf_frame.winfo_exists():
+            return
+        for widget in self.shelf_frame.winfo_children():
+            widget.destroy()
+        ctk.CTkLabel(self.shelf_frame,
+                     text="书架读取失败。请检查登录状态，再点「刷新书架」重试。",
+                     text_color=self.FAINT, font=_font(12), justify="center"
+                     ).pack(expand=True, pady=40)
 
     def _show_shelf(self, rows):
         """Render the account's shelf into the shelf frame."""
@@ -1785,6 +1796,8 @@ class DesktopApp:
         self.current_action = ""
         self._persist_log(f"[WORKER_START_ERROR] {detail}")
         self.status.set("任务没有启动。请查看技术日志后重试。")
+        if action == "shelf":
+            self._show_shelf_error()
 
     def _read_output(self, process, job: int):
         try:
@@ -2041,6 +2054,7 @@ class DesktopApp:
             if rows is None:
                 self._persist_log("[SHELF_PARSE_ERROR] " + value[:200])
                 self.status.set("书架数据读不到，请重试或检查登录状态。")
+                self._show_shelf_error()
             else:
                 self._show_shelf(rows)
             return
@@ -2150,6 +2164,8 @@ class DesktopApp:
                     self.status.set("登录状态正常，可以搜索书籍。")
                 else:
                     self._report_login_problem()
+            elif action == "shelf" and code != 0:
+                self._show_shelf_error()
             elif action == "probe":
                 if code == 0:
                     self.status.set("首章检查通过，可以开始下载。")
@@ -2212,6 +2228,8 @@ class DesktopApp:
                 self._restore_detail_placeholders()
         elif action == "auth":
             self._report_login_problem()
+        elif action == "shelf":
+            self._show_shelf_error()
 
     def _finish_card_categories(self):
         for book_id, widget in self.card_widgets.items():
