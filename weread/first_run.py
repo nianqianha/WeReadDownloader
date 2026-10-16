@@ -25,7 +25,9 @@ FILE FORMAT
 """
 from __future__ import annotations
 
+import ast
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -173,103 +175,123 @@ def _settings_path() -> Path:
     return Path(base) / "WeReadDesktop" / "weread-live-settings.lua"
 
 
+def _settings_literal(text: str) -> dict:
+    """Read the data-table format written by build_settings_lua without Lua."""
+    token_re = re.compile(
+        r"[ \t\r\n\f\v]+|--[^\r\n]*|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'"
+        r"|[A-Za-z_][A-Za-z_0-9]*|[{}\[\]=,;]")
+    tokens = []
+    pos = 0
+    while pos < len(text):
+        match = token_re.match(text, pos)
+        if match is None:
+            raise ValueError("Unsupported settings syntax")
+        token = match.group()
+        pos = match.end()
+        if not token.isspace() and not token.startswith("--"):
+            tokens.append(token)
+    index = 0
+
+    def take(expected=None):
+        nonlocal index
+        if index >= len(tokens) or (expected is not None and tokens[index] != expected):
+            raise ValueError("Malformed settings table")
+        token = tokens[index]
+        index += 1
+        return token
+
+    def string(token):
+        # Match the writer's escapes; do not silently reinterpret Lua decimal escapes as Python octal.
+        if token[:1] not in ("\"", "'") or any(
+                match.group(1) not in "\\'\"abfnrtv" for match in re.finditer(r"\\(.)", token)):
+            raise ValueError("Unsupported settings string")
+        return ast.literal_eval(token)
+
+    def table(depth=0):
+        if depth > 16:
+            raise ValueError("Settings table is too deeply nested")
+        take("{")
+        result = {}
+        while index < len(tokens) and tokens[index] != "}":
+            key = take()
+            if key == "[":
+                key = string(take())
+                take("]")
+            elif not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", key):
+                raise ValueError("Unsupported settings key")
+            take("=")
+            if index < len(tokens) and tokens[index] == "{":
+                value = table(depth + 1)
+            else:
+                value = string(take())
+            result[key] = value
+            if index < len(tokens) and tokens[index] in (",", ";"):
+                take()
+            elif index >= len(tokens) or tokens[index] != "}":
+                raise ValueError("Missing settings separator")
+        take("}")
+        return result
+
+    result = table()
+    if index != len(tokens):
+        raise ValueError("Unexpected text after settings table")
+    return result
+
+
+def _read_base_settings(settings: Path) -> dict:
+    try:
+        raw = settings.read_bytes()
+        start = raw.find(b"\nreturn {")
+        if start < 0:
+            return {}
+        try:
+            from lupa.luajit21 import LuaRuntime
+        except ImportError:
+            # shortcut: GUI fallback accepts data tables, not executable Lua expressions.
+            values = _settings_literal(raw[start + len(b"\nreturn "):].decode("utf-8"))
+        else:
+            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+            table = lua.execute(raw[start + 1:])
+            values = {key.decode(): (table[key] or b"").decode("utf-8")
+                      for key in (b"api_key", b"wr_ticket", b"wr_wrpa")}
+            values["cookies"] = {k.decode("utf-8"): v.decode("utf-8")
+                                 for k, v in table[b"cookies"].items()}
+        if not isinstance(values.get("api_key"), str) or not isinstance(values.get("cookies"), dict):
+            return {}
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in values["cookies"].items()):
+            return {}
+        if any(key in values and not isinstance(values[key], str) for key in ("wr_ticket", "wr_wrpa")):
+            return {}
+        return values
+    except Exception:
+        return {}
+
+
 def _credentials_usable(settings: Path) -> bool:
-    """Would load_credentials() accept the credentials RIGHT NOW?
-
-    The merged view is the only honest answer. Credentials live in two files --
-    the Lua base (api_key, and possibly wr_skey) and the sealed session overlay
-    the QR login writes -- and load_credentials() merges them. Judging the base
-    file alone said "wr_skey missing" to a user who had just scanned
-    successfully, and the card kept asking for a thing they already had while
-    search worked fine right next to it.
-
-    So: ask the loader's own companion, weread_login.has_credentials(), which
-    reads the same two files the same way the loader does. The base-file shape
-    check below stays as the fast path for the "no overlay at all" case and as
-    a fallback when weread_login cannot be imported.
-    """
+    """Require the base key and apply the worker's overlay-cookie precedence."""
+    base = _read_base_settings(settings)
+    if not base.get("api_key"):
+        return False
+    cookies = dict(base["cookies"])
     try:
         try:
             from . import weread_login
         except ImportError:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             import weread_login
-        if weread_login.has_credentials():
-            return True
+        cookies.update(weread_login.load_saved_credentials().get("cookies") or {})
     except Exception:
-        # weread_login unreadable is not fatal: fall through to the base-file
-        # shape check, which is the answer the loader reaches when the overlay
-        # cannot be read either.
-        return _base_file_shape_ok(settings)
-    return _base_file_shape_ok(settings)
+        return bool(base["cookies"].get("wr_skey"))
+    return bool(cookies.get("wr_skey"))
 
 
 def _base_file_shape_ok(settings: Path) -> bool:
-    """Would the BASE file alone satisfy the loader? (No overlay considered.)"""
-    if not settings.is_file():
-        return False
-    try:
-        raw = settings.read_bytes()
-    except OSError:
-        return False
-    start = raw.find(b"\nreturn {")
-    if start < 0:
-        # No table literal. The loader's error for this is "Credential file has
-        # an unexpected format", so treat it as unusable.
-        return False
-    try:
-        from lupa.luajit21 import LuaRuntime
-    except ImportError:
-        # Without LuaJIT the shape cannot be checked. Falling back to "usable"
-        # would resurrect the malformed-file gap, so fall back to the loader's
-        # own contract: require api_key and cookies.wr_skey to be present in
-        # the text, which is a weaker but still meaningful check.
-        text = raw.decode("utf-8", "replace")
-        return "api_key" in text and "wr_skey" in text
-    try:
-        lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
-        table = lua.execute(raw[start + 1:])
-        api_key = table[b"api_key"]
-        cookies = table[b"cookies"]
-        if not api_key or not api_key.decode(errors="replace").strip():
-            return False
-        skey = cookies[b"wr_skey"]
-        return bool(skey) and bool(skey.decode(errors="replace").strip())
-    except Exception:
-        # A parse failure or a missing key both mean "not usable"; either way
-        # the wizard is the better path than a window that cannot work.
-        return False
+    base = _read_base_settings(settings)
+    return bool(base.get("api_key") and base.get("cookies", {}).get("wr_skey"))
 
 
 def _has_api_key(settings: Path) -> bool:
-    """Has the user already supplied api_key, with only wr_skey still missing?
-
-    This is the state right after the wizard is completed: the file exists and
-    api_key is non-empty, but cookies.wr_skey is not there yet because the QR
-    login has not run. The wizard must NOT fire for it -- the next step is the
-    QR login in the main window, not filling the same form again.
-    """
-    if not settings.is_file():
-        return False
-    try:
-        raw = settings.read_bytes()
-    except OSError:
-        return False
-    start = raw.find(b"\nreturn {")
-    if start < 0:
-        return False
-    try:
-        from lupa.luajit21 import LuaRuntime
-    except ImportError:
-        text = raw.decode("utf-8", "replace")
-        return "api_key = \"wrk-" in text
-    try:
-        lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
-        table = lua.execute(raw[start + 1:])
-        api_key = table[b"api_key"]
-        return bool(api_key) and bool(api_key.decode(errors="replace").strip())
-    except Exception:
-        return False
+    return bool(_read_base_settings(settings).get("api_key"))
 
 
 def _ensure_credentials_file(root) -> bool:
