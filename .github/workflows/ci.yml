@@ -1,0 +1,106 @@
+name: CI
+
+# 两个作业，性质完全不同，所以分开：
+#
+#   privacy-gate  拦"凭证/第三方素材/超大文件进仓库"。确定性行为，本地已验证
+#                 PASS，所以它是**拦合并**的。
+#   tests         跑 tests/ 下的 pytest 套件。当前**不拦合并**，原因见文末
+#                 「已知抖动」一节——拦了也只会变成一道人人无视的红灯。
+#
+# 只有 pull_request 和 master 的 push 会触发：给协作者的分支跑检查，同时避免
+# 在每条 fix/* 分支上重复烧额度（公开仓库的 Actions 分钟数免费且不限量，但排队
+# 和噪音仍然要省）。
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# 最小权限：这两个作业都只需要读代码。没有这一步，GITHUB_TOKEN 默认带的写权限
+# 会让一个被改过的 workflow 文件有机会推送回仓库。
+permissions:
+  contents: read
+
+# 同一分支连着推几次时，取消还没跑完的旧运行，只留最新一次。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  privacy-gate:
+    name: privacy gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # privacy_gate.py 只读工作区文件（git ls-files / git diff --cached /
+        # git cat-file HEAD:<file>），不需要完整历史，所以浅克隆就够。
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+        # 与 mise.toml / PyInstaller 打包用的解释器保持同一个大版本。
+
+      - name: 扫描凭证、第三方素材与超大文件
+        run: python weread/privacy_gate.py
+        # 不加 --strict：--strict 会把测试里刻意埋的假凭证（wrk-fake-… 之类）
+        # 也算作拦截项，那正是本地 pre-push 钩子省略它的原因。发布前要更严的话，
+        # 在这里改成 `python weread/privacy_gate.py --strict`。
+
+  tests:
+    name: tests (Windows / Python 3.9)
+    # 必须用 Windows：被测代码依赖 DPAPI、icacls、单实例互斥体和
+    # CREATE_NO_WINDOW，这些在 Linux 运行器上不存在。
+    runs-on: windows-latest
+    # 暂不拦合并。见文末「已知抖动」。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install lupa lxml requests customtkinter darkdetect pillow qrcode pytest
+        # 仓库目前没有任何依赖声明文件（无 requirements.txt / pyproject.toml），
+        # 这份清单是从 import 反推的。版本故意不锁：先看清干净环境能不能装上，
+        # 锁版本是要单独决定的事（见下）。
+
+      - name: 跑测试
+        run: python -m pytest -q
+        # 收集规则来自仓库根目录的 pytest.ini。那里的 python_functions = test_*
+        # 不是可有可无的：测试文件用名为 `test` 的装饰器自我登记，pytest 默认
+        # 规则 `test*` 会把这个装饰器本身也当用例收集，然后在三十来个文件里各报
+        # 一个 "fixture 'fn' not found"。
+
+# ---------------------------------------------------------------------------
+# 已知抖动（把 continue-on-error 去掉之前必须先解决）
+#
+# 2026-10-16 本地实测：tests/test_desktop_logout.py 连跑 3 次得到
+# 1 failed / 9 passed / 1 failed，失败的那个用例每次都不同。单独跑该文件里的
+# 每个用例又是稳定通过的。这与 Tk 有关：这些 GUI 测试每个用例都新建一个
+# CTk root 再 destroy，同一个进程里反复创建/销毁 Tcl 解释器时
+# customtkinter 的全局状态会互相干扰，偶发 _tkinter.TclError。
+#
+# 全量一次跑（单进程）当时的成绩：386 passed / 11 failed / 4 skipped，约 6 分钟；
+# 那 11 个失败里多数属于这一类，另有 1 个与 Tk 无关的既有失败
+# （test_desktop_app.py::test_export_while_worker_busy_is_rejected_before_dialog）。
+#
+# 建议的下一步（做完再把 continue-on-error 去掉，并把它加进分支规则集的
+# required status checks）：
+#   1. 给这些 GUI 测试加上"一个进程只建一个 root"的复用，或改用进程级隔离；
+#   2. 修掉那个既有失败；
+#   3. 然后这个作业才配当一道真正的门。
+#
+# ---------------------------------------------------------------------------
+# 关于依赖版本
+#
+# 现在是不锁版本安装。这个项目发布的是用 PyInstaller 冻结的 exe，依赖漂移会先
+# 在打包结果上表现出来；所以合理做法是补一个 requirements-dev.txt 把版本钉死
+# （本地实测可用的一组见下），再让这里 pip install -r 它。
+#
+#   lupa 2.8 · lxml 6.1.0 · requests 2.32.5 · customtkinter 5.2.2
+#   darkdetect 0.8.0 · pillow 11.3.0 · qrcode 8.2 · pytest 8.4.2
