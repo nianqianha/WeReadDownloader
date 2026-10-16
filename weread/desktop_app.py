@@ -3133,20 +3133,20 @@ class DesktopApp:
             self.logout_button.configure(state="disabled")
             return
 
-        # Also remove the base credentials file (weread-live-settings.lua)
+        # Also remove the base credentials file (weread-live-settings.lua).
+        #
+        # 路径必须走 _settings_path()：它经由 weread_core.PRIVATE 解析，那是资料
+        # 目录唯一的所有者，测试也都 patch 它来做重定向。这里原先自己用
+        # %LOCALAPPDATA% 手拼路径（原注释把那个分支写成 "test environment 的
+        # fallback"），但 `from .weread_desktop import SETTINGS` 在 weread/ 没有
+        # __init__.py 的情况下必然 ImportError，所以那个分支实际是唯一会执行的
+        # 分支：结果是 logout 的测试删掉的是开发者本人的真实凭证文件，之后每个
+        # 操作都报 "Credential file not found"。改用 _settings_path() 后，测试
+        # 能重定向它，而且不再需要把 weread_desktop（LuaJIT/lxml）拖进 GUI 包。
         try:
-            # Import SETTINGS here to avoid circular import issues in tests
-            from .weread_desktop import SETTINGS
-            if SETTINGS.is_file():
-                SETTINGS.unlink(missing_ok=True)
-                self._persist_log("[LOGOUT] weread-live-settings.lua removed")
-        except ImportError:
-            # Fallback for test environment where relative import fails
-            import sys
-            from pathlib import Path
-            SETTINGS = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "WeReadDesktop" / "weread-live-settings.lua"
-            if SETTINGS.is_file():
-                SETTINGS.unlink(missing_ok=True)
+            base = _settings_path()
+            if base.is_file():
+                base.unlink(missing_ok=True)
                 self._persist_log("[LOGOUT] weread-live-settings.lua removed")
         except OSError as exc:
             self._persist_log(f"[LOGOUT_ERROR] failed to remove SETTINGS: {exc}")
