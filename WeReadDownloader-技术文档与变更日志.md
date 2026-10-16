@@ -180,6 +180,16 @@ WeReadWorker.exe (CLI 引擎)
 
 ## 四、变更日志（Keep a Changelog 格式）
 
+### 2026-10-16：下载流程可靠性修复（候选源码，尚未发布）
+
+- 修复 [#1](https://github.com/nianqianha/WeReadDownloader/issues/1)：首章检查接收并透传划线开关，对应原已知问题 W4。
+- 修复 [#2](https://github.com/nianqianha/WeReadDownloader/issues/2)：桌面实际中文模式选项与首章／下载参数一致；选择模式不再触发 `tuple.index`，对应原 W3。
+- 修复 [#3](https://github.com/nianqianha/WeReadDownloader/issues/3)、[#4](https://github.com/nianqianha/WeReadDownloader/issues/4)：断点同时记录想法／划线模式；旧的无模式信息检查点首次继续时刷新一次，之后同模式正常复用。合法的划线降级不再被当作坏章节，空正文仍需重新获取，完成计数与复用标准一致。已发布 EPUB 不主动清除。
+- 修复 [#5](https://github.com/nianqianha/WeReadDownloader/issues/5)、[#6](https://github.com/nianqianha/WeReadDownloader/issues/6)：扫码保存成功后刷新凭据卡；就绪判断要求基础文件中的实际 API key，并按 worker 的优先级合并会话 cookie。无 Lua 的 GUI 读取配置表的字段，不再通过注释中的字段名判断可用性。
+- 修复 [#7](https://github.com/nianqianha/WeReadDownloader/issues/7)、[#8](https://github.com/nianqianha/WeReadDownloader/issues/8)：书架失败退出加载状态；基础凭据文件缺失给出登录指引。
+
+验证采用离线合成数据、实际回调和导出函数，不读取真实账号或下载真实书籍。无 Lua 的配置识别支持程序生成的数据表，以及字符串键、注释和常见字符串转义；不执行自定义 Lua 表达式，无法识别时按未就绪处理。安装包、真实 GUI 和设备验收不在本次修复范围，现有安装版状态仍以之前记录为准。
+
 ### 2026-10-16 (1) 全新安装扫码登录后不可用：QR 登录从不创建基础凭证 lua（外部用户反馈）（**已修复，v1.0.3 未分发**）
 
 **Fixed**（**严重**——全新用户完全无法使用）
