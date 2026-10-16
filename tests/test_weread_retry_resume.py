@@ -213,6 +213,9 @@ def _seed_completed_chapter(workspace, uid, index):
     (workspace / (stem + ".body")).write_text("<p>done</p>", encoding="utf-8")
     (workspace / (stem + ".css")).write_text("", encoding="utf-8")
     import json
+    (workspace / "state.json").write_text(json.dumps({
+        "book_id": BOOK_ID, "want_thoughts": True, "want_underlines": True}),
+        encoding="utf-8")
     (workspace / (stem + ".json")).write_text(json.dumps({
         "chapter_uid": str(uid), "reviews": [], "underline_ranges": 0,
         "embedded_markers": 0}), encoding="utf-8")
