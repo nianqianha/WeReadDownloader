@@ -12,14 +12,17 @@
 
 从 [Releases](../../releases) 下载 `WeReadDownloader-Setup.exe`，双击安装。
 
-安装向导只有一个选项：装到 `C:\Program Files\WeReadDesktop`，并在桌面放一个名为
-**WeReadDownloader** 的快捷方式。
+安装向导只有两个选项：装到哪（默认 `C:\Program Files\WeReadDownloader`），
+以及要不要在桌面放快捷方式。装完即用，不需要选组件，也没有网页版。
 
 ---
 
 ## 怎么用
 
-界面分三步，从左到右、从上到下依次完成：
+左侧是导航，下载相关的都在「下载工坊」页；「我的书架」「下载记录」「统计分析」
+「划线清单」是另外四个页，下面分别说。
+
+「下载工坊」页本身分三步，从左到右、从上到下依次完成：
 
 ![下载工坊](docs/screenshots/01-workflow.png)
 
