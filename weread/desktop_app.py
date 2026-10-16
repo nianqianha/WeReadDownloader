@@ -29,6 +29,8 @@ import customtkinter as ctk
 from PIL import Image
 
 import weread_login
+import version as _version
+import updater as _updater
 SKILLS_URL = "https://weread.qq.com/r/weread-skills"
 # Helpers from first_run, used by check_credentials_on_start() to say in the
 # status bar what is missing, and by the inline credential card in the download
@@ -312,6 +314,11 @@ class DesktopApp:
         # widgets, so the redraw cost per page stays bounded.
         self.result_rows: list[dict] = []
         self.page_index = 0
+        # 排队下载（方案A）：勾选框 + 加入队列。bookId -> BooleanVar 记录勾选状态，
+        # download_queue 按勾选/加入顺序维护待下载列表（per-book 锁互不冲突，串行即可）。
+        self._card_checks: dict[str, tk.BooleanVar] = {}
+        self.download_queue: list[dict] = []
+        self.queue_running: bool = False
         self.jobs = tk.StringVar(value="1")
         self.status = tk.StringVar(value="准备就绪。第一步：检查登录状态。")
         # Non-zero while a modal dialog owns the main loop, so the stall
@@ -1332,6 +1339,23 @@ class DesktopApp:
             hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
             font=_font(13), command=self.open_login)
         self.login_button.pack(side="right")
+        # 排队下载：把勾选的书加入队列 / 启动整列下载（方案A）。
+        self.enqueue_button = ctk.CTkButton(
+            topbar, text="加入队列", width=88, height=34,
+            corner_radius=6, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            text_color="#FFFFFF", font=_font(13), command=self._enqueue_checked)
+        self.enqueue_button.pack(side="right", padx=(0, 8))
+        self.start_queue_button = ctk.CTkButton(
+            topbar, text="开始队列下载", width=118, height=34,
+            corner_radius=6, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            text_color="#FFFFFF", font=_font(13), command=self._start_queue)
+        self.start_queue_button.pack(side="right", padx=(0, 8))
+        # 应用内自更新：手动检查更新（静默查在启动后做一次，新版本且非忙时提示）。
+        self.check_update_button = ctk.CTkButton(
+            topbar, text="检查更新", width=88, height=34,
+            corner_radius=6, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            text_color="#FFFFFF", font=_font(13), command=self._check_for_update)
+        self.check_update_button.pack(side="right", padx=(0, 8))
 
         # ---- page container ----------------------------------------------
         # Every sidebar entry owns one page frame stacked in page_host. The
@@ -1976,6 +2000,8 @@ class DesktopApp:
                     self._handle_spawn_failed(*value)
                 elif kind == "done":
                     self._handle_done(*value)
+                elif kind == "update-failed":
+                    self._on_update_failed(*value)
                 else:
                     self._handle_line(value)
         finally:
@@ -2191,6 +2217,21 @@ class DesktopApp:
                     self.status.set("扫描到末尾，但有章节数据不完整；没有生成不完整 EPUB。点击“查看技术日志”查看具体章节。")
                 else:
                     self.status.set("下载暂时停止；已完成章节已保存，可稍后点“继续下载”。")
+                # 队列：当前这本结束（成功/暂停在断点）后，自动起下一本。
+                # per-book 锁互不冲突，串行续跑即可；失败也继续，不把队列卡死。
+                # 注意：用两个独立的 if，不能用 if/elif。pop 最后一本书会让
+                # download_queue 在 if 块内变空，若用 elif 则不会再被求值，
+                # 导致 queue_running 永远停在 True。
+                if self.queue_running and self.download_queue:
+                    nxt = self.download_queue.pop(0)
+                    self.status.set("队列继续：开始下载《%s》（剩余 %d 本）。"
+                                    % (nxt.get("title") or nxt.get("bookId", ""),
+                                       len(self.download_queue)))
+                    self._select_book(nxt)
+                    self._start_one(nxt)
+                if self.queue_running and not self.download_queue:
+                    self.queue_running = False
+                    self.status.set("队列已全部完成。")
         finally:
             self._flush_pending_book()
 
@@ -2373,6 +2414,17 @@ class DesktopApp:
                      text=card_rating_text(raw_rating, item.get("newRatingCount")),
                      text_color=self.AMBER if rated else self.FAINT, anchor="w", font=_font(11)
                      ).pack(fill="x", anchor="w", pady=(3, 0))
+
+        # 排队下载：每张卡片加一个勾选框 + "加入队列"按钮（方案A）。
+        # 勾选状态存在 self._card_checks 里，按页重建卡片时复用，避免勾选丢失。
+        check_var = self._card_checks.get(bid) or tk.BooleanVar(value=False)
+        self._card_checks[bid] = check_var
+        ctrl = ctk.CTkFrame(inner, fg_color="transparent")
+        ctrl.pack(fill="x", anchor="w", pady=(4, 0))
+        ctk.CTkCheckBox(ctrl, text="加入队列", variable=check_var, font=_font(10),
+                        width=86, height=22,
+                        command=lambda b=bid: self._on_card_check(b)
+                        ).pack(side="left")
 
         def choose(_event=None, selected=dict(item)):
             self._select_book(selected)
@@ -3076,6 +3128,89 @@ class DesktopApp:
                            "正在检查这本书的第一章、划线"
                            + ("和想法…" if want_thoughts else "…（已跳过想法）"))
 
+    # ------------------------------------------------------------------
+    # 排队下载（方案A）：勾选卡片 -> 加入队列 -> 开始队列下载 -> 自动续下一本
+    # ------------------------------------------------------------------
+    def _on_card_check(self, book_id: str) -> None:
+        """勾选/取消勾选时的即时反馈；真正入队在 _enqueue_checked 里发生。"""
+        if self._card_checks.get(book_id, tk.BooleanVar()).get():
+            self.status.set("已勾选《%s》，点「加入队列」开始排队。" %
+                            (self.book_rows.get(book_id, {}).get("title", book_id)))
+        elif book_id not in [b["bookId"] for b in self.download_queue]:
+            self.status.set("已取消勾选《%s》。" %
+                            (self.book_rows.get(book_id, {}).get("title", book_id)))
+
+    def _selected_books_by_check(self) -> list[dict]:
+        """返回勾选框为 True 的卡片对应的书籍信息（按当前结果顺序）。"""
+        out = []
+        for row in self.result_rows:
+            bid = str(row.get("bookId") or "")
+            if self._card_checks.get(bid, tk.BooleanVar()).get():
+                out.append(row)
+        return out
+
+    def _enqueue_checked(self) -> None:
+        """把当前勾选的书按结果顺序加入 download_queue（已存在的跳过）。"""
+        existing = {b["bookId"] for b in self.download_queue}
+        added = 0
+        for row in self._selected_books_by_check():
+            bid = str(row.get("bookId") or "")
+            if bid in existing:
+                continue
+            self.download_queue.append({
+                "bookId": bid,
+                "title": str(row.get("title") or ""),
+                "author": str(row.get("author") or ""),
+            })
+            existing.add(bid)
+            added += 1
+        if added:
+            self.status.set("已加入队列 %d 本，共 %d 本待下载。点「开始队列下载」开始。"
+                            % (added, len(self.download_queue)))
+        else:
+            self.status.set("没有新增可加入队列的书（可能已加入或没有勾选）。")
+
+    def _queue_args(self, book: dict) -> list[str]:
+        """为一本书构造 worker 参数（与 export() 共用，保证标注语义一致）。"""
+        mode = self.annotations_var.get()
+        want_thoughts = mode == "划线 + 想法"
+        want_underlines = mode != "纯正文"
+        jobs = max(1, min(4, int(self.jobs.get())))
+        args = [str(book["bookId"]), "--jobs", str(jobs)]
+        if not want_underlines:
+            args.append("--no-annotations")
+        elif not want_thoughts:
+            args.append("--no-thoughts")
+        return args
+
+    def _start_one(self, book: dict) -> None:
+        """起一本的下载（队列与单本共用）。不弹确认框，直接跑。"""
+        self.progress.set(0)
+        if not self._start_worker(self._queue_args(book), "export",
+                                  "正在准备下载《%s》并检查本地断点…"
+                                  % (book.get("title") or book.get("bookId", ""))):
+            self.status.set("《%s》没有启动。请检查程序目录后重试。"
+                            % (book.get("title") or book.get("bookId", "")))
+
+    def _start_queue(self) -> None:
+        """从队首起第一本；之后由 _handle_done 自动续下一本。"""
+        if not self.download_queue:
+            self._ask("showinfo", "队列为空",
+                      "还没有加入队列的书。先在左侧勾选要下载的书，再点「加入队列」。")
+            return
+        if self._is_busy():
+            self.status.set("当前有任务正在运行，等它结束再开始队列。")
+            return
+        if not self._ask("askyesno", "开始队列下载",
+                         "将按顺序下载队列中的 %d 本书，每本跑完后自动开始下一本。\n\n"
+                         "已有章节会自动续传。中途可以点「暂停」停在当前这本，"
+                         "队列会保留。继续吗？" % len(self.download_queue)):
+            return
+        self.queue_running = True
+        first = self.download_queue.pop(0)
+        self._select_book(first)
+        self._start_one(first)
+
     def export(self):
         if not self.selected_id:
             self._ask("showinfo", "先选择一本书", "先搜索并点击一本书，检查详情后再开始下载。")
@@ -3093,16 +3228,74 @@ class DesktopApp:
                 "已有章节会自动续传。若微信读书返回空章节或无法确认的划线，会记录问题并继续检查其它章节；"
                 "有未解决章节时不会生成不完整 EPUB。继续吗？"):
             return
-        self.progress.set(0)
-        jobs = max(1, min(4, int(self.jobs.get())))
-        args = [self.selected_id, "--jobs", str(jobs)]
-        if not want_underlines:
-            args.append("--no-annotations")
-        elif not want_thoughts:
-            args.append("--no-thoughts")
-        if not self._start_worker(args, "export",
-                                  "正在准备下载并检查本地断点…"):
-            self.status.set("下载没有启动。请检查程序目录后重试。")
+        self._start_one({
+            "bookId": self.selected_id,
+            "title": self.selected_title,
+            "author": self.selected_author,
+        })
+
+    # ------------------------------------------------------------------
+    # 应用内自更新（GitHub Releases API，薄封装：检测 -> 下载 Setup.exe -> 拉起覆盖）
+    # ------------------------------------------------------------------
+    def _check_for_update(self, silent: bool = False) -> None:
+        """查 GitHub Releases 是否有新版本。
+
+        silent=True 用于启动后静默检查：无网络/无新版本时一律不打扰用户。
+        """
+        latest = _updater.fetch_latest()
+        if not latest or latest.get("prerelease") or latest.get("draft"):
+            if not silent:
+                self._ask("showinfo", "已是最新", "没有检测到新版本。")
+            return
+        if not _updater.is_newer(_version.APP_VERSION, latest["version"]):
+            if not silent:
+                self._ask("showinfo", "已是最新",
+                          f"当前已是最新版本 v{_version.APP_VERSION}。")
+            return
+        # 有新版本：与下载队列互斥——正在下载时不允许中途关程序装更新。
+        if self._is_busy():
+            self.status.set("检测到新版本 v%s，但当前有下载任务在跑；"
+                            "请等队列跑完或暂停后再点「检查更新」。" % latest["version"])
+            return
+        self._offer_update(latest)
+
+    def _offer_update(self, latest: dict) -> None:
+        """弹窗展示新版本说明，用户点「下载并安装」才执行（不做后台静默强更）。"""
+        notes = latest.get("notes") or "（发布者未填写更新说明）"
+        answer = self._ask("askyesno", "发现新版本 v%s" % latest["version"],
+                           "当前版本 v%s，发现新版本 v%s。\n\n"
+                           "更新内容：\n%s\n\n"
+                           "点「是」将下载安装包并覆盖安装（会保留你的导出与登录信息）。"
+                           "是否现在更新？"
+                           % (_version.APP_VERSION, latest["version"], notes))
+        if not answer:
+            return
+        if self._is_busy():
+            self.status.set("开始更新前检测到下载任务在跑，已取消。请先等队列结束。")
+            return
+        self._download_and_apply(latest)
+
+    def _download_and_apply(self, latest: dict) -> None:
+        """下载 Setup.exe 到临时目录并拉起覆盖安装。后台线程跑，避免卡 UI。"""
+        self.status.set("正在下载 v%s 安装包…" % latest["version"])
+        self.check_update_button.configure(state="disabled")
+
+        def run():
+            path = _updater.download_setup(latest["setup_url"])
+            if not path:
+                self.events.put(("update-failed", ("下载安装包失败，请稍后重试或手动从 GitHub 下载。",)))
+                return
+            try:
+                _updater.apply_update(path)
+            except Exception:
+                self.events.put(("update-failed", ("启动安装程序失败，请手动运行下载的安装包。",)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_update_failed(self, message: str) -> None:
+        self.check_update_button.configure(state="normal")
+        self.status.set(message)
+        self._ask("showerror", "更新失败", message)
 
     def stop(self):
         if self._is_busy():
@@ -3215,6 +3408,13 @@ def main() -> int:
         # A credential check must never stop the window from opening. Logged and
         # carried on: the panel's own state tells the user what to do next.
         print("[FIRST_RUN] credential check failed: %s: %s"
+              % (type(exc).__name__, exc), file=sys.stderr)
+    # 启动后静默查一次更新：无网络/无新版本一律不打扰；发现新版本且非忙才弹提示。
+    try:
+        threading.Thread(target=lambda: app._check_for_update(silent=True),
+                         daemon=True).start()
+    except Exception as exc:
+        print("[SELF_UPDATE] startup check failed: %s: %s"
               % (type(exc).__name__, exc), file=sys.stderr)
     root.mainloop()
     return 0
