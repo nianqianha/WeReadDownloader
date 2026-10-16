@@ -122,6 +122,21 @@ class CheckpointModesTests(unittest.TestCase):
         self.export(False, False)
         self.assertEqual(len(self.fetched), 4)
 
+    def test_annotation_omissions_are_reused_and_counted_as_completed(self):
+        self.export(False, True)
+        for path in self.workspace.glob("chapter-*.json"):
+            row = json.loads(path.read_text(encoding="utf-8"))
+            row.update(underline_ranges=2, dropped_underline_ranges=1)
+            path.write_text(json.dumps(row), encoding="utf-8")
+        self.export(False, True)
+        self.assertEqual(len(self.fetched), 2)
+
+    def test_empty_staged_body_is_fetched_again(self):
+        self.export(False, True)
+        (self.workspace / "chapter-uid-1.body").write_text("", encoding="utf-8")
+        self.export(False, True)
+        self.assertEqual(self.fetched, ["1", "2", "1"])
+
 
 if __name__ == "__main__":
     unittest.main()

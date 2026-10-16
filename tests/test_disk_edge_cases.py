@@ -736,7 +736,7 @@ class TestDiscoverCheckpointFiles(unittest.TestCase):
 
         # Create valid checkpoint for ch1 - must match the glob pattern "chapter-*.json"
         # The function expects files named like "chapter-<uid>.json" based on the glob
-        # Body must contain wr-underline markers matching underline_ranges
+        # Complete chapter files can be resumed even when some highlights were refused.
         review = workspace / "chapter-ch1.json"
         review.write_text(json.dumps({
             "chapter_uid": "ch1",
@@ -767,19 +767,20 @@ class TestDiscoverCheckpointFiles(unittest.TestCase):
         self.assertNotIn("ch1", found)
 
     def test_discover_mismatched_underline_count(self):
-        """Verify checkpoint with mismatched underline count is skipped."""
+        """A reported annotation omission does not invalidate the chapter."""
         workspace = self.temp_dir / "workspace"
         workspace.mkdir()
 
         chapters = [{"chapterUid": "ch1", "title": "Ch1"}]
 
         review = workspace / "chapter-ch1.json"
-        review.write_text(json.dumps({"chapter_uid": "ch1", "underline_ranges": 5, "embedded_markers": 3}))
-        (workspace / "chapter-ch1.body").write_text("<html><body>Ch1</body></html>")  # Only 3 markers
+        review.write_text(json.dumps({"chapter_uid": "ch1", "underline_ranges": 5,
+                                      "embedded_markers": 3, "dropped_underline_ranges": 2}))
+        (workspace / "chapter-ch1.body").write_text("<p>" + "<span class='wr-underline'>Ch1</span>" * 3 + "</p>")
         (workspace / "chapter-ch1.css").write_text("body {}")
 
         found = discover_checkpoint_files(workspace, chapters)
-        self.assertNotIn("ch1", found)
+        self.assertIn("ch1", found)
 
 
 if __name__ == "__main__":
