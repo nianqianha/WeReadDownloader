@@ -80,28 +80,50 @@ jobs:
 # ---------------------------------------------------------------------------
 # 为什么 tests 作业还不拦合并（做完下面这些再打开）
 #
-# 2026-10-16 实测，在一个没有插件目录的检出上（等价于 CI 环境）跑了之前报错的
-# 那 15 个文件：3 failed / 122 passed / 27 skipped。改动前这 15 个文件是在收集
-# 阶段就崩掉、整个 pytest 运行被中断。
+# 两个独立的问题，第一个是硬阻塞。
 #
-# 27 个 skip 是真正需要那个外部 Lua 插件目录的用例，由 tests/conftest.py 带原因
-# 跳过。同一个文件在本机（有插件）跑是 0 skipped，所以这不是把测试静音。
+# 【1】套件跑到一半被中断，只跑了 188 / 401 个用例
 #
-# 剩余 3 个失败与插件无关，都是既有的：
-#   test_multi_account_isolation.py::test_acquire_export_lock_prevents_concurrent_export
-#   test_underline_placement.py::test_real_corpus_placement_still_verifies
-#   test_weread_retry_resume.py::test_export_resumes_from_parent_output_and_refuses_epub_when_chapter_stays_empty
-#     └ 这条自己捕获了 RuntimeError 再断言它，所以 conftest 的跳过覆盖不到，
-#       需要单独加判断。
+# 两次独立运行（38860197427 及其重跑）都在同一个位置停住：
+#   !!!!!!!!!!!!!!!!!!!!!! KeyboardInterrupt !!!!!!!!!!!!!!!!!!!!!!
+#   第一次落在 pathlib.py:1354，第二次落在 weread/weread_desktop.py:1205
+#   13~14 failed, 168~169 passed, 6 skipped   ← 只有 188 个，全套有 401 个
 #
-# 另外 GUI 测试存在抖动：tests/test_desktop_logout.py 连跑 3 次得到
-# 1 failed / 9 passed / 1 failed，失败的那个用例每次都不同，而单独跑每个用例是
-# 稳定通过的。成因是这些用例各自新建再销毁一个 CTk root，同一进程内反复创建/
-# 销毁 Tcl 解释器时 customtkinter 的全局状态互相干扰，偶发 _tkinter.TclError。
+# 落点随机、中断点固定，说明是异步信号。源头在 weread_desktop.py:1205：
 #
-# 一道会被随机染红的门只会变成人人无视的红灯，所以在这三件事处理干净之前，
-# 这个作业只出报告、不拦人。做完之后：去掉 continue-on-error，再把它加进
-# protect-master 规则集的 required status checks，这道门才算真关上。
+#     def process_is_alive(pid, started=None):
+#         ...
+#         os.kill(pid, 0)        # ← 这行
+#
+# Windows 上 os.kill(pid, 0) 不是"检查进程是否存在"：signal.CTRL_C_EVENT 的整数值
+# 就是 0，CPython 因此走 GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid) 分支——即
+# 往进程组 pid 发一个 Ctrl+C。当锁文件里记的 pid 与当前控制台的进程组号重合时
+# （CI 运行器上就会），这个 Ctrl+C 送到了测试进程自己身上，Python 抛
+# KeyboardInterrupt，pytest 中止整个运行。
+#
+# 这不只是测试问题：这个函数是导出锁（export.lock）的存活判断，在用户机器上同样
+# 可能把 Ctrl+C 打给应用自己。正确的 Windows 存活判断是
+# OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) + GetExitCodeProcess——
+# 同文件的 process_started_at() 已经有 OpenProcess 的 ctypes 写法可以照抄。
+#
+# 这一处没有擅自改：它属于导出锁的并发安全逻辑（§6.2 的强杀残留锁判定依赖它），
+# 按"发现设计缺陷先对齐"的规矩，改法由用户定。
+#
+# 【2】GUI 测试在运行器上跑不起来 / 结果不稳
+#
+#   · _tkinter.TclError: Can't find a usable init.tcl —— 运行器上的 Tk 初始化
+#     失败，凡是建窗口的用例都倒。本机偶发同一条错误（"couldn't read file
+#     .../tcl8.6/auto.tcl"），说明这不是某一台机器的问题。
+#   · test_desktop_bundle.py 假定插件在 <repo>/../Kindle/...，即
+#     D:\a\WeReadDownloader\Kindle\...，那里没有。
+#   · 用例间会互相干扰：同一批用例单独跑通过、连在一起跑失败，失败项每次还不同。
+#
+# 修干净之后再：去掉 continue-on-error，把它加进 protect-master 规则集的
+# required status checks，这道门才算真关上。
+#
+# 附：本次已修好、不再需要处理的部分 —— 插件缺席的用例现在由 tests/conftest.py
+# 带原因跳过（本机有插件时 0 skipped，没有把测试静音）；原先 15 个文件在收集阶段
+# 直接崩的情况已消除。
 #
 # ---------------------------------------------------------------------------
 # 关于依赖版本
