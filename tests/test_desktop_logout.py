@@ -29,6 +29,21 @@ app.OUTPUT = Path(_TMP.name) / "exports"
 _CRED = Path(_TMP.name) / "session-cookies.json"
 app.weread_login.CREDENTIAL_STATE = _CRED
 
+# 基础凭证文件（weread-live-settings.lua）必须一起重定向。logout 以前自己用
+# %LOCALAPPDATA% 拼这个路径，任何重定向都拦不住它——跑这个文件会删掉开发者本人
+# 的真实凭证，之后每个操作都报 "Credential file not found"。desktop_app 现在改
+# 走 _settings_path()，而那个路径归 weread_core.PRIVATE 所有，所以两处都要
+# patch，与 test_desktop_app.py 的做法一致。
+import weread_core as _weread_core
+
+_PROFILE = Path(_TMP.name) / "WeReadDesktop"
+_weread_core.PRIVATE = _PROFILE
+app._settings_path = lambda: _PROFILE / "weread-live-settings.lua"
+
+# 重定向一旦失效，这里立刻失败，而不是等真实凭证被删掉才发现。
+assert str(app._settings_path()).startswith(_TMP.name), \
+    "凭证路径必须被重定向出真实用户目录，否则测试会删掉真实凭证"
+
 ALL_TESTS = []
 
 

@@ -24,6 +24,13 @@ PLUGIN = PROJ.parent / "Kindle" / "03_插件源码与解压文件" / "weread.kop
 TEST = PROJ / "tests" / "test_desktop_bundle.lua"
 MODULE = PLUGIN / "weread" / "lib" / "desktop_bundle.lua"
 
+# 这个文件是脚本式的——整段流程在导入期就跑完，没有可收集的 test_ 函数。所以
+# 插件缺席时必须在导入期就退出：否则 pytest 在收集阶段直接 FileNotFoundError，
+# 报出来像"代码坏了"，实际是"这台机器没有外部插件目录"。
+if not MODULE.is_file():
+    import pytest
+    pytest.skip("本机没有外部 Lua 插件目录", allow_module_level=True)
+
 lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
 lua.execute(
     b'package.loaded["json"] = {decode=function() return {} end, '
