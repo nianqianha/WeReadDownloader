@@ -2879,6 +2879,7 @@ class DesktopApp:
         self._refresh_logout_button()
         self.auth_badge.configure(text="登录有效", text_color=self.GREEN)
         self.status.set(f"登录成功{who}。现在可以搜索书籍了。")
+        self._refresh_creds_panel()
         self.close_login()
 
     def _save_manual_credentials(self):
