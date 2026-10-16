@@ -105,6 +105,12 @@ Source: "..\release-fresh\WeReadWorker\*"; DestDir: "{app}\WeReadWorker"; \
 Source: "..\assets\weread-app.ico"; DestDir: "{app}\assets"; \
     Flags: ignoreversion
 
+; 许可证随安装包分发：LICENSE 为本程序自身（MIT），THIRD_PARTY_LICENSES.txt 为
+; 打包进 exe 的第三方库许可声明。自更新拉起的 Setup.exe 装出去也含这两份，
+; 满足 MIT/BSD/Apache 的署名义务，且不与未签名的 SmartScreen 警告产生额外风险。
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\THIRD_PARTY_LICENSES.txt"; DestDir: "{app}"; Flags: ignoreversion
+
 ; 快捷方式必须显式指定图标。不设 IconFilename 时会沿用 PyInstaller exe 内嵌的
 ; 通用图标，桌面上会变成一个很难看的默认图标（已实测踩过：IconLocation 为 ",0"）。
 ; 名字直接用 WeReadDownloader，不再叫「图形版（二维码登录）」——那是实现细节，

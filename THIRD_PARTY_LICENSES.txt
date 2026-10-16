@@ -1,0 +1,61 @@
+WeReadDownloader 通过 PyInstaller 将以下第三方库打包进可执行文件。这些库均为
+宽松许可证（MIT / BSD / CC0 / Apache-2.0），其唯一硬义务是在分发时随附许可证文本。
+本文件即为此用途，安装包会把它一并装到程序目录。
+
+PyInstaller 自身的 bootloader 采用 GPLv2 或更高版本，但带有明确的例外条款
+（special exception），允许使用 PyInstaller 构建和分发专有/闭源程序，因此**不会**
+以任何方式传染（copyleft）本应用的代码。
+
+================================================================================
+customtkinter —— Creative Commons Zero v1.0 Universal (CC0 1.0)
+  公共领域贡献。无署名或其他义务。
+  https://creativecommons.org/publicdomain/zero/1.0/
+
+--------------------------------------------------------------------------------
+lupa —— MIT License
+  Copyright (c) 2011-2023 Stefan Behnel, Itamar Turner-Trauring, and contributors
+  Permission is hereby granted, free of charge, to any person obtaining a copy of
+  this software and associated documentation files (the "Software"), to deal in
+  the Software without restriction... (MIT; see https://opensource.org/licenses/MIT)
+
+--------------------------------------------------------------------------------
+lxml —— BSD-3-Clause License
+  Copyright (c) 2004-2024, ElementTree contributors / lxml contributors
+  Redistribution and use in source and binary forms, with or without modification,
+  are permitted provided that the conditions of the BSD 3-Clause License are met.
+  https://opensource.org/licenses/BSD-3-Clause
+
+--------------------------------------------------------------------------------
+requests —— Apache License 2.0
+  Copyright 2024 Kenneth Reitz / Python Software Foundation
+  Licensed under the Apache License, Version 2.0. You may obtain a copy at
+  https://www.apache.org/licenses/LICENSE-2.0
+  另需保留其 NOTICE 文件精神：本软件基于 Requests 构建。
+
+--------------------------------------------------------------------------------
+Pillow —— MIT-CMU / HPND
+  Copyright (c) 1995-2024, The Pillow Fellowship and contributors
+  https://opensource.org/licenses/MIT
+
+--------------------------------------------------------------------------------
+qrcode —— BSD License
+  Copyright (c) 2011, Lincoln Loop, LLC
+  Redistribution and use in source and binary forms, with or without modification,
+  are permitted provided that the conditions of the BSD License are met.
+
+--------------------------------------------------------------------------------
+darkdetect —— BSD-3-Clause License
+  Copyright (c) 2020 Eelco Wiersma
+  Redistribution and use in source and binary forms, with or without modification,
+  are permitted provided that the conditions of the BSD 3-Clause License are met.
+
+================================================================================
+PyInstaller bootloader —— GPLv2-or-later WITH a special exception
+  Copyright (c) 2004-2024, PyInstaller Development Team
+  The bootloader is licensed under the GNU General Public License v2.0 or later,
+  WITH the special exception that you may use PyInstaller to build and distribute
+  non-free programs (including commercial ones) without conveying the source of
+  the bootloader or the rest of PyInstaller — i.e. it does NOT require you to
+  release your own application under the GPL.
+  https://github.com/pyinstaller/pyinstaller/blob/develop/COPYING
+================================================================================
