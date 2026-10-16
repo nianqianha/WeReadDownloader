@@ -1228,9 +1228,8 @@ def discover_checkpoint_files(workspace: Path, chapters: list[dict[str, Any]]) -
             css_path = workspace / (stem + ".css")
             if uid not in allowed or uid in found or not (body_path.is_file() and css_path.is_file()):
                 continue
-            ranges = int(row.get("underline_ranges", 0))
-            markers = body_path.read_text(encoding="utf-8", errors="replace").count("wr-underline")
-            if ranges and markers < ranges:
+            # Refused highlights are a valid, reported omission, not a broken chapter.
+            if not body_path.read_text(encoding="utf-8").strip():
                 continue
             found[uid] = (body_path, review_path, css_path)
         except (OSError, ValueError, TypeError):
@@ -1616,12 +1615,8 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         body_path = chapter_paths[index - 1]
         review_path = review_paths[index - 1]
         css_path = css_paths[index - 1]
-        if body_path.is_file() and review_path.is_file() and css_path.is_file():
-            try:
-                cached = json.loads(review_path.read_text(encoding="utf-8"))
-                if str(cached.get("chapter_uid")) == str(chapter["chapterUid"]): return
-            except (OSError, ValueError, TypeError):
-                pass
+        if cached_by_uid.get(str(chapter["chapterUid"])) == (body_path, review_path, css_path):
+            return
         print(f"[{index}/{len(chapters)}] Fetching chapter UID {chapter['chapterUid']}", file=sys.stderr, flush=True)
         if not hasattr(thread_context, "api"):
             thread_context.lua = lua_runtime()

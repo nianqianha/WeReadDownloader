@@ -100,7 +100,7 @@ def test_epub_is_valid_and_embeds_thought_anchor_markup():
             assert b"<dc:identifier" in archive.read("OEBPS/content.opf")
 
 
-def test_checkpoint_discovery_is_uid_based_and_requires_complete_annotation_files():
+def test_checkpoint_discovery_is_uid_based_and_accepts_annotation_omissions():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
         (root / "chapter-00011.body").write_text('<p class="wr-underline">saved</p>', encoding="utf-8")
@@ -111,11 +111,12 @@ def test_checkpoint_discovery_is_uid_based_and_requires_complete_annotation_file
         (root / "chapter-00012.body").write_text("no marker", encoding="utf-8")
         (root / "chapter-00012.json").write_text(json.dumps({
             "chapter_uid": "62", "underline_ranges": 2, "embedded_markers": 0,
+            "dropped_underline_ranges": 2,
         }), encoding="utf-8")
         (root / "chapter-00012.css").write_text("", encoding="utf-8")
         chapters = [{"chapterUid": "62"}, {"chapterUid": "61"}, {"chapterUid": "63"}]
         found = wd.discover_checkpoint_files(root, chapters)
-        assert set(found) == {"61"}
+        assert set(found) == {"61", "62"}
         assert found["61"][0].name == "chapter-00011.body"
 
 
@@ -197,7 +198,7 @@ if __name__ == "__main__":
                    test_chapter_body_validation_accepts_xml_declaration_prefixed_content,
                  test_body_projection_preserves_inline_content_and_tails,
                  test_epub_is_valid_and_embeds_thought_anchor_markup,
-                 test_checkpoint_discovery_is_uid_based_and_requires_complete_annotation_files,
+        test_checkpoint_discovery_is_uid_based_and_accepts_annotation_omissions,
                  test_shard_md5_retry_refetches_whole_chapter,
                  test_bundle_review_stream_matches_manifest,
                  test_search_row_uses_real_tab_separators_and_cleans_fields,
