@@ -387,9 +387,14 @@ def test_lock_pid_starttime_verification() -> None:
         book_id = "99999999"
         lock_file = workspace / "export.lock"
         
-        # Create a fake lock with current PID but old start time (>5s difference)
-        old_started = int(time.time()) - 100
-        fake_lock = {"pid": os.getpid(), "book_id": book_id, "started": old_started}
+        # A reused PID has a different process creation time, not lock time.
+        created = weread_desktop.process_started_at(os.getpid())
+        if created is None:
+            import pytest
+            pytest.skip("Process creation time is unavailable on this platform")
+        old_started = created - 100
+        fake_lock = {"pid": os.getpid(), "book_id": book_id,
+                     "started": int(time.time()), "process_started": old_started}
         lock_file.write_text(json.dumps(fake_lock), encoding="utf-8")
         
         # acquire_export_lock should detect stale lock and take it over
@@ -398,7 +403,7 @@ def test_lock_pid_starttime_verification() -> None:
         
         new_data = json.loads(lock.read_text(encoding="utf-8"))
         assert new_data["pid"] == os.getpid()
-        assert new_data["started"] > old_started
+        assert new_data["process_started"] == created
         
         # Test with non-existent PID
         fake_lock2 = {"pid": 999999, "book_id": book_id, "started": int(time.time())}
