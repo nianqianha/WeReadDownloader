@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -39,6 +40,58 @@ class ExportLockIdentityTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "already running"):
                 wd.acquire_export_lock(self.workspace, "book")
         self.assertEqual(json.loads(lock.read_text(encoding="utf-8"))["started"], 1)
+
+    def test_stale_lock_contenders_cannot_both_acquire(self):
+        lock = self.workspace / "export.lock"
+        lock.write_text(json.dumps({"pid": 999999}), encoding="utf-8")
+        nested = []
+        rejected = []
+        attempted = False
+
+        def stale(pid, started):
+            nonlocal attempted
+            if not attempted:
+                attempted = True
+                try:
+                    nested.append(wd.acquire_export_lock(self.workspace, "book"))
+                except RuntimeError as exc:
+                    rejected.append(str(exc))
+            return False
+
+        with patch.object(wd, "process_is_alive", side_effect=stale):
+            self.assertEqual(wd.acquire_export_lock(self.workspace, "book"), lock)
+        self.assertEqual(nested, [], "a contender replaced another caller's fresh lock")
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("already running", rejected[0])
+
+    def test_guard_releases_after_failed_acquire(self):
+        with patch.object(wd.os, "open", side_effect=PermissionError("synthetic lock failure")):
+            with self.assertRaises(PermissionError):
+                wd.acquire_export_lock(self.workspace, "book")
+        self.assertEqual(wd.acquire_export_lock(self.workspace, "book"),
+                         self.workspace / "export.lock")
+
+    @unittest.skipIf(getattr(sys, "frozen", False), "Requires a Python interpreter subprocess")
+    def test_guard_blocks_another_process_and_releases_on_close(self):
+        code = """import sys
+sys.path.insert(0, sys.argv[1])
+import weread_desktop as wd
+from pathlib import Path
+try:
+    wd.acquire_export_lock(Path(sys.argv[2]), 'book')
+except RuntimeError as exc:
+    assert sys.argv[3] == 'blocked' and 'already running' in str(exc), str(exc)
+else:
+    assert sys.argv[3] == 'acquired', 'another process acquired the guarded lock'
+"""
+        def run(expected):
+            result = subprocess.run([sys.executable, "-c", code, str(Path(wd.__file__).parent),
+                                     str(self.workspace), expected],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with wd._export_lock_guard(self.workspace):
+            run("blocked")
+        run("acquired")
 
     @unittest.skipUnless(os.name == "nt", "Windows process identity")
     def test_reused_pid_releases_lock(self):

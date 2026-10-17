@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import ctypes
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -1358,29 +1359,47 @@ def run_chapter_with_retries(uid: str, attempt_once, throttle: "Throttle",
     return False
 
 
-def acquire_export_lock(workspace: Path, book_id: str) -> Path:
-    lock = workspace / "export.lock"
-    for _attempt in range(2):
+@contextmanager
+def _export_lock_guard(workspace: Path):
+    # Keep this file: unlinking it would let callers lock different file objects.
+    with (workspace / ".export-lock-guard").open("a+b") as guard:
+        guard.seek(0)
         try:
-            descriptor = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(guard.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise RuntimeError("An export for this book is already running") from exc
+        yield
+
+
+def acquire_export_lock(workspace: Path, book_id: str) -> Path:
+    with _export_lock_guard(workspace):
+        lock = workspace / "export.lock"
+        for _attempt in range(2):
             try:
-                previous = json.loads(lock.read_text(encoding="utf-8"))
-                pid = int(previous.get("pid", 0))
-                started = float(previous.get("process_started") or 0) or None
-            except (OSError, ValueError, TypeError):
-                pid, started = 0, None
-            if process_is_alive(pid, started):
-                raise RuntimeError("An export for this book is already running")
-            lock.unlink(missing_ok=True)
-            continue
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump({"pid": os.getpid(), "book_id": book_id,
-                       "started": int(time.time()),
-                       "process_started": process_started_at(os.getpid())}, stream)
-        _set_private_acl(lock, False)
-        return lock
-    raise RuntimeError("Cannot acquire desktop export lock")
+                descriptor = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                try:
+                    previous = json.loads(lock.read_text(encoding="utf-8"))
+                    pid = int(previous.get("pid", 0))
+                    started = float(previous.get("process_started") or 0) or None
+                except (OSError, ValueError, TypeError):
+                    pid, started = 0, None
+                if process_is_alive(pid, started):
+                    raise RuntimeError("An export for this book is already running")
+                lock.unlink(missing_ok=True)
+                continue
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump({"pid": os.getpid(), "book_id": book_id,
+                           "started": int(time.time()),
+                           "process_started": process_started_at(os.getpid())}, stream)
+            _set_private_acl(lock, False)
+            return lock
+        raise RuntimeError("Cannot acquire desktop export lock")
 
 
 def probe_book(book_id: str, chapter_uid: str | None, settings: dict[str, Any],
