@@ -1214,6 +1214,8 @@ def _nt_process_signaled(pid: int) -> bool | None:
     kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
     kernel.OpenProcess.restype = ctypes.c_void_p
     kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel.WaitForSingleObject.restype = ctypes.c_uint32
     handle = kernel.OpenProcess(SYNCHRONIZE, 0, pid)
     if not handle:
         # Access denied means the process exists but belongs to someone else;
@@ -1227,7 +1229,7 @@ def _nt_process_signaled(pid: int) -> bool | None:
         kernel.CloseHandle(handle)
 
 
-def process_is_alive(pid: int, started: int | None = None) -> bool:
+def process_is_alive(pid: int, started: float | None = None) -> bool:
     if pid <= 0: return False
     if os.name == "nt":
         alive = _nt_process_signaled(pid)
@@ -1365,7 +1367,7 @@ def acquire_export_lock(workspace: Path, book_id: str) -> Path:
             try:
                 previous = json.loads(lock.read_text(encoding="utf-8"))
                 pid = int(previous.get("pid", 0))
-                started = int(previous.get("started", 0)) or None
+                started = float(previous.get("process_started") or 0) or None
             except (OSError, ValueError, TypeError):
                 pid, started = 0, None
             if process_is_alive(pid, started):
@@ -1374,7 +1376,8 @@ def acquire_export_lock(workspace: Path, book_id: str) -> Path:
             continue
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump({"pid": os.getpid(), "book_id": book_id,
-                       "started": int(time.time())}, stream)
+                       "started": int(time.time()),
+                       "process_started": process_started_at(os.getpid())}, stream)
         _set_private_acl(lock, False)
         return lock
     raise RuntimeError("Cannot acquire desktop export lock")
