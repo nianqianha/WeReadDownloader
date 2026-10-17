@@ -88,19 +88,18 @@ def test_a_click_reaching_the_row_switches_the_page():
         for name in ("我的书架", "统计分析", "设置", "下载工坊"):
             target = _click_target(inst.nav_items[name])
             assert target.winfo_viewable(), "navigation click target is not mapped"
-            binding = target.bind("<Button-1>")
-            received = []
-            target.bind("<Button-1>", lambda event: received.append(event.type), add="+")
+            assert target.bind("<Button-1>") or target.bind("<ButtonRelease-1>"), \
+                "navigation target lost its click binding"
+            # CTk 6 activates on release only while the pointer is inside.
+            target.event_generate("<Enter>", x=40, y=10)
             target.event_generate("<Button-1>", x=40, y=10)
             root.update()
             target.event_generate("<ButtonRelease-1>", x=40, y=10)
             root.update()
             assert inst._current_page == name, (
-                "a click on %s did not switch pages (page=%s, received=%s, binding=%r, "
-                "state=%s, grab=%s, logs=%s)"
-                % (name, inst._current_page, received, binding, inst.nav_items[name].cget("state"),
-                   root.grab_current(), "\n".join(p.read_text(encoding="utf-8")
-                                                  for p in app.LOG_DIR.glob("*.log"))))
+                "a click on %s did not switch pages (page=%s)"
+                % (name, inst._current_page))
+            target.event_generate("<Leave>", x=40, y=10)
     finally:
         root.destroy()
 
