@@ -52,6 +52,7 @@ jobs:
     # 必须用 Windows：被测代码依赖 DPAPI、icacls、单实例互斥体和
     # CREATE_NO_WINDOW，这些在 Linux 运行器上不存在。
     runs-on: windows-latest
+    timeout-minutes: 15
     # 暂不拦合并。见文末「为什么 tests 作业还不拦合并」——拦了也只会变成一道人人无视
     # 的红灯。
     continue-on-error: true
