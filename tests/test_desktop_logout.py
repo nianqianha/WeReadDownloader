@@ -13,7 +13,9 @@ overlay is a refresh reset rather than a full sign-out.
 import importlib.util
 import json
 import tempfile
+from functools import wraps
 from pathlib import Path
+from unittest.mock import patch
 import sys
 
 # The program modules live in weread/ and import each other by bare name.
@@ -48,8 +50,14 @@ ALL_TESTS = []
 
 
 def test(fn):
-    ALL_TESTS.append(fn)
-    return fn
+    # Reapply this file's profile after all test modules have been collected.
+    @wraps(fn)
+    def isolated(*args, **kwargs):
+        with patch.object(app.weread_login, "CREDENTIAL_STATE", _CRED), \
+                patch.object(_weread_core, "PRIVATE", _PROFILE):
+            return fn(*args, **kwargs)
+    ALL_TESTS.append(isolated)
+    return isolated
 
 
 def _make_gui():

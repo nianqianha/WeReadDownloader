@@ -94,17 +94,15 @@ def test_metadata_labels_shrink_to_their_text_instead_of_a_fixed_height():
 
 @test
 def test_the_introduction_shows_a_readable_number_of_lines():
-    """The complaint this fixes: only one or two lines were visible.
-
-    Since the pages scroll (2026-10-15), a 680 px window fits ~5 intro lines and
-    the user scrolls for the rest -- so the bar is 4 readable lines, not 6. What
-    must never come back is the original failure: 1-2 lines, or zero.
-    """
+    """Content-sized introductions must show four actual text lines."""
     root, instance = _make_gui()
     try:
-        height = instance.intro.winfo_height()
-        lines = (height - 20) // 19
-        assert lines >= 4, "only ~%d lines visible (%d px)" % (lines, height)
+        instance._set_intro("\n".join(["简介内容"] * 4))
+        root.update()
+        textbox = instance.intro._textbox
+        fourth = textbox.dlineinfo("4.0")
+        assert fourth is not None, "the fourth introduction line is not visible"
+        assert fourth[1] + fourth[3] <= textbox.winfo_height(), fourth
     finally:
         root.destroy()
 
