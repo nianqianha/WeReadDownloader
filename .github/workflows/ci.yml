@@ -71,7 +71,8 @@ jobs:
         # 锁版本是要单独决定的事（见下）。
 
       - name: 跑测试
-        run: python -m pytest -q
+        run: python -m pytest -q -m "not local_corpus"
+        # 真实导出语料验收在有本机语料的环境单独运行：pytest -m local_corpus。
         # 收集规则来自仓库根目录的 pytest.ini。那里的 python_functions = test_*
         # 不是可有可无的：测试文件用名为 `test` 的装饰器自我登记，pytest 默认
         # 规则 `test*` 会把这个装饰器本身也当用例收集，然后在三十来个文件里各报
