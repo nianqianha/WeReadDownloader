@@ -50,6 +50,7 @@ def test_stall_watcher_records_real_stuck_stack():
     finally:
         root.destroy()
     assert not instance._stall_watcher.is_alive(), "destroyed window retained its watcher"
+    assert not root.tk.call("after", "info"), "destroyed window retained scheduled callbacks"
 
 
 if __name__ == "__main__":

@@ -10,21 +10,7 @@
 `weread_desktop.lua_runtime()` 内部抛出的，而那几个文件各自走自己的路径到达它：
 按错误内容识别是唯一能一处覆盖全部的做法。
 """
-import gc
 import pytest
-
-
-@pytest.fixture(autouse=True)
-def collect_tk_objects_on_test_thread():
-    # Tk finalizers must not run in a worker thread's automatic GC cycle.
-    enabled = gc.isenabled()
-    gc.disable()
-    try:
-        yield
-    finally:
-        gc.collect()
-        if enabled:
-            gc.enable()
 
 # 与 weread_desktop.PLUGIN_MISSING 同源；只匹配这一句，别的 RuntimeError 照常失败。
 PLUGIN_MISSING_MARK = "Lua 插件目录"

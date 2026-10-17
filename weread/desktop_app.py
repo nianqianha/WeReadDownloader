@@ -1904,6 +1904,8 @@ class DesktopApp:
             self._stall_stop.set()
             # Release the watcher's Tk references while the UI thread still owns them.
             self._stall_watcher.join(timeout=1)
+            for callback in self.root.tk.call("after", "info"):
+                self.root.after_cancel(callback)
 
     def _watch_for_stalls(self):
         """Sample the Tk thread while it is stuck, because _poll cannot.
