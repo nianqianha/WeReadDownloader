@@ -83,8 +83,11 @@ def test_a_click_reaching_the_row_switches_the_page():
     """A press/release delivered to the row's canvas -- a real click's path."""
     root, inst = _make_instance()
     try:
+        root.focus_force()
+        root.update()
         for name in ("我的书架", "统计分析", "设置", "下载工坊"):
             target = _click_target(inst.nav_items[name])
+            assert target.winfo_viewable(), "navigation click target is not mapped"
             target.event_generate("<Button-1>", x=40, y=10)
             root.update()
             target.event_generate("<ButtonRelease-1>", x=40, y=10)
