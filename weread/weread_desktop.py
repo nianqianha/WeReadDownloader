@@ -522,6 +522,35 @@ def atomic_text(path: Path, text: str) -> None:
     os.replace(temp, path)
 
 
+# 上传书（用户自己推进微信读书的文件）的目录会把原文夹注拆成独立章节。实测
+# 《后汉书前20章-注角标可点开-demo》19487 个条目里，9722 条 title 就是「注」、
+# 9765 条是 wrfn-89-1 这种脚注编号，真正的正文只有 43 条。这些碎片的内容本来
+# 就嵌在正文里（EPUB 的「注」角标就是从这来的），当成章节下载只会产出一个
+# 上万页、每页几十字的重复文件。
+_FRAGMENT_TITLE_RE = re.compile(r"^wrfn-\d+-\d+$", re.I)
+# 章节被切成多段时，后续段叫「第 1 章（uid 89）_1」「..._2」。实测这些续段
+# 取不到正文（目录标 11-13 字，chapter 接口返回空 body），正文全在主条目里。
+# 把它们当独立章节下载，每段都会失败重试三次然后标 INCOMPLETE，整本书因此
+# 出版失败。只保留主条目，正好是这本书的 20 章。
+_CONTINUATION_TITLE_RE = re.compile(r"_\d+$")
+
+
+def _is_annotation_fragment(chapter: dict[str, Any]) -> bool:
+    """True 表示这一条是夹注/脚注碎片，不是正文章节。"""
+    title = str(chapter.get("title") or "").strip()
+    if not title:
+        return False
+    if title == "注":
+        return True
+    return bool(_FRAGMENT_TITLE_RE.match(title))
+
+
+def _is_continuation_fragment(chapter: dict[str, Any]) -> bool:
+    """True 表示这一条是某章被切开的续段，正文仍在主条目里。"""
+    title = str(chapter.get("title") or "").strip()
+    return bool(title and _CONTINUATION_TITLE_RE.search(title))
+
+
 class WeRead:
     def __init__(self, credentials: dict[str, Any], lua: LuaRuntime):
         self.auth = credentials
@@ -867,20 +896,41 @@ class WeRead:
                     if int(chapter.get("wordCount", 0) or 0) > 0
                     and chapter.get("title") != "封面"]
         if not chapters: raise RuntimeError("No readable chapters in WeRead catalog")
-        # 过滤后仍有上万章一定是异常目录，不分商店书还是上传书：正常长篇几千章封顶。
-        # 实测过一次《后汉书前20章-注角标可点开-demo》（CB_ 前缀的上传书）在网页会话
-        # 过期时返回 19487 条 uid 为纯数字流水号的"章节"，真正有正文的只有 4 个（uid 1/44/
-        # 45/46，后三个各 116-128 字节）。按那个目录跑，断点记成 total=19487、每章下一个
-        # 空 body，最后产出上万页空壳 EPUB——既耗时间又看不出问题。
-        # 注意：那 19487 条是过期会话（errCode -2012）吐出的脏数据，不是上传书的正常
-        # 结构，所以这里只按"规模异常"拒绝，不按 bookId 前缀永久拉黑上传书——会话恢复
-        # 后上传书本来是可以下的。
+        # 上传书的目录会把「注」拆成独立章节。实测《后汉书前20章-注角标可点开-demo》
+        # （CB_9WJ8WN8Tj9Vk77675X4XM1FS，登录状态正常）返回 19487 条，其中：
+        #   9722 条 title 就是「注」（每条 13-30 字，是原文夹注的碎片）
+        #   9765 条 title 形如 wrfn-89-1（脚注编号，每条 17-134 字）
+        # 真正的正文只有 uid 1、2 两条（「第 1 章（uid 89）」616 字 + 后缀 _1 的 3388 字）。
+        # 照这个目录下载，会把一万多个注释碎片当成章节，产出一个 19487 页、每页几十字的
+        # 怪物 EPUB——内容其实都在正文里，碎片是重复的。
+        # 所以先剔掉这两类碎片，只留正文。判据取 title 的形态而不是章节数：正文标题是
+        # 人写的章节名，碎片是「注」或 wrfn-<数字>-<数字>。
+        fragments = [chapter for chapter in chapters
+                     if _is_annotation_fragment(chapter)]
+        if fragments:
+            print(f"[CATALOG] dropping {len(fragments)} annotation fragment(s) "
+                  f"({len(chapters)} -> {len(chapters) - len(fragments)})", flush=True)
+            chapters = [chapter for chapter in chapters
+                        if not _is_annotation_fragment(chapter)]
+        continuations = [chapter for chapter in chapters
+                         if _is_continuation_fragment(chapter)]
+        if continuations:
+            print(f"[CATALOG] dropping {len(continuations)} continuation fragment(s) "
+                  f"({len(chapters)} -> {len(chapters) - len(continuations)}); "
+                  "their text is already inside the main entry", flush=True)
+            chapters = [chapter for chapter in chapters
+                        if not _is_continuation_fragment(chapter)]
+        if not chapters:
+            raise RuntimeError(
+                f"这本书的目录里没有正文：{raw_count} 个条目全部是「注」或脚注编号碎片。"
+                "微信读书把上传书里的注释拆成了独立章节，正文没有单独登记。"
+                "请在微信读书里打开这本书确认是否可读，或换一个版本。")
+        # 剔掉碎片后仍有上万章才说明目录真的坏了：正常长篇几千章封顶。
         if len(chapters) > 5000:
             raise RuntimeError(
                 f"WeRead 目录异常：过滤后仍有 {len(chapters)} 个章节（原始 {raw_count} 个）。"
-                "正常书籍远低于此，这通常是网页会话过期或服务端切分异常导致的脏数据；"
-                "已停止，未生成任何文件。请先重新扫码登录再试；"
-                "确认会话正常后仍出现此数，请把章节数反馈给维护者。")
+                "正常书籍远低于此，这通常是服务端切分异常导致的脏数据；"
+                "已停止，未生成任何文件。请把章节数反馈给维护者。")
         normalized = []
         for index, chapter in enumerate(chapters, 1):
             row = dict(chapter)
