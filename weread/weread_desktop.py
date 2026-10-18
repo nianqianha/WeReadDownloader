@@ -551,6 +551,22 @@ def _is_continuation_fragment(chapter: dict[str, Any]) -> bool:
     return bool(title and _CONTINUATION_TITLE_RE.search(title))
 
 
+# fetch_book 丢掉碎片时把数量记在这里，export_book 写进 manifest 的 omissions。
+# 用模块级变量而不是给 fetch_book 加返回值：它是被 probe_book / book_info /
+# export_book 共用的公开入口，为一次报告改签名会牵动所有调用方；而这里要传的
+# 只是一个"这次少导出了多少条注"的计数，进程内一次导出只跑一次。
+_DROPPED_ANNOTATION_FRAGMENTS = 0
+
+
+def _record_dropped_annotations(count: int) -> None:
+    global _DROPPED_ANNOTATION_FRAGMENTS
+    _DROPPED_ANNOTATION_FRAGMENTS = count
+
+
+def _dropped_annotations() -> int:
+    return _DROPPED_ANNOTATION_FRAGMENTS
+
+
 class WeRead:
     def __init__(self, credentials: dict[str, Any], lua: LuaRuntime):
         self.auth = credentials
@@ -910,6 +926,7 @@ class WeRead:
         if fragments:
             print(f"[CATALOG] dropping {len(fragments)} annotation fragment(s) "
                   f"({len(chapters)} -> {len(chapters) - len(fragments)})", flush=True)
+            _record_dropped_annotations(len(fragments))
             chapters = [chapter for chapter in chapters
                         if not _is_annotation_fragment(chapter)]
         continuations = [chapter for chapter in chapters
@@ -1673,6 +1690,9 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
                 want_thoughts: bool = True,
                 want_underlines: bool = True) -> Path:
     secure_output_directory(output)
+    # 每次导出从零开始计数：同一进程内连跑两本书时，上一本丢弃的注数不能带到
+    # 这一本的 manifest 里。
+    _record_dropped_annotations(0)
     lua = lua_runtime()
     api = WeRead(settings, lua)
     book, chapters = api.fetch_book(book_id)
@@ -2060,6 +2080,16 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
                                   "underlines_refused_by_reason. All are null when "
                                   "the audit did not run.",
     }
+    # 上传书的目录把「注」拆成独立章节，那些碎片在 fetch_book 里被剔掉了。剔掉是
+    # 对的（否则会产出上万页重复文件），但必须让读者知道注没进来——这本书的正文
+    # 完整、注缺失，和"书是完整的"是两回事。
+    dropped_annotations = _dropped_annotations()
+    if dropped_annotations:
+        omission_report["annotation_fragments_dropped"] = dropped_annotations
+        omission_report["reason_annotations"] = (
+            "这本书的目录把原文夹注拆成了独立章节（%d 条），导出时已剔除：它们不是"
+            "正文，逐条当章节下载会产出一个上万页、每页几十字的重复文件。"
+            "结果是正文完整、注角标与注文不在成品里。" % dropped_annotations)
     css = "\n".join(styles) + "\nbody{line-height:1.7;margin:5%}img{max-width:100%}.wr-underline{border-bottom:2px dashed #666;padding-bottom:2px}.wr-thought-count{font-size:.8em;color:#000;border:1px solid #777;padding:0 2px;margin-left:3px;vertical-align:super;font-weight:bold}.wr-thought-link{text-decoration:none;color:inherit}"
     cover_path = None
     if book.get("cover"):
