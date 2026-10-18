@@ -16,7 +16,9 @@ import json
 import os
 import sys
 import tempfile
+from functools import wraps
 from pathlib import Path
+from unittest.mock import patch
 
 
 # The program modules live in weread/ and import each other by bare name.
@@ -41,8 +43,22 @@ ALL_TESTS = []
 
 
 def test(fn):
-    ALL_TESTS.append(fn)
-    return fn
+    # Collection imports other files that redirect this shared module too.
+    @wraps(fn)
+    def isolated(*args, **kwargs):
+        with patch.object(login, "CREDENTIAL_STATE", _CRED):
+            return fn(*args, **kwargs)
+    ALL_TESTS.append(isolated)
+    return isolated
+
+
+def test_credential_case_restores_other_modules_path():
+    foreign = Path(_T.name) / "other-module-session.json"
+    foreign.write_text("synthetic sentinel", encoding="utf-8")
+    with patch.object(login, "CREDENTIAL_STATE", foreign):
+        test_a_plaintext_file_from_an_older_build_still_loads()
+        assert login.CREDENTIAL_STATE == foreign
+        assert foreign.read_text(encoding="utf-8") == "synthetic sentinel"
 
 
 @test
