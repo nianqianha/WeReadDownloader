@@ -222,6 +222,8 @@ def _seed_completed_chapter(workspace, uid, index):
 
 
 def test_export_resumes_from_parent_output_and_refuses_epub_when_chapter_stays_empty():
+    # Let conftest report a missing plugin before the helper captures RuntimeError.
+    wd.lua_runtime()
     with tempfile.TemporaryDirectory() as temp:
         output_root = Path(temp) / "exports"
         workspace = output_root / "old-run" / "Fake Book-12345.work"
