@@ -23,66 +23,35 @@ app.OUTPUT = Path(_TMP.name) / "exports"
 
 import customtkinter as ctk
 
-root = ctk.CTk()
-root.geometry("1120x680")
-instance = app.DesktopApp(root)
-root.update()
 
-results = []
+def test_stall_watcher_records_real_stuck_stack():
+    root = ctk.CTk()
+    instance = app.DesktopApp(root)
 
+    def log_text():
+        return "\n".join(p.read_text(encoding="utf-8", errors="replace")
+                         for p in app.LOG_DIR.glob("*.log"))
 
-def log_text():
-    out = []
-    for p in app.LOG_DIR.glob("*.log"):
-        out.append(p.read_text(encoding="utf-8", errors="replace"))
-    return "\n".join(out)
+    def _block():
+        time.sleep(3)
+        root.quit()
 
-
-# 1. Healthy: the watcher must stay quiet.
-time.sleep(3.0)
-quiet = "[STALL_STACK]" not in log_text()
-results.append(("stays quiet while healthy", quiet, ""))
-
-# 2. Blocked: the Tk thread is held in a sleep; the watcher must name it.
-def _block():
-    time.sleep(6.0)
-
-
-instance.root.after(300, lambda: (_block(), root.quit()))
-t0 = time.perf_counter()
-# Pump events in small steps so the blocking callback actually runs.
-for _ in range(80):
     try:
-        root.update()
-    except Exception:
-        pass
-    time.sleep(0.1)
-    if time.perf_counter() - t0 > 9:
-        break
+        root.after(2500, root.quit)
+        root.mainloop()
+        assert "[STALL_STACK]" not in log_text(), "healthy event pumping reported a stall"
+        root.after(0, _block)
+        root.mainloop()
+        text = log_text()
+        assert "[STALL_STACK]" in text, "the blocked callback was not reported"
+        assert "_block" in text.split("[STALL_STACK]", 1)[1], text
+        main_id = __import__("threading").main_thread().ident
+        assert "<no frame" not in instance._stack_of(main_id)
+    finally:
+        root.destroy()
+    assert not instance._stall_watcher.is_alive(), "destroyed window retained its watcher"
+    assert not root.tk.call("after", "info"), "destroyed window retained scheduled callbacks"
 
-text = log_text()
-fired = "[STALL_STACK]" in text
-results.append(("fires when the Tk thread is stuck", fired, ""))
 
-# The stack is on the line AFTER the header, so search the whole entry.
-tail = text.split("[STALL_STACK]", 1)[1] if fired else ""
-names_blocked = ("sleep" in tail) or ("_block" in tail)
-results.append(("names the stuck frame", names_blocked, tail.strip()[:170]))
-
-# 3. _stack_of must work for the live main thread.
-main_id = threading_id = __import__("threading").main_thread().ident
-stack = instance._stack_of(main_id)
-results.append(("_stack_of returns a usable stack", "<no frame" not in stack, stack[:110]))
-
-try:
-    root.destroy()
-except Exception:
-    pass
-
-print("%-42s %s" % ("CHECK", "RESULT"))
-ok = True
-for name, passed, detail in results:
-    ok = ok and passed
-    print("%-42s %-5s %s" % (name, "PASS" if passed else "FAIL", detail))
-print()
-print("ALL PASS" if ok else "SOME FAILED")
+if __name__ == "__main__":
+    test_stall_watcher_records_real_stuck_stack()

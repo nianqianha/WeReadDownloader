@@ -333,8 +333,10 @@ class DesktopApp:
         # and charging that to the first tick logged a 1.3 s [STALL] on every
         # single launch. The loop starts here.
         self._last_tick_end = time.perf_counter()
+        self._stall_stop = threading.Event()
         self._stall_watcher = threading.Thread(
             target=self._watch_for_stalls, name="stall-watch", daemon=True)
+        self.root.bind("<Destroy>", self._stop_stall_watch, add="+")
         self._stall_watcher.start()
         self.root.after(100, self._poll)
 
@@ -1897,6 +1899,14 @@ class DesktopApp:
         except Exception:
             self._handle_callback_exception(*sys.exc_info())
 
+    def _stop_stall_watch(self, event):
+        if event.widget is self.root:
+            self._stall_stop.set()
+            # Release the watcher's Tk references while the UI thread still owns them.
+            self._stall_watcher.join(timeout=1)
+            for callback in self.root.tk.call("after", "info"):
+                self.root.after_cancel(callback)
+
     def _watch_for_stalls(self):
         """Sample the Tk thread while it is stuck, because _poll cannot.
 
@@ -1916,7 +1926,8 @@ class DesktopApp:
             # back far later than it was asked for means the OS suspended the
             # whole process, not that the app is stuck.
             asked = time.perf_counter()
-            time.sleep(0.2)
+            if self._stall_stop.wait(0.2):
+                return
             overran_ms = (time.perf_counter() - asked - 0.2) * 1000.0
             if overran_ms > RESUME_MIN_MS:
                 # Only mark it; the next tick reports it once, with the gap.
