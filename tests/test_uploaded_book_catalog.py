@@ -1,9 +1,12 @@
-"""上传书（CB_ 前缀）的目录不是按内容切的，不能拿它下载。
+"""过滤后仍有上万章一定是异常目录，不分商店书还是上传书。
 
-实测《后汉书前20章-注角标可点开-demo》（CB_9WJ8WN8Tj9Vk77675X4XM1FS）过滤后仍有
-19487 个 uid 为纯数字流水号的"章节"，真正有正文的只有前 4 个（uid 1/44/45/46，
-后三个各 116-128 字节）。按这个目录跑，断点记成 total=19487、completed=4，最后产出
-一个上万页的空壳 EPUB。所以目录层直接拒绝，并把已写下的坏断点作废。
+实测过一次《后汉书前20章-注角标可点开-demo》（CB_ 前缀的上传书）在网页会话过期时
+返回 19487 条 uid 为纯数字流水号的"章节"，真正有正文的只有 4 个（uid 1/44/45/46，
+后三个各 116-128 字节）。按那个目录跑，断点记成 total=19487、每章下一个空 body，
+最后产出上万页空壳 EPUB——既耗时间又看不出问题。
+
+那 19487 条是 errCode -2012（登录超时）会话吐出的脏数据，不是上传书的正常结构，
+所以只按"规模异常"拒绝，不按 bookId 前缀永久拉黑上传书。
 """
 import json
 import sys
@@ -48,24 +51,25 @@ def _fake_api(book_id, chapters, book_extra=None):
     return api
 
 
-class UploadedBookCatalogTests(unittest.TestCase):
+class HollowCatalogTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.book_id = "CB_9WJ8WN8Tj9Vk77675X4XM1FS"
 
-    def test_uploaded_book_is_refused_with_an_explanation(self):
-        chapters = [{"chapterUid": 1, "wordCount": 2000, "title": "一"}]
-        chapters += [{"chapterUid": i, "wordCount": 0, "title": f"空 {i}"}
-                     for i in range(44, 19488)]
+    def test_uploaded_book_is_not_blacklisted_by_prefix(self):
+        """上传书不能被 CB_ 前缀永久拉黑：会话恢复后它本来可以下。
+
+        守的是一个具体的错误决定——曾经按 bookId 前缀拒绝一切上传书，结论建立在
+        "上传书目录天然有上万节点"上，而实测那 19487 条是过期会话（errCode -2012）
+        吐出的脏数据。
+        """
+        chapters = [{"chapterUid": i, "wordCount": 3000, "title": f"第{i}章"}
+                    for i in range(1, 21)]
         api = _fake_api(self.book_id, chapters)
-        with self.assertRaises(RuntimeError) as ctx:
-            wd.WeRead.fetch_book(api, self.book_id)
-        message = str(ctx.exception)
-        self.assertIn("上传", message)
-        self.assertIn("CB_", message)
-        # 必须说清"直接用本地 EPUB"，而不是甩一个目录错误
-        self.assertIn("EPUB", message)
+        book, normalized = wd.WeRead.fetch_book(api, self.book_id)
+        self.assertEqual(len(normalized), 20)
+        self.assertEqual(book["bookId"], self.book_id)
 
     def test_a_normal_book_is_not_affected(self):
         chapters = [{"chapterUid": i, "wordCount": 3000, "title": f"第{i}章"}
@@ -75,14 +79,17 @@ class UploadedBookCatalogTests(unittest.TestCase):
         self.assertEqual(len(normalized), 20)
         self.assertEqual(book["bookId"], "3300228183")
 
-    def test_an_absurd_store_catalog_is_refused_too(self):
-        """商店书也可能命中异常切分：上万章一定是坏了，不出空壳 EPUB。"""
+    def test_an_absurd_catalog_is_refused(self):
+        """过滤后上万章一律拒绝，不管是不是上传书。"""
         chapters = [{"chapterUid": i, "wordCount": 10, "title": f"第{i}章"}
                     for i in range(1, 9001)]
         api = _fake_api("999999999", chapters)
         with self.assertRaises(RuntimeError) as ctx:
             wd.WeRead.fetch_book(api, "999999999")
-        self.assertIn("目录异常", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("目录异常", message)
+        # 脏数据多半来自过期会话，必须提示重新登录
+        self.assertIn("扫码登录", message)
 
     def test_a_long_but_plausible_book_still_passes(self):
         """上限不能误伤真长篇：几千章的正常书要放行。"""
