@@ -1,12 +1,9 @@
-"""过滤后仍有上万章一定是异常目录，不分商店书还是上传书。
+"""上传书的目录会把「注」拆成独立章节，必须剔掉碎片只留正文。
 
-实测过一次《后汉书前20章-注角标可点开-demo》（CB_ 前缀的上传书）在网页会话过期时
-返回 19487 条 uid 为纯数字流水号的"章节"，真正有正文的只有 4 个（uid 1/44/45/46，
-后三个各 116-128 字节）。按那个目录跑，断点记成 total=19487、每章下一个空 body，
-最后产出上万页空壳 EPUB——既耗时间又看不出问题。
-
-那 19487 条是 errCode -2012（登录超时）会话吐出的脏数据，不是上传书的正常结构，
-所以只按"规模异常"拒绝，不按 bookId 前缀永久拉黑上传书。
+实测《后汉书前20章-注角标可点开-demo》（CB_9WJ8WN8Tj9Vk77675X4XM1FS，登录正常）
+返回 19487 条：9722 条 title 就是「注」、9765 条是 wrfn-89-1 这种脚注编号，真正的
+正文只有 43 条（20 章，每章被切成 2-3 段续写）。照原样下载会产出一个 19487 页、
+每页几十字的重复怪物；剔掉碎片后正好是这本书的 20 章。
 """
 import json
 import sys
@@ -88,8 +85,7 @@ class HollowCatalogTests(unittest.TestCase):
             wd.WeRead.fetch_book(api, "999999999")
         message = str(ctx.exception)
         self.assertIn("目录异常", message)
-        # 脏数据多半来自过期会话，必须提示重新登录
-        self.assertIn("扫码登录", message)
+        self.assertIn("9000", message)
 
     def test_a_long_but_plausible_book_still_passes(self):
         """上限不能误伤真长篇：几千章的正常书要放行。"""
@@ -98,6 +94,53 @@ class HollowCatalogTests(unittest.TestCase):
         api = _fake_api("123456789", chapters)
         _book, normalized = wd.WeRead.fetch_book(api, "123456789")
         self.assertEqual(len(normalized), 3000)
+
+
+class AnnotationFragmentTests(unittest.TestCase):
+    """碎片判据：title 是「注」或 wrfn-<数字>-<数字>。"""
+
+    def test_note_title_is_a_fragment(self):
+        self.assertTrue(wd._is_annotation_fragment({"title": "注"}))
+
+    def test_footnote_number_is_a_fragment(self):
+        self.assertTrue(wd._is_annotation_fragment({"title": "wrfn-89-1"}))
+        self.assertTrue(wd._is_annotation_fragment({"title": "wrfn-68-388"}))
+
+    def test_a_real_chapter_is_not_a_fragment(self):
+        for title in ("第 1 章（uid 89）", "第 1 章（uid 89）_1", "版权信息", "简介", "战国策刘序"):
+            self.assertFalse(wd._is_annotation_fragment({"title": title}), title)
+
+    def test_empty_title_is_not_a_fragment(self):
+        self.assertFalse(wd._is_annotation_fragment({"title": ""}))
+        self.assertFalse(wd._is_annotation_fragment({}))
+
+    def test_a_continuation_suffix_is_a_fragment(self):
+        """章节被切开的续段（_1/_2）取不到正文，必须剔掉。"""
+        self.assertTrue(wd._is_continuation_fragment({"title": "第 1 章（uid 89）_1"}))
+        self.assertTrue(wd._is_continuation_fragment({"title": "第 20 章（uid 68）_2"}))
+        self.assertFalse(wd._is_continuation_fragment({"title": "第 1 章（uid 89）"}))
+        self.assertFalse(wd._is_continuation_fragment({"title": "wrfn-89-1"}))
+        self.assertFalse(wd._is_continuation_fragment({"title": ""}))
+
+    def test_the_real_book_filters_down_to_its_twenty_chapters(self):
+        """用实测的形状重建目录，验证剔除碎片和续段后正好 20 章。"""
+        chapters = []
+        uid = 1
+        for n in range(1, 21):
+            chapters.append({"chapterUid": uid, "title": f"第 {n} 章（uid {80+n}）",
+                             "wordCount": 400}); uid += 1
+            chapters.append({"chapterUid": uid, "title": f"第 {n} 章（uid {80+n}）_1",
+                             "wordCount": 12}); uid += 1
+            if n <= 3:
+                chapters.append({"chapterUid": uid, "title": f"第 {n} 章（uid {80+n}）_2",
+                                 "wordCount": 11}); uid += 1
+        chapters.append({"chapterUid": uid, "title": "注", "wordCount": 18}); uid += 1
+        chapters.append({"chapterUid": uid, "title": "wrfn-89-1", "wordCount": 45})
+        kept = [c for c in chapters
+                if not wd._is_annotation_fragment(c)
+                and not wd._is_continuation_fragment(c)]
+        self.assertEqual(len(kept), 20)
+        self.assertTrue(all("_" not in c["title"] for c in kept))
 
 
 class StaleHollowCheckpointTests(unittest.TestCase):
