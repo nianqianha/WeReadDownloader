@@ -1,7 +1,7 @@
 """Run the real callbacks without a display, account or worker process."""
 import ast
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 import unittest
 
 
@@ -11,7 +11,7 @@ class DesktopAnnotationModesTests(unittest.TestCase):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         app = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "DesktopApp")
         methods = [n for n in app.body if isinstance(n, ast.FunctionDef)
-                   and n.name in ("probe", "export")]
+                   and n.name in ("probe", "export", "_start_one", "_queue_args")]
         namespace = {}
         exec(compile(ast.fix_missing_locations(ast.Module(body=methods, type_ignores=[])),
                      str(path), "exec"), namespace)
@@ -24,6 +24,8 @@ class DesktopAnnotationModesTests(unittest.TestCase):
             _start_worker=lambda *args: self.starts.append(args) or True,
             _ask=lambda *args: self.confirmations.append(args) or True,
         )
+        self.app._start_one = MethodType(namespace["_start_one"], self.app)
+        self.app._queue_args = MethodType(namespace["_queue_args"], self.app)
         self.methods = namespace
 
     def test_each_displayed_mode_reaches_both_callbacks_with_correct_flags(self):
