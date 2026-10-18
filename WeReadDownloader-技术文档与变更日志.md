@@ -196,6 +196,34 @@ WeReadWorker.exe (CLI 引擎)
 - **验证**：活进程/死 pid/起始时间不匹配三种情况逐一验证通过；`tests/test_disk_edge_cases.py` 新增 `TestProcessIsAlive`，其中一条从源码层面断言「Windows 探针函数体里不再出现 `os.kill`」。
 - **同批**：`tests/test_desktop_bundle.py` 缺外部插件目录时原先在收集阶段直接 FileNotFoundError，改成 `allow_module_level` 跳过。
 - **后续**：该修复引入的「取锁时间被当成进程创建时间」语义混淆由 PR #23 再修一次，见 2026-10-18 (0)。
+### 2026-10-18 (1) 上传书显示 19487 章：目录把「注」拆成了独立章节（**已修复**）
+
+**Fixed**（**高**——上传书完全无法导出，且产出的断点会让人以为在下 19487 章）
+
+- **现象**：用户上传到微信读书的个人文件《后汉书前20章-注角标可点开-demo》（`CB_9WJ8WN8Tj9Vk77675X4XM1FS`）在 GUI 里显示「正在下载第 4/19487 个目录章节」。
+- **根因（登录后实测）**：上传书的目录把原文夹注拆成了独立章节。19487 条的实际构成：
+  - 9722 条 `title=注`（每条 13-30 字，一条夹注一个「章节」）
+  - 9765 条 `title=wrfn-89-1` 这种脚注编号（每条 17-134 字）
+  - 20 条真正的正文（`第 N 章（uid X）`）
+  - 23 条章节续段（`第 N 章（uid X）_1` / `_2`）——**目录标 11-13 字但接口返回空 body**
+  这些注的正文本来就嵌在章节正文里（EPUB 的「注」角标就是从这来的），当成章节下载只会产出一个 19487 页、每页几十字的重复文件；续段则每一条都会重试三次后标 INCOMPLETE，最终让整本书 fail-closed 拒绝出版。
+- **排查中走过的两次弯路**（记录下来避免重犯）：
+  1. 先判断成「上传书的目录天然被切成上万节点」，据此按 `CB_` 前缀拒绝一切上传书——结论错，已由 PR #36 撤销。
+  2. 再判断成「过期会话的脏数据」——当时商店书也确实报 `errCode -2012`，但重新扫码登录后商店书恢复正常（23 / 155 章），上传书**仍然**是 19487，这才看清真实结构。
+- **修复**：`fetch_book()` 在做其他判断之前先剔两类碎片：
+  - `_is_annotation_fragment()`：title 为 `注` 或匹配 `wrfn-<数字>-<数字>`
+  - `_is_continuation_fragment()`：title 以 `_<数字>` 结尾
+  5000 章上限保留，作为「目录以其他方式坏掉」的最后兜底。
+- **端到端验证（真书，非模拟）**：
+  ```
+  [CATALOG] dropping 19444 annotation fragment(s) (19487 -> 43)
+  [CATALOG] dropping 23 continuation fragment(s) (43 -> 20)
+  [20/20] Fetching chapter UID 42
+  OMISSIONS {"text_complete":true, ...}
+  EPUB .../后汉书前20章-注角标可点开-demo - full.epub
+  ```
+  产物 20 章 + 封面，spine 21 项，0.16 MB。
+- **测试**：`tests/test_uploaded_book_catalog.py` 共 12 个用例，覆盖注判据、脚注判据、续段判据、真实章节不误判、空标题不误判、用实测形状重建目录验证最终剩 20 章、坏断点作废、正常断点保留。
 ### 2026-10-18 (0) 协作者 7 个 PR 全量合入：CI 首次全绿 + 排队下载/自更新上线（**未发版**）
 
 **Added / Fixed**（**高**——CI 从「永远跑不完」变成 425 passed / 0 failed）
@@ -367,6 +395,7 @@ WeReadWorker.exe (CLI 引擎)
 | W8 | 外部 | 古文「注」角标不支持（README 已知限制；后汉书类书籍只有正文） | 上游设计如此 |
 | W9 | 外部 | 旧 KOReader 备份里的 wr_skey 已过期（9-10 快照），只能用于恢复 api_key | 属会话时效，预期行为 |
 | W10 | 低（测试/CI，**已修**） | Windows 下 `process_is_alive` 的 `os.kill(pid, 0)` 被当成 CTRL_C_EVENT 发给进程组，CI 测试跑到中途 `KeyboardInterrupt`（两次实测） | ✅ 已修（§四 2026-10-16 (3)）；其遗留的「取锁时间当进程创建时间」由 PR #23 再修一次 |
+| W11 | 高（上传书，**已修**） | 上传书的目录把「注」和脚注编号拆成独立章节，19487 条里只有 20 章是正文；续段条目接口返回空 body | ✅ 已修：碎片过滤（§四 2026-10-18 (1)） |
 
 ---
 
@@ -480,6 +509,7 @@ Get-ChildItem "$env:LOCALAPPDATA\WeReadDesktop\exports" -Recurse -Filter export.
 | 10-16 | `release-fresh/WeReadDesktop/WeReadDesktop.exe` | `C21EC6A7` | 1.0.4 主程序，3,522,864 B |
 | 10-16 | `release-fresh/WeReadWeb/WeReadWeb.exe` | `8D0C5079` | 1.0.4 网页版（**1.0.4 起不再进安装包**，仍构建供单独分发），1,339,129 B |
 | 10-16 | `installer/WeReadDesktop.iss` | `175A4C4C` | 版本号 1.0.3 → 1.0.4，11,650 B |
+| 10-18 | `weread/weread_desktop.py` | `5BEA6408` | 上传书碎片过滤（注/脚注/续段），121,033 B |
 | 10-18 | `weread/desktop_app.py` | `25218BE6` | #21 排队下载 + 自更新，#33 stall-watch 清理，#31 焦点，178,511 B |
 | 10-18 | `weread/updater.py` | `DA6A1353` | 新增：应用内自更新（GitHub Releases 薄封装），7,242 B |
 | 10-18 | `weread/version.py` | `2CFC3FCA` | 新增：版本号单一事实源 1.0.4，513 B |
