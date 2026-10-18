@@ -38,6 +38,7 @@ import importlib.util
 import re
 import sys
 from pathlib import Path
+import pytest
 
 
 # The program modules live in weread/ and import each other by bare name.
@@ -728,6 +729,7 @@ def _reconstruct(text):
 
 
 @test
+@pytest.mark.local_corpus
 def test_real_corpus_placement_still_verifies():
     """The only measurement that can say whether the strict rule is a net win.
 
