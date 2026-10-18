@@ -143,6 +143,31 @@ class AnnotationFragmentTests(unittest.TestCase):
         self.assertTrue(all("_" not in c["title"] for c in kept))
 
 
+class DroppedAnnotationReportingTests(unittest.TestCase):
+    """剔除的注数必须写进 manifest，读者才知道成品少了什么。"""
+
+    def test_counter_round_trips(self):
+        wd._record_dropped_annotations(0)
+        self.assertEqual(wd._dropped_annotations(), 0)
+        wd._record_dropped_annotations(19444)
+        self.assertEqual(wd._dropped_annotations(), 19444)
+        wd._record_dropped_annotations(0)
+
+    def test_manifest_states_the_loss(self):
+        """用真实导出产物验证 omissions 里确实写了这条。"""
+        import os
+        exports = Path(os.environ.get("LOCALAPPDATA", "")) / "WeReadDesktop" / "exports"
+        candidates = sorted(exports.glob("*CB_*/manifest.json"))
+        if not candidates:
+            self.skipTest("本机没有上传书的导出产物")
+        manifest = json.loads(candidates[-1].read_text(encoding="utf-8"))
+        omissions = manifest.get("omissions") or {}
+        self.assertGreater(omissions.get("annotation_fragments_dropped") or 0, 0)
+        self.assertIn("注", omissions.get("reason_annotations") or "")
+        # 正文本身是完整的，不能因为丢了注就说 text_complete=false
+        self.assertTrue(omissions.get("text_complete"))
+
+
 class StaleHollowCheckpointTests(unittest.TestCase):
     """已经写下的坏断点（total=19487）必须被作废，而不是反复续传。"""
 
