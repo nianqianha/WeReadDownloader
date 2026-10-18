@@ -62,8 +62,25 @@ def test_a_click_on_the_box_takes_focus():
         root.update()
         focused = root.focus_get()
         assert focused is not None, "a click on the box left nothing focused"
-        assert str(focused).endswith("entry"), (
+        assert focused == box._entry, (
             "focus stayed on %s instead of the combobox entry" % focused)
+    finally:
+        root.destroy()
+
+
+@test
+def test_box_focus_survives_later_canvas_class_binding():
+    root, instance = _make_gui()
+    try:
+        box = instance.jobs_box
+        canvas = box._canvas
+        tag = "SyntheticCanvasFocus"
+        canvas.bind_class(tag, "<Button-1>", lambda event: canvas.focus_set())
+        canvas.bindtags((*canvas.bindtags(), tag))
+        canvas.event_generate("<Button-1>", x=4, y=canvas.winfo_height() // 2,
+                              when="now")
+        root.update()
+        assert root.focus_get() == box._entry
     finally:
         root.destroy()
 
