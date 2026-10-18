@@ -27,12 +27,13 @@
 |---|---|---|
 | 安装版本 | 1.0.4（安装包 SHA8 `DA420F0E`，53,021,646 B，在桌面） | **待用户实测**；含 §四 2026-10-16 (2) 的 9 个 PR + (3) 的 W10 修复；**无组件选择界面、不含网页版**（按用户要求） |
 | 凭证状态 | ✅ 可用（api_key + 扫码会话） | §6.3 凭证位置；wr_skey 会过期，重新扫码即可 |
-| 上游 master | ✅ 9 个 PR 已合入（协作者 8 个 + 测试/CI 1 个），issue #1–#8 已关闭 | §四 2026-10-16 (2)；#13 按 squash 后重放，master 末笔 `47f26dd`，本机工作副本已同步 |
+| 上游 master | ✅ 16 个 PR 已合入（协作者 15 个 + 测试/CI 1 个），issue #1–#8 + #22/#24/#25/#28/#30/#32 已关闭 | §四 2026-10-16 (2) 与 2026-10-18 (0)；**CI tests 作业已全绿**
 | 运行入口（推荐） | ✅ `WeReadWorkerPatched\WeReadWorker.exe`（工作区副本，含死链图片缓存补丁） | §四 2026-10-15 (2)；仓库 master 已修 GUI 下载链，但 W1 提速补丁仍未入仓 |
-| GUI 可用性 | ✅ 下载链已修（master）：标注模式、探针参数、凭证就绪、书架失败态 | W3/W4 由 PR #10/#11 修复；1.0.3 安装版仍带旧代码，打包 1.0.4 后才对安装版生效 |
+| GUI 可用性 | ✅ 下载链已修（master）：标注模式、探针参数、凭证就绪、书架失败态、**排队下载**（勾选多本自动续跑） | 1.0.4 安装版不含排队下载，需重新打包分发 |
 | 本地补丁 | ✅ `_internal\weread_desktop.py` `9BEC87F6`（原版 `C4275775`） | 副本位于 `C:\Users\asus\dsh-workspace\WeReadWorkerPatched\`；搬回仓库仍待定（问题 W1） |
 | 下载进度 | 《战国策校注》✅ 23/23 已打包；《后汉书》136/155、《汉书》147/171 已暂停 | 断点在 `%LOCALAPPDATA%\WeReadDesktop\exports\`，续传不重复下载 |
 | 提速补丁效果 | 约 10 倍（1.5 分/章 → 约 5~6 章/分，双书并行 jobs=2） | §四 2026-10-15 (2) 实测数据 |
+| 自更新 | ✅ 应用内「检查更新」可用（查 GitHub Releases，拉起官方 Setup.exe 覆盖） | §四 2026-10-18 (0)；版本号单一事实源 `weread/version.py` |
 
 ### 0.2 五条铁律（违反就会踩已知坑）
 
@@ -185,6 +186,30 @@ WeReadWorker.exe (CLI 引擎)
 
 ## 四、变更日志（Keep a Changelog 格式）
 
+### 2026-10-16 (3) W10：`process_is_alive` 在 Windows 上给自己发 Ctrl+C（**已修复**）
+
+**Fixed**（**中**——影响导出锁的存活判断，不只是测试问题）
+
+- **问题现象**：CI 两次都在跑到约一半时 `KeyboardInterrupt` 中止，各只跑完 188/401 个用例；本机跑全套不出现。
+- **根因**：`weread_desktop.py` 的 `process_is_alive()` 用 `os.kill(pid, 0)` 判断进程是否存活。在 Windows 上 `signal.CTRL_C_EVENT` 的整数值就是 0，CPython 因此走 `GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)` 分支——不是「探测」，而是往该进程组发一个**真的 Ctrl+C**。导出锁 `export.lock` 里记的是上一个导出进程的 pid，当那个 pid 与当前控制台的进程组号重合时（CI 运行器上就会），**检查锁 = 把 Ctrl+C 打给自己**，Python 抛 KeyboardInterrupt，pytest 中止整个运行。
+- **修复方案**：Windows 分支改为 `OpenProcess(SYNCHRONIZE)` + `WaitForSingleObject(handle, 0)`——进程已退出时立即返回 `WAIT_OBJECT_0`，还在跑则返回 `WAIT_TIMEOUT`。打不开句柄时按 `GetLastError` 区分：5（拒绝访问）= 进程在别人手里，保守算活着；其余 = 已消失。非 Windows 保留原来的 `os.kill(pid, 0)`（在 POSIX 上那才是正确的探测）。
+- **验证**：活进程/死 pid/起始时间不匹配三种情况逐一验证通过；`tests/test_disk_edge_cases.py` 新增 `TestProcessIsAlive`，其中一条从源码层面断言「Windows 探针函数体里不再出现 `os.kill`」。
+- **同批**：`tests/test_desktop_bundle.py` 缺外部插件目录时原先在收集阶段直接 FileNotFoundError，改成 `allow_module_level` 跳过。
+- **后续**：该修复引入的「取锁时间被当成进程创建时间」语义混淆由 PR #23 再修一次，见 2026-10-18 (0)。
+### 2026-10-18 (0) 协作者 7 个 PR 全量合入：CI 首次全绿 + 排队下载/自更新上线（**未发版**）
+
+**Added / Fixed**（**高**——CI 从「永远跑不完」变成 425 passed / 0 failed）
+
+- **合入范围**：#23、#26、#29、#31、#33、#21、#27 共 7 个 PR，关闭 issue #22/#24/#25/#28/#30/#32。按协作者建议的顺序合并（#23 → #26 → #29 → #33 → #31，再 #21，最后依赖它的 #27）。
+  - #23 导出锁身份：原来把「取得锁的时间」当成「进程创建时间」比较，进程启动超过 5 秒的活锁会被误判失效而被接管（这是 10-16 W10 修复时引入的语义混淆）。新增 `process_started` 字段，并用系统文件锁（`msvcrt.locking` / `fcntl.flock`）串行化旧锁检查、清理与新锁发布，两个竞争调用者不能再互相删掉对方刚拿到的锁。
+  - #33 Tk 测试生命周期：pytest 默认 fd 捕获会替换 OS 描述符，干扰 Tcl 读 init.tcl，改成 `--capture=sys`；`DesktopApp` 的 stall-watch 线程在窗口销毁后原来永久循环，现在 `<Destroy>` 里通知退出并 join，同时清掉 `after` 定时回调。`test_page_switch.py` / `test_desktop_stall_watch.py` 从「导入即跑」的脚本改成正常 pytest 用例。
+  - #31 GUI 焦点与布局：下拉框点击后焦点被 Canvas 绑定抢回，改到空闲回调里聚焦真实输入框；简介行数断言改成先填四行真实文本再量可见边界；导航点击按 Enter → press → release → Leave 完整事件序验证（CustomTkinter 6.0.0 的合成点击需要补 Enter，否则指针已进入时断言失败）。
+  - #29 外部资源边界：真实书籍语料回放加 `local_corpus` 标记，通用 CI 用 `-m "not local_corpus"` 排除；缺 Lua 插件时在 helper 前检查，由既有跳过钩子报告原因，不再误报成业务断言失败。
+  - #26 测试隔离：凭据/退出登录用例改为每个用例执行期间绑定自己的临时路径、结束后恢复，修掉收集期共享 `weread_login.CREDENTIAL_STATE` 导致的交叉污染。
+  - #21 功能：**排队下载**（结果卡片勾选 + 「加入队列」/「开始队列下载」，跑完自动续下一本）+ **应用内自更新**（查 GitHub Releases → 下载官方 Setup.exe → 提权拉起覆盖安装，不签名、失败静默降级、与下载队列互斥）+ MIT LICENSE 与 THIRD_PARTY_LICENSES.txt 随安装包分发。
+  - #27 测试适配：标注模式回归改为沿真实 `_start_one()` / `_queue_args()` 调用链验证参数。
+- **CI 首次全绿**：Windows / Python 3.9 作业 **425 passed / 29 skipped / 1 deselected，0 failed**（运行 39104814349，2 分 04 秒 ~ 3 分 15 秒）。privacy gate 持续 13 秒通过。**建议下一步**：把 `tests` 作业从 `continue-on-error` 摘掉，加进 protect-master 的 required status checks——这道门现在才真正有资格关上。
+- **遗留分支**：`test/ci-combined-python39` 是协作者的组合验证分支（他自己说明仅用于验证，无汇总 PR），未删除，等所有者决定。
 ### 2026-10-16 (2) 协作者 8 个 PR 全量合入 + 本仓库测试/CI 首次可跑（**已合并上游 master，未发版**）
 
 **Added / Fixed**（**高**——覆盖 GUI 下载链、断点续传正确性、凭证就绪、书架失败态）
@@ -341,7 +366,7 @@ WeReadWorker.exe (CLI 引擎)
 | W7 | 外部 | 分片 MD5 校验失败（shard mismatch）：个别章节 4 次重试后标记 INCOMPLETE 跳过 | 程序 fail-closed 拒绝出版；重跑续传补齐 |
 | W8 | 外部 | 古文「注」角标不支持（README 已知限制；后汉书类书籍只有正文） | 上游设计如此 |
 | W9 | 外部 | 旧 KOReader 备份里的 wr_skey 已过期（9-10 快照），只能用于恢复 api_key | 属会话时效，预期行为 |
-| W10 | 低（测试/CI） | Windows 下 `process_is_alive` 的 `os.kill(pid, 0)` 被当成 CTRL_C_EVENT 发给进程组，CI 测试跑到中途 `KeyboardInterrupt`（两次实测） | ⚠️ 未修，待决定 |
+| W10 | 低（测试/CI，**已修**） | Windows 下 `process_is_alive` 的 `os.kill(pid, 0)` 被当成 CTRL_C_EVENT 发给进程组，CI 测试跑到中途 `KeyboardInterrupt`（两次实测） | ✅ 已修（§四 2026-10-16 (3)）；其遗留的「取锁时间当进程创建时间」由 PR #23 再修一次 |
 
 ---
 
@@ -455,6 +480,13 @@ Get-ChildItem "$env:LOCALAPPDATA\WeReadDesktop\exports" -Recurse -Filter export.
 | 10-16 | `release-fresh/WeReadDesktop/WeReadDesktop.exe` | `C21EC6A7` | 1.0.4 主程序，3,522,864 B |
 | 10-16 | `release-fresh/WeReadWeb/WeReadWeb.exe` | `8D0C5079` | 1.0.4 网页版（**1.0.4 起不再进安装包**，仍构建供单独分发），1,339,129 B |
 | 10-16 | `installer/WeReadDesktop.iss` | `175A4C4C` | 版本号 1.0.3 → 1.0.4，11,650 B |
+| 10-18 | `weread/desktop_app.py` | `25218BE6` | #21 排队下载 + 自更新，#33 stall-watch 清理，#31 焦点，178,511 B |
+| 10-18 | `weread/updater.py` | `DA6A1353` | 新增：应用内自更新（GitHub Releases 薄封装），7,242 B |
+| 10-18 | `weread/version.py` | `2CFC3FCA` | 新增：版本号单一事实源 1.0.4，513 B |
+| 10-18 | `pytest.ini` | `3140D96F` | #29 local_corpus 标记 + #33 --capture=sys，916 B |
+| 10-18 | `LICENSE` | `26E508CD` | 新增：MIT，1,088 B |
+| 10-18 | `THIRD_PARTY_LICENSES.txt` | `7A643293` | 新增：第三方许可声明，3,627 B |
+| 10-18 | `installer/WeReadDesktop.iss` | `D8B504F3` | #21 许可证随包分发，8,333 B |
 | 10-16 | `tests/test_disk_edge_cases.py` | `E4085844` | W10 防回归断言（Windows 探针不含 os.kill），34,062 B |
 
 > 以上 sha 对应本机工作副本（= 上游 master `47f26dd` + 两个本地文档提交）。合入用的上游提交：`47f26dd`（#13）、`8586746`（#18），#10–#12/#14–#17 在 `8586746` 之前。
@@ -478,5 +510,6 @@ Get-ChildItem "$env:LOCALAPPDATA\WeReadDesktop\exports" -Recurse -Filter export.
 
 - 上游 PR：死链图片缓存（W1）仍未入仓；W3/W4 已随 PR #10/#11 合入 master；W10 已随 §四 2026-10-16 (3) 修在本地工作副本（尚未推送，待用户决定）
 - 后汉书剩 19 章 / 汉书剩 24 章续传并出版（断点保留中）
-- ~~把今晚合入的 9 个 PR（含 W3/W4/GUI 下载链）打成 1.0.4 安装包并分发~~ → **已构建**（SHA8 `DA420F0E`），等用户实测通过后决定是否推送/发布
+- 1.0.4 安装包已构建分发（SHA8 `DA420F0E`），但**不含** 2026-10-18 (0) 的排队下载/自更新/CI 修复，下一版需重新打包
+- CI tests 作业已全绿：摘掉 `continue-on-error`，加进 protect-master 的 required status checks
 - 安装版热补丁的提权方案（或等上游合并后重装）
