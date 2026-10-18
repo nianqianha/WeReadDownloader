@@ -862,10 +862,33 @@ class WeRead:
             if isinstance(record, dict) and str(record.get("bookId", "")) == book["bookId"]:
                 chapters = record.get("updated") or record.get("chapterInfos") or record.get("chapters") or []
                 break
+        raw_count = len(chapters)
         chapters = [chapter for chapter in chapters
                     if int(chapter.get("wordCount", 0) or 0) > 0
                     and chapter.get("title") != "封面"]
         if not chapters: raise RuntimeError("No readable chapters in WeRead catalog")
+        # 上传书（bookId 以 CB_ 开头，用户自己推进微信读书的文件）的目录不是按内容
+        # 切的：服务器会把整本书自动切成上万个节点，其中绝大多数 wordCount 为 0。
+        # 实测《后汉书前20章-注角标可点开-demo》（CB_9WJ8WN8Tj9Vk77675X4XM1FS）过滤后
+        # 仍有 19487 条 uid 为纯数字流水号的"章节"，而真正有正文的只有前 4 个（uid 1/44/
+        # 45/46，后三个只有 116-128 字节）。按这个目录去下载，断点会记成 total=19487、
+        # 每章一个空 body，最终产出一个 19000 页空壳 EPUB——既耗时间又看不出问题。
+        # 上传书的内容在本地 EPUB 里已经存在（它就是用户上传的那份文件），重新下载
+        # 没有意义，所以在目录层直接拒绝，把话说清楚。
+        if book["bookId"].upper().startswith("CB_"):
+            raise RuntimeError(
+                f"这是你上传到微信读书的个人文件（bookId {book['bookId']}），"
+                "不是商店里的书。上传书的目录由服务器自动切分，本次返回 {raw} 个节点、"
+                "过滤后仍有 {kept} 条，其中大部分没有正文；按它下载会得到一个"
+                "上万页的空壳文件。这本书的内容就是你上传的那一份，请直接使用本地 EPUB，"
+                "或到微信读书里另找商店版本。".format(raw=raw_count, kept=len(chapters)))
+        # 商店书也可能命中异常目录（服务端切分变化），留一道上限：正常长篇也就几千章，
+        # 上万章一定是切分异常，宁可拒绝也不要产出一个空壳 EPUB。
+        if len(chapters) > 5000:
+            raise RuntimeError(
+                f"WeRead 目录异常：过滤后仍有 {len(chapters)} 个章节（原始 {raw_count} 个）。"
+                "正常书籍远低于此，这通常是服务端切分异常；已停止，未生成任何文件。"
+                "如确认这本书确实有这么长，请把此处的章节数反馈给维护者。")
         normalized = []
         for index, chapter in enumerate(chapters, 1):
             row = dict(chapter)
@@ -1635,6 +1658,18 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     compatible = (isinstance(old, dict) and old.get("book_id") == book_id
                   and all(old.get(key) is state[key]
                           for key in ("want_thoughts", "want_underlines")))
+    # 上一轮跑在"上传书空洞目录"上的断点要作废：它的 total 记的是服务器自动切分出的
+    # 节点数（实测 19487），而实际有正文的只有个位数。继续续传会让进度条永远停在
+    # 4/19487，最后产出一个上万页的空壳 EPUB。目录层现在已拒绝这种书（见 fetch_book），
+    # 但已经写下的坏断点要在这里认出来并清掉，否则它会被当成正常进度反复续传。
+    if compatible and isinstance(old, dict):
+        old_total = int(old.get("total") or 0)
+        old_done = int(old.get("completed") or 0)
+        if old_total > len(chapters) * 2 and old_total > 200:
+            print(f"[CHECKPOINT] discarding stale state: total={old_total} but the "
+                  f"current catalog has {len(chapters)} chapters; refreshing staged "
+                  f"chapters", flush=True)
+            compatible = False
     if not compatible:
         stale = [path for path in workspace.glob("chapter-*")
                  if path.suffix in (".body", ".json", ".css")]
