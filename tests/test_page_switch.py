@@ -203,68 +203,51 @@ def test_a_failed_delete_is_reported_not_silently_ignored():
         root.destroy()
 
 
-root = ctk.CTk()
-inst = app.DesktopApp(root)
-root.geometry("1120x680")
-root.update(); root.update()
 
-PAGES = ["我的书架", "下载记录", "统计分析", "划线清单", "设置", "下载工坊"]
-ok = True
-for name in PAGES:
-    inst._switch_page(name)
-    root.update(); root.update()
-    page = inst.pages.get(name)
-    children = page.winfo_children() if page else []
-    texts = []
-    def collect(w):
-        for c in w.winfo_children():
-            try:
-                t = c.cget("text")
-                if isinstance(t, str) and t:
-                    texts.append(t[:30])
-            except Exception:
-                pass
-            collect(c)
-    collect(page)
-    has_content = len(children) > 0
-    is_active = inst._current_page == name
-    # back on the workshop, the old widgets must still exist
-    workshop_ok = True
-    if name == "下载工坊":
-        workshop_ok = (inst.results.winfo_exists() and inst.intro.winfo_exists()
-                       and inst.export_button.winfo_exists())
-    passed = has_content and is_active and workshop_ok
-    ok = ok and passed
-    print(("  OK   " if passed else "  FAIL ") + name
-          + "  widgets=%d" % len(children)
-          + ("  | " + " ; ".join(texts[:3]) if texts else ""))
-    # a second visit must not duplicate the page
-    inst._switch_page(name)
-    root.update()
-    assert inst.pages[name] is page, name + " page got rebuilt on revisit"
-
-print()
-print("PAGE SWITCH:", "PASS" if ok else "FAIL")
-root.destroy()
-
-for fn in (test_scan_classifies_every_folder_kind,
-           test_deleting_a_finished_book_removes_it,
-           test_cancelling_the_confirmation_deletes_nothing,
-           test_reclaim_clears_only_the_unfinished_folders,
-           test_a_failed_delete_is_reported_not_silently_ignored,
-           test_a_finished_looking_folder_with_no_epub_is_marked_failed,
-           test_deleting_thoughts_keeps_the_epub,
-           test_cancelling_the_thoughts_delete_keeps_the_notes,
-           test_clean_all_spares_finished_books_even_with_a_failed_one):
+def test_all_sidebar_pages_keep_content_on_revisit():
+    root, inst = _make_instance()
     try:
-        fn()
-        print("PASS", fn.__name__)
-    except AssertionError as exc:
-        print("FAIL", fn.__name__, "-", exc)
-        ok = False
-    except Exception as exc:
-        print("FAIL", fn.__name__, "-", "%s: %s" % (type(exc).__name__, exc))
-        ok = False
+        PAGES = ["我的书架", "下载记录", "统计分析", "划线清单", "设置", "下载工坊"]
+        ok = True
+        for name in PAGES:
+            inst._switch_page(name)
+            root.update(); root.update()
+            page = inst.pages.get(name)
+            children = page.winfo_children() if page else []
+            texts = []
+            def collect(w):
+                for c in w.winfo_children():
+                    try:
+                        t = c.cget("text")
+                        if isinstance(t, str) and t:
+                            texts.append(t[:30])
+                    except Exception:
+                        pass
+                    collect(c)
+            collect(page)
+            has_content = len(children) > 0
+            is_active = inst._current_page == name
+            # back on the workshop, the old widgets must still exist
+            workshop_ok = True
+            if name == "下载工坊":
+                workshop_ok = (inst.results.winfo_exists() and inst.intro.winfo_exists()
+                               and inst.export_button.winfo_exists())
+            passed = has_content and is_active and workshop_ok
+            ok = ok and passed
+            print(("  OK   " if passed else "  FAIL ") + name
+                  + "  widgets=%d" % len(children)
+                  + ("  | " + " ; ".join(texts[:3]) if texts else ""))
+            # a second visit must not duplicate the page
+            inst._switch_page(name)
+            root.update()
+            assert inst.pages[name] is page, name + " page got rebuilt on revisit"
+        assert ok, "a sidebar page lost its content"
+    finally:
+        root.destroy()
 
-print()
-print("OVERALL:", "PASS" if ok else "FAIL")
+
+if __name__ == "__main__":
+    for name, case in tuple(globals().items()):
+        if name.startswith("test_"):
+            case()
+            print("PASS", name)
