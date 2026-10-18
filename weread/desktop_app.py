@@ -1656,7 +1656,8 @@ class DesktopApp:
 
         def _take_focus(_event=None):
             try:
-                box.focus_set()      # CTkComboBox forwards this to its entry
+                # Canvas class bindings may take focus after this widget callback.
+                box.after_idle(box.focus_set)
             except Exception:
                 pass
 
