@@ -1,0 +1,12 @@
+# 开发/测试环境依赖（CI 与本机共用），版本钉死以保证 CI 可复现。
+# 版本来源：本机实测可用的一组（原记录在 .github/workflows/ci.yml 末尾注释）。
+# 发布包是 PyInstaller 冻结 exe，锁版本是为让依赖漂移先在打包结果上暴露，
+# 而不是让 CI 莫名变红/变绿。
+lupa==2.8
+lxml==6.1.0
+requests==2.32.5
+customtkinter==5.2.2
+darkdetect==0.8.0
+pillow==11.3.0
+qrcode==8.2
+pytest==8.4.2
