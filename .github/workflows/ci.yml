@@ -66,10 +66,10 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          python -m pip install lupa lxml requests customtkinter darkdetect pillow qrcode pytest
-        # 仓库目前没有任何依赖声明文件（无 requirements.txt / pyproject.toml），
-        # 这份清单是从 import 反推的。版本故意不锁：先看清干净环境能不能装上，
-        # 锁版本是要单独决定的事（见下）。
+          python -m pip install -r requirements-dev.txt
+        # 依赖清单与版本单一来源是仓库根的 requirements-dev.txt：这里的行内
+        # 清单曾是从 import 反推的，版本不锁时上游一个发版就能让 CI 无故变红/
+        # 变绿。版本实测可用后才写进该文件（见文件内注释）。
 
       - name: 跑测试
         run: python -m pytest -q -m "not local_corpus"
@@ -120,9 +120,7 @@ jobs:
 # ---------------------------------------------------------------------------
 # 关于依赖版本
 #
-# 现在不锁版本安装。这个项目发布的是 PyInstaller 冻结的 exe，依赖漂移会先在打包
-# 结果上表现出来；所以合理做法是补一个 requirements-dev.txt 把版本钉死（本地实测
-# 可用的一组见下），再让这里 pip install -r 它。
-#
-#   lupa 2.8 · lxml 6.1.0 · requests 2.32.5 · customtkinter 5.2.2
-#   darkdetect 0.8.0 · pillow 11.3.0 · qrcode 8.2 · pytest 8.4.2
+# 已改为锁版本安装：单一事实源是仓库根的 requirements-dev.txt，tests 作业
+# pip install -r 它。这个项目发布的是 PyInstaller 冻结的 exe，锁版本让依赖
+# 漂移先在打包结果上暴露，而不是让 CI 莫名变红或变绿。测试发现某依赖的新版本
+# 真的破坏功能时，再单独提 PR 升版本并说明原因。
