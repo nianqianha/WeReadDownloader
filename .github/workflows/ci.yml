@@ -53,9 +53,10 @@ jobs:
     # CREATE_NO_WINDOW，这些在 Linux 运行器上不存在。
     runs-on: windows-latest
     timeout-minutes: 15
-    # 暂不拦合并。见文末「为什么 tests 作业还不拦合并」——拦了也只会变成一道人人无视
-    # 的红灯。
-    continue-on-error: true
+    # 拦合并。master 近 8 次 CI 连续 success（438 passed / 0 failed，约 2 分钟），
+    # 失败子集的定性见文末注释。本机跑全量时有 3 个 stall 计时用例偶发失败，
+    # 是测试方法（真时 sleep + perf_counter）对机器负载敏感，不是代码缺陷——
+    # 这正是门要设在 CI 而不是开发者本机的原因。
     steps:
       - uses: actions/checkout@v4
 
@@ -80,42 +81,34 @@ jobs:
         # 一个 "fixture 'fn' not found"。
 
 # ---------------------------------------------------------------------------
-# 为什么 tests 作业还不拦合并（做完下面这些再打开）
+# tests 作业的状态记录（拦合并前后的定性结论）
 #
-# 原先的硬阻塞——套件跑到一半被自己发出的 Ctrl+C 打断——已经修掉了：
+# 原先的硬阻塞——套件跑到一半被自己发出的 Ctrl+C 打断——已修掉：
 #
 #   weread_desktop.py 的 process_is_alive() 以前在 Windows 上用 os.kill(pid, 0)
 #   判断进程存活。signal.CTRL_C_EVENT 的整数值是 0，所以 CPython 在 Windows 上把
 #   这次调用转成 GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)，即往该进程组发一个
 #   真的 Ctrl+C。导出锁（export.lock）记录的是上一个导出进程的 pid，当那个 pid 与
 #   运行器自己的控制台进程组重合时，检查锁 = 把 Ctrl+C 打给自己，pytest 抛
-#   KeyboardInterrupt 中止整个运行（两次独立复现，各只跑完 188/401 个用例）。
-#   现在 Windows 分支改为 OpenProcess(SYNCHRONIZE) + WaitForSingleObject(0)，
-#   与同文件 process_started_at() 的 ctypes 写法一致；tests/test_disk_edge_cases.py
+#   KeyboardInterrupt 中止整个运行。现在 Windows 分支改为
+#   OpenProcess(SYNCHRONIZE) + WaitForSingleObject(0)，与同文件
+#   process_started_at() 的 ctypes 写法一致；tests/test_disk_edge_cases.py
 #   里有断言守着"Windows 探针不再出现 os.kill"。
 #
-# 剩下的是**运行器环境**问题，都与代码无关，但需要逐个定性后才好决定处置：
+# 拦合并时（2026-10-19）的实际状态：master 近 8 次 CI 连续 success，
+# tests 438 passed / 0 failed，约 2 分钟。已去掉 continue-on-error，并把它
+# 与 privacy-gate 一起加进 protect-master 的 required status checks。
 #
-#   1. DPAPI 相关 3 个（test_desktop_secrets.py）
-#      CryptProtectData / CryptUnprotectData 在托管运行器上不能往返（KeyError:
-#      'cookies'）。这类用例本质上是"只有真实 Windows 用户会话里才成立"的契约。
-#   2. Tk 建不了窗口 7 个（test_desktop_logout.py 等）
-#      运行器上 _tkinter.TclError: invalid command name "tcl_findLibrary"。
-#      本机偶发同一条错误，说明是 Tk 初始化环境，不是被测代码。
-#   3. DPI / 字体差异 2 个（test_desktop_combo 焦点、test_desktop_layout 行数）
-#      断言写死了像素与焦点目标，字体度量一变就倒。
-#   4. 外部插件目录（test_desktop_bundle.py / test_desktop_bundle_lua.py）
-#      已在代码里改成 allow_module_level 跳过：那两处读的是仓库外的 Kindle 插件树，
-#      缺席是"这台机器没有该目录"，不是"代码坏了"。
-#   5. 用例间互相干扰：同一批用例单独跑通过、连在一起跑失败，失败项每次还不同
-#      （本机全量与单独跑的失败集不同，同一文件三次跑同一项也时过时不过）。
+# 仍存在的两类已知非代码问题（都不阻塞合入门，记录在此避免重复定性）：
 #
-# 修干净之后再：去掉 continue-on-error，把它加进 protect-master 规则集的
-# required status checks，这道门才算真关上。
-#
-# 附：本次已修好、不再需要处理的部分 —— 插件缺席的用例现在由 tests/conftest.py
-# 带原因跳过（本机有插件时 0 skipped，没有把测试静音）；原先 15 个文件在收集阶段
-# 直接崩的情况已消除。
+#   1. 本机偶发 3 个 stall 计时用例失败（test_desktop_paging /
+#      test_desktop_resume / test_desktop_stall_modal）。这些用例用真时
+#      sleep + perf_counter 计时，开发者机器负载高时窗口构建/对话框轮询
+#      超过 stall 阈值就被误判。CI 运行器资源独占、约 2 分钟跑完，复现不了。
+#      这是测试方法对负载敏感，不是代码缺陷——修法是将来把计时改为可注入
+#      时钟，不是放宽断言。
+#   2. 外部插件目录缺席的用例由 tests/conftest.py 带原因跳过（读的是仓库外
+#      的 Kindle 插件树，缺席是"这台机器没有该目录"，不是"代码坏了"）。
 #
 # ---------------------------------------------------------------------------
 # 关于依赖版本
