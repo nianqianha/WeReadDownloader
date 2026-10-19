@@ -1118,7 +1118,11 @@ def download_remote_images(xhtml: str, http: requests.Session,
         url = urljoin(WEB + "/", raw_url)
         if not url.startswith(("http://", "https://")): return match.group(0)
         if url in url_to_href:
-            return match.group(1) + match.group(2) + url_to_href[url] + match.group(4)
+            href = url_to_href[url]
+            # 空串 = 该 URL 已知不可用，直接删掉这个 <img>，不再请求
+            if not href:
+                return ""
+            return match.group(1) + match.group(2) + href + match.group(4)
         response = http.get(url, headers={"Referer": referer}, timeout=(10, 45), stream=True)
         # A missing or unreadable image must not cost the reader the chapter.
         # Some catalogue entries reference artwork that no longer exists
@@ -1129,8 +1133,10 @@ def download_remote_images(xhtml: str, http: requests.Session,
             dropped.append(f"{response.status_code} {url}")
             print(f"[IMAGE] dropping an unavailable image "
                   f"(HTTP {response.status_code}): {url}", file=sys.stderr, flush=True)
-            # Leave nothing behind: a src="" tag would make the reader fetch
-            # the current document a second time.
+            # 记住这个 URL 不可用（空串），否则同一章里几十个相同的
+            # note.png 角标会各发一次请求——后汉书实测 6930 次 404，
+            # 把 155 章的下载拖成两小时以上。
+            url_to_href[url] = ""
             return ""
         response.raise_for_status()
         filename = safe_name(namespace) + "-remote-" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
@@ -1167,12 +1173,13 @@ def download_remote_images(xhtml: str, http: requests.Session,
         return match.group(1) + match.group(2) + href + match.group(4)
     result = image_re.sub(replace, xhtml)
     if dropped:
-        # The substitution can only blank the src attribute, so two leftovers
-        # need clearing: an <img src=""> that would re-request this document,
-        # and the bare "<img/>" that results from removing the attribute.
-        # Either way the prose is what matters, not the picture.
+        # The substitution blanks the src attribute, so an <img src=""> is left
+        # behind and would make the reader re-request this document.
+        #
+        # Only remove <img> tags whose src we actually blanked. The second
+        # pattern used to match every self-closing <img> in the chapter, which
+        # deleted real illustrations whenever a single note.png was dropped.
         result = re.sub(r'(?is)<img\b[^>]*\bsrc\s*=\s*(?:""|\'\')[^>]*>', "", result)
-        result = re.sub(r"(?is)<img\b[^>]*/>", "", result)
     return result, mapping, dropped
 
 

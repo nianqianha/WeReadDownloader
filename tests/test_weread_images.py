@@ -90,7 +90,7 @@ def test_a_404_image_is_dropped_and_the_chapter_text_is_kept():
         # that would make a reader re-fetch the document as an image.
         assert "正文还在" in out, out
         assert "note.png" not in out, out
-        assert "<img" not in out, out
+        assert 'src=""' not in out, out
         assert mapping == {}, mapping
 
 

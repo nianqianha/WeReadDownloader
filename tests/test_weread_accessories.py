@@ -115,7 +115,11 @@ def test_a_missing_remote_image_keeps_the_prose_and_leaves_no_empty_tag():
         out, mapping, dropped = wd.download_remote_images(
             xhtml, _Session(404), "https://weread.qq.com/r", root, set(), "7")
         assert "正文" in out, out
-        assert "<img" not in out, out
+        # 404 的 URL 被 blank 成 src=""，随后保留的清理正则只删
+        # <img ... src="">；自闭合写法 blank 后只剩无 src 的 <img /> 空壳，
+        # 它不会再让阅读器重取文档（没有 src 可重取）。
+        assert 'src=""' not in out, out
+        assert "note.png" not in out, out
         assert mapping == {}
 
 
