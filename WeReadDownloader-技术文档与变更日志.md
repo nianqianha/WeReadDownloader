@@ -142,7 +142,7 @@ WeReadWorker.exe --shelf                               # 书架列表 JSON
 |---|---|---|
 | R1 | 角标紧跟对应位置（划线末/注角标原位），正文原文不动 | 用户 2026-10-16 拍板 |
 | R2 | 想法正文全部内嵌、不截断 | 同上 |
-| R3 | **注只放章末、想法进书末附录**（注量级是想法约 38 倍，附录优先放想法） | 2026-10-19 真实数据实测 |
+| R3 | **注与想法都进书末附录**：注按 ~3000 条/册分册（单册约 1 MB），想法单独一册 | 2026-10-20 实测（单文件 12 MB 会卡） |
 | R4 | 旧书不重做；仅对新下载书籍启用 | 用户拍板 |
 | R5 | 默认关闭（opt-in），开关打开才生成附录章节 | 兼容既有导出物 |
 | R6 | 附录条目数必须等于正文角标数（数据零丢失硬断言） | 研究笔记 §3 校验项 |
@@ -158,15 +158,15 @@ WeReadWorker.exe --shelf                               # 书架列表 JSON
 
 | 场景 | 期望 |
 |---|---|
-| 小书（三字经 96 章/431 划线）开 `--unified-appendix` | Calibre 可渲染；附录条目数 == 角标数 |
-| 大书（后汉书 155 章/36,870 注）开开关 | 不卡死：注留章末、只把想法（952 条）收进附录；manifest 如实报告 |
+| 小书（三字经 11 章/34 想法/0 注）开 `--unified-appendix` | 生成想法册；条目数 == 角标数 |
+| 大书（后汉书 155 章/36,185 注/798 想法）开开关 | 12 册注（0.37–1.32 MB/册）+ 1 册想法（307 KB）；正文注角标 == 附录注条目 |
 | 开关关闭 | 导出物与当前版本逐字节一致（回归） |
 | 正文角标与附录条目数不一致 | 构建失败并报错，不产残缺 EPUB |
 
 **已知边界**（来自 W12/W13/W14，实现时不得违反）：
 
-- Calibre 可渲染硬上限在「XHTML 文件总数」约 110–180（W12）：附录必须**按章合并成单文件**，
-  不做「一想法一文件」的分册。
+- 阅读器对**单文件体积**敏感（W12）：注附录实测单文件 12.2 MB 会卡，按 ~3000 条/册
+  分册后单册约 1 MB；不做「一想法一文件」的碎片化分册。
 - crengine 不实现 `<details>`/`:target`（W14 相关）：不能靠折叠隐藏，角标跳转走 `epub:type="noteref"` + `-cr-hint`。
 - 桌面下载器未接 `footnotes.lua`（W13）：注角标转可点由本功能在导出侧实现，
   但**章末注正文保留**，不删。
@@ -228,6 +228,19 @@ WeReadWorker.exe (CLI 引擎)
 
 ### 2026-10-20 统一附录（注释和想法）功能实现（**Added，默认关闭**）
 
+**Fixed（高）注在阅读器里"看不见"——死图注角标转可点 [注n] + 注文进附录**
+
+- **现象**：旧产物（build_hhs_real.py）实测"想法能看、注释不见了"。拆包发现：
+  真正的注（`<img class="qqreader-footnote" alt="注文"/>`，36,185 个）是**无 src 的死图**，
+  阅读器显示不出来；旧产物反而把想法当"注"塞进分册，真注全部丢失。
+- **修复**：`rewrite_notes()` 把死图角标转成 `<span class="wr-note-ref"><a epub:type="noteref"
+  href="#note-<uid>-<n>" id="notebadge-…">[注n]</a></span>`，注文从 `alt`（HTML 字符引用）
+  `unescape` 后收进附录；alt 为空的角标整段删除，不留死图。
+- **分册**：注按 ~3000 条/册拆分（后汉书 36,185 注 → 12 册，0.37–1.32 MB/册），
+  想法单独一册（307 KB）——单文件 12.2 MB 实测会卡。
+- **验证**：后汉书 155 章生成 7.8 MB EPUB，正文注角标 36,185 == 附录注条目 36,185；
+  三字经 0 注/34 想法正常。EPUB 在 `想法注释内嵌尝试/测试产物/`。
+
 **Added**（**中**——把一本书的全部想法收敛到书末一个独立章节，正文只留角标）
 
 - **接口**：新 CLI 开关 `--unified-appendix`（默认关）。打开后：
@@ -236,7 +249,8 @@ WeReadWorker.exe (CLI 引擎)
     + `id="wrbadge-<uid>-<range>"`，角标点开跳附录条目、条目编号跳回原文；
   - WeRead 原生 `[N]` 计数角标移除（统一角标已表达条数）；
   - 注**不**进附录（R3：注量级是想法的约 38 倍，注保留章末）；
-  - manifest.json 新增 `appendix` 块（entries/badges/chapters/orphan_entries/unlinked_underlines）。
+  - manifest.json 新增 `appendix` 块（notes/thoughts/thought_badges/chapters/notes_parts/
+    orphan_entries/unlinked_underlines）。
 - **实现**：新模块 `weread/unified_appendix.py`（load_reviews / rewrite_badges / build_appendix_xhtml
   / build_appendix），`write_epub()` 加可选 `appendix` 参数；`export_book()` 加
   `unified_appendix` 形参。reviews.jsonl 的汇总**前移到 write_epub 之前**（附录与 bundle 共用）。

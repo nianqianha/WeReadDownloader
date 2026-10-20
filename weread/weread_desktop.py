@@ -1204,10 +1204,10 @@ def _cover_extension(data: bytes) -> tuple[str, str] | None:
 def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
                chapter_paths: list[Path], css: str, assets: Path,
                cover_path: Path | None,
-               appendix: tuple[bytes, dict[str, Path]] | None = None) -> None:
+               appendix: tuple[list[tuple[str, bytes]], dict[str, Path]] | None = None) -> None:
     """打包 EPUB。
 
-    appendix = (附录 XHTML 字节, {chapter_uid: 改写后 .body 路径}) 时，在书末追加
+    appendix = ([(文件名, XHTML 字节)], {chapter_uid: 改写后 .body 路径}) 时，在书末追加
     「注释和想法」章节、正文用角标改写后的版本；None 时输出与引入本功能前逐字节
     一致（spec R5：默认关闭，回归要求）。"""
     if len(chapters) != len(chapter_paths): raise RuntimeError("chapter staging list mismatch")
@@ -1224,8 +1224,9 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
         manifest.append(f'<item id="{chapter_id}" href="{filename}" media-type="application/xhtml+xml"/>')
         spine.append(f'<itemref idref="{chapter_id}"/>')
     if appendix is not None:
-        manifest.append('<item id="appendix" href="text/appendix.xhtml" media-type="application/xhtml+xml"/>')
-        spine.append('<itemref idref="appendix"/>')
+        for idx, (fname, _data) in enumerate(appendix[0], 1):
+            manifest.append('<item id="appendix%d" href="text/%s" media-type="application/xhtml+xml"/>' % (idx, fname))
+            spine.append('<itemref idref="appendix%d"/>' % idx)
     cover_meta = ""
     cover_info = _cover_extension(cover_path.read_bytes()[:12]) if cover_path and cover_path.is_file() else None
     if cover_info:
@@ -1242,7 +1243,13 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
             manifest.append(f'<item id="asset{index}" href="images/{epub_escape(asset.name)}" media-type="{mime}"/>')
     nav_items = "".join(f'<li><a href="text/chapter-{index:04d}.xhtml">{epub_escape(chapter.get("title") or index)}</a></li>' for index, chapter in enumerate(chapters, 1))
     if appendix is not None:
-        nav_items += '<li><a href="text/appendix.xhtml">注释和想法</a></li>'
+        for fname, _data in appendix[0]:
+            label = "注释和想法"
+            if "notes" in fname:
+                label += " · 注释" + ("" if fname == "appendix-notes-01.xhtml" else "（续）")
+            elif "thoughts" in fname:
+                label += " · 想法"
+            nav_items += '<li><a href="text/%s">%s</a></li>' % (fname, label)
     nav = '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Contents</title></head><body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><ol>' + nav_items + "</ol></nav></body></html>"
     metadata_entries["OEBPS/nav.xhtml"] = nav.encode("utf-8")
     metadata_entries["OEBPS/style.css"] = css.encode("utf-8")
@@ -1263,8 +1270,9 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
                 shutil.copyfileobj(source, target, 64 * 1024)
                 target.write(b"</body></html>")
         if appendix is not None:
-            with archive.open("OEBPS/text/appendix.xhtml", "w") as target:
-                target.write(appendix[0])
+            for fname, data in appendix[0]:
+                with archive.open("OEBPS/text/" + fname, "w") as target:
+                    target.write(data)
         for asset in asset_paths:
             if asset.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
                 archive.write(asset, "OEBPS/images/" + asset.name, compress_type=zipfile.ZIP_STORED)
@@ -2151,8 +2159,11 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     appendix_arg = None
     appendix_manifest: dict[str, Any] = {}
     if unified_appendix:
-        from unified_appendix import build_appendix
-        appendix_xhtml, rewritten_bodies, appendix_manifest = build_appendix(
+        from unified_appendix import APPENDIX_CSS, build_appendix
+        # 附录与正文共用 style.css：注角标 [注n] 的样式必须并进主 CSS，
+        # 否则正文里的角标在阅读器里会退化成普通正文。
+        css = css + "\n" + APPENDIX_CSS
+        appendix_files, rewritten_bodies, appendix_manifest = build_appendix(
             [(str(ch["chapterUid"]), ch.get("title") or f"Chapter {i}", p)
              for i, (ch, p) in enumerate(zip(chapters, chapter_paths), 1)],
             review_file)
@@ -2163,7 +2174,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             body_copy = bodies_dir / ("chapter-%s.body" % uid)
             atomic_text(body_copy, rewritten)
             appendix_bodies[uid] = body_copy
-        appendix_arg = (appendix_xhtml, appendix_bodies)
+        appendix_arg = (appendix_files, appendix_bodies)
     write_epub(epub_path, book, chapters, chapter_paths, css, workspace_images, cover_path, appendix_arg)
     manifest = {"version": 1, "book_id": book_id, "title": book.get("title"),
         "author": book.get("author", ""), "epub": epub_path.name,

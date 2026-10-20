@@ -98,13 +98,14 @@ class TestBuildAppendix(unittest.TestCase):
                                                      "content": "妙"}}]}],
         }])
         body = self._write_body("222", ["#wrthought-111-222-0-10"])
-        xhtml, rewritten, manifest = ua.build_appendix(
+        files, rewritten, manifest = ua.build_appendix(
             [("222", "第一章", body)], self.reviews)
-        self.assertEqual(manifest["appendix"]["entries"], 1)
-        self.assertEqual(manifest["appendix"]["badges"], 1)
-        self.assertEqual(manifest["appendix"]["notes_kept_in_chapter"], True)
+        xhtml = b"".join(d for _n, d in files)
+        self.assertEqual(manifest["appendix"]["thoughts"], 1)
+        self.assertEqual(manifest["appendix"]["thought_badges"], 1)
+        self.assertEqual(manifest["appendix"]["notes_in_appendix"], True)
         # 单文件附录（W12）
-        self.assertEqual(manifest["appendix"]["file"], "text/appendix.xhtml")
+        self.assertTrue(any(n.startswith("appendix-") for n, _ in files))
         # 附录正文含想法与返回链接。序列化后 epub:type 带前缀（EPUB 合规），
         # lxml 内存形式是 {ns}type——断言前者。
         text = xhtml.decode("utf-8")
@@ -120,10 +121,11 @@ class TestBuildAppendix(unittest.TestCase):
         # 17 处）：链接保留原样、不入附录、如实上报，不因此让整本书失败。
         self._write_reviews([])
         body = self._write_body("222", ["#wrthought-111-222-0-10"])
-        xhtml, rewritten, manifest = ua.build_appendix(
+        files, rewritten, manifest = ua.build_appendix(
             [("222", "第一章", body)], self.reviews)
-        self.assertEqual(manifest["appendix"]["entries"], 0)
-        self.assertEqual(manifest["appendix"]["badges"], 0)
+        xhtml = b"".join(d for _n, d in files)
+        self.assertEqual(manifest["appendix"]["thoughts"], 0)
+        self.assertEqual(manifest["appendix"]["thought_badges"], 0)
         self.assertEqual(manifest["appendix"]["unlinked_underlines"], ["222:0-10"])
         # 链接原样保留，没有被静默删掉
         self.assertIn("#wrthought-111-222-0-10", dict(rewritten)["222"])
@@ -140,8 +142,9 @@ class TestBuildAppendix(unittest.TestCase):
         }])
         body = self._write_body("222", ["#wrthought-111-222-0-10",
                                         "#wrthought-111-222-9-99"])
-        xhtml, _, manifest = ua.build_appendix(
+        files, _, manifest = ua.build_appendix(
             [("222", "第一章", body)], self.reviews)
+        xhtml = b"".join(d for _n, d in files)
         ap = xhtml.decode("utf-8")
         self.assertIn('id="wrfn-222-0-10"', ap)
         self.assertEqual(manifest["appendix"]["unlinked_underlines"], ["222:9-99"])
@@ -156,14 +159,17 @@ class TestBuildAppendix(unittest.TestCase):
                                           "review": {"content": "妙"}}]}],
         }])
         body = self._write_body("222", [])
-        xhtml, _, manifest = ua.build_appendix([("222", "第一章", body)], self.reviews)
+        files, _, manifest = ua.build_appendix([("222", "第一章", body)], self.reviews)
+        xhtml = b"".join(d for _n, d in files)
         self.assertIn("妙", xhtml.decode("utf-8"))
-        self.assertEqual(manifest["appendix"]["entries"], 1)
-        self.assertEqual(manifest["appendix"]["badges"], 0)
+        self.assertEqual(manifest["appendix"]["thoughts"], 1)
+        self.assertEqual(manifest["appendix"]["thought_badges"], 0)
         self.assertEqual(manifest["appendix"]["orphan_entries"], ["222:0-10"])
 
-    def test_notes_do_not_enter_appendix(self):
-        # R3：注留章末，附录只放想法。q qreader-footnote 的死图注不在附录里。
+    def test_notes_enter_appendix_and_become_clickable(self):
+        # R3：注与想法都进附录。下载器的死图注角标（无 src 的 img）必须转成
+        # 可点 [注n]，注文从 alt 解出，并作为附录条目出现——否则阅读器里
+        # 注释就是"不见了"（W13 根因）。
         self._write_reviews([{
             "chapter_uid": "222",
             "reviews": [{"range": "0-10",
@@ -173,7 +179,42 @@ class TestBuildAppendix(unittest.TestCase):
         body = self._write_body(
             "222", ["#wrthought-111-222-0-10"],
             extra='<img class="qqreader-footnote" alt="注文在此"/>')
-        xhtml, _, _ = ua.build_appendix([("222", "第一章", body)], self.reviews)
+        files, rewritten, manifest = ua.build_appendix(
+            [("222", "第一章", body)], self.reviews)
+        xhtml = b"".join(d for _n, d in files)
+        text = xhtml.decode("utf-8")
+        # 注文进附录
+        self.assertIn("注文在此", text)
+        self.assertIn('id="note-222-1"', text)
+        self.assertEqual(manifest["appendix"]["notes"], 1)
+        # 正文里死图消失、变成可点角标
+        body_out = dict(rewritten)["222"]
+        self.assertNotIn("qqreader-footnote", body_out)
+        self.assertIn('href="#note-222-1"', body_out)
+        self.assertIn("[注1]", body_out)
+
+    def test_note_alt_hex_entities_decoded(self):
+        # 真实语料里 alt 是 HTML 字符引用（&#x82E5; = 若），必须 unescape。
+        self._write_reviews([])
+        body = self._write_body(
+            "222", [],
+            extra='<img class="qqreader-footnote" alt="&#x82E5;&#xFF1A;&#x6307;&#x793A;&#x4EE3;&#x8BCD;&#xFF0C;&#x4F60;&#xFF1B;&#x5C14;&#x3002;"/>')
+        files, rewritten, manifest = ua.build_appendix(
+            [("222", "第一章", body)], self.reviews)
+        xhtml = b"".join(d for _n, d in files)
+        self.assertIn("若：指示代词，你；尔。", xhtml.decode("utf-8"))
+        self.assertEqual(manifest["appendix"]["notes"], 1)
+
+    def test_empty_note_alt_is_dropped(self):
+        # alt 缺失/空：整段死图删掉，不留空角标
+        self._write_reviews([])
+        body = self._write_body(
+            "222", [], extra='<img class="qqreader-footnote" alt=""/>')
+        files, rewritten, manifest = ua.build_appendix(
+            [("222", "第一章", body)], self.reviews)
+        xhtml = b"".join(d for _n, d in files)
+        self.assertNotIn("qqreader-footnote", dict(rewritten)["222"])
+        self.assertEqual(manifest["appendix"]["notes"], 0)
         self.assertNotIn("注文在此", xhtml.decode("utf-8"))
 
     def test_multi_chapter_sections_in_order(self):
@@ -185,8 +226,9 @@ class TestBuildAppendix(unittest.TestCase):
         ])
         b1 = self._write_body("1", ["#wrthought-111-1-0-1"])
         b2 = self._write_body("2", ["#wrthought-111-2-2-3"])
-        xhtml, _, manifest = ua.build_appendix(
+        files, _, manifest = ua.build_appendix(
             [("1", "甲章", b1), ("2", "乙章", b2)], self.reviews)
+        xhtml = b"".join(d for _n, d in files)
         text = xhtml.decode("utf-8")
         self.assertLess(text.index("甲章"), text.index("乙章"))
         self.assertEqual(manifest["appendix"]["chapters"], 2)
@@ -203,14 +245,15 @@ class TestBuildAppendix(unittest.TestCase):
             ]},
         ])
         body = self._write_body("222", ["#wrthought-111-222-0-10"])
-        xhtml, _, manifest = ua.build_appendix(
+        files, _, manifest = ua.build_appendix(
             [("222", "第一章", body)], self.reviews)
+        xhtml = b"".join(d for _n, d in files)
         text = xhtml.decode("utf-8")
         self.assertIn("第一组", text)
         self.assertIn("第二组", text)
         # 一个 range = 附录里一条条目（items 合并），角标数仍为 1
-        self.assertEqual(manifest["appendix"]["entries"], 1)
-        self.assertEqual(manifest["appendix"]["badges"], 1)
+        self.assertEqual(manifest["appendix"]["thoughts"], 1)
+        self.assertEqual(manifest["appendix"]["thought_badges"], 1)
 
 
 if __name__ == "__main__":

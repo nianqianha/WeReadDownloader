@@ -1,24 +1,25 @@
 # -*- coding: utf-8 -*-
-"""统一附录（注释和想法）：把一本书的全部想法收敛到书末一个独立章节。
+"""统一附录（注释和想法）：把一本书的「注」与「想法」收进书末一个独立章节。
 
 产品规则（WD 技术文档 §1.4）：
-  R3 注只放章末、想法进书末附录（注量级是想法约 38 倍，附录优先放想法）；
-  R6 附录条目数必须等于正文角标数，不一致即构建失败。
+  R1 角标紧跟对应位置；R2 想法全文内嵌不截断；
+  R3 注与想法都进书末附录「注释和想法」，按章分节（每章先注、后想法）；
+  R6 角标数必须等于附录条目数，不一致即构建失败。
 
 数据流（不改下载链路、不改断点结构）：
   输入  reviews.jsonl          想法（reviews[].pageReviews[]，含 author/content/likes）
-        chapter-uid-*.body     下载阶段已由 Lua 插件注入 <a href="#wrthought-...">
-  输出  text/appendix.xhtml    单个附录文件（W12：Calibre 上限在 XHTML 文件数
-                               约 110–180，必须单文件，不做一想法一文件分册）
+        chapter-uid-*.body     正文；注是 <img class="qqreader-footnote" alt="注文"/>
+                               （无 src 的死图，阅读器显示不出来，必须转）
+  输出  text/appendix.xhtml    单个附录文件（W12：阅读器对 XHTML 文件数敏感，
+                               单一附录文件最稳，不做一想法一文件分册）
 
 实现约束（2026-10-16~19 实测结论，违反即坏）：
   1. aside 必须正常渲染——Calibre 点击靠「藏掉其他、只留脚注」工作，
      display:none/位移/opacity:0 都会让它取出空内容；
   2. 角标须 epub:type="noteref" + role="doc-noteref" 双属性，
      根元素须声明 xmlns:epub，否则 Calibre 判定失败退化成跳页；
-  3. 角标 id 与附录锚点 id 用不同前缀（wrbadge- vs wrfn-）；
-  4. lxml 里 <a> 后的正文是 a.tail，addnext 落在 tail 之后会把角标甩到段末，
-     必须先摘 tail 再插入再挂回；
+  3. 角标 id 与附录锚点 id 用不同前缀（wrbadge-/notebadge- vs wrfn-/note-）；
+  4. 注文在 img 的 alt 里，是 HTML 字符引用（&#x82E5; 之类），必须 unescape；
   5. manifest 条目数必须与 zip 内实际文件数一致，否则阅读器卡封面。
 """
 
@@ -27,6 +28,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from html import unescape
 from pathlib import Path
 from typing import Any
 
@@ -38,12 +40,15 @@ EPUBNS = "http://www.idpf.org/2007/ops"
 APPENDIX_TITLE = "注释和想法"
 APPENDIX_FILENAME = "appendix.xhtml"
 
+# 注角标：<img class="qqreader-footnote" alt="注文"/>（无 src 的死图）
+_FOOTNOTE_IMG_RE = re.compile(
+    r'<img\b(?=[^>]*\bclass="[^"]*\bqqreader-footnote\b[^"]*")[^>]*?/?>', re.I)
 # 下载阶段注入的划线链接：#wrthought-<bookId>-<chapterUid>-<start>-<end>
 _THOUGHT_HREF_RE = re.compile(r"#wrthought-(\d+)-(\d+)-(\d+-\d+)")
 # WeRead 原生想法计数角标（旧格式，转成统一角标时移除）
 _THOUGHT_COUNT_RE = re.compile(r"<span class=\"wr-thought-count\">[^<]*</span>")
 
-CSS = """\
+APPENDIX_CSS = """\
 .wr-ap-h1{margin:0 0 .6em 0;font-size:1.3em;}
 .wr-ap-sec{margin:1.6em 0 .5em 0;font-size:1.05em;font-weight:bold;color:#222;
   border-bottom:1px solid #bbb;padding-bottom:.25em;}
@@ -54,6 +59,11 @@ CSS = """\
 .wr-ap-text{color:#333;}
 .wr-ap-likes{color:#888;font-size:.92em;white-space:nowrap;}
 .wr-ap-none{color:#888;font-style:italic;}
+.wr-ap-sub{margin:.9em 0 .4em 0;font-size:.95em;font-weight:bold;color:#555;}
+.wr-ap-note{color:#333;}
+/* 正文注角标：[注n] 上标，点击跳附录条目 */
+.wr-note-ref{font-size:.72em;vertical-align:super;line-height:1;white-space:nowrap;margin-left:.05em;}
+.wr-note-ref a{text-decoration:none;color:#0366d6;}
 """
 
 
@@ -183,18 +193,49 @@ def rewrite_badges(xhtml: str, chapter_uid: str,
     return rewritten, badges, missing
 
 
-def build_appendix_xhtml(sections: list[tuple[str, list[ThoughtEntry]]],
-                         orphan_keys: set[str] | None = None) -> bytes:
-    """生成单个附录 XHTML。sections = [(章标题, 该章想法条目)]，顺序即阅读顺序。
+def rewrite_notes(xhtml: str, chapter_uid: str) -> tuple[str, list[tuple[str, str, str]]]:
+    """把正文里的死图注角标转成可点角标；返回 (新正文, [(锚点id, 回链id, 注文)])。
 
-    orphan_keys = {"<uid>:<range>"}：这些条目在正文没有角标（划线注入失败），
-    不生成回链——回链点了也没落点，不如不放。
+    下载器输出的注是 `<img class="qqreader-footnote" alt="注文"/>`——无 src
+    的死图，阅读器显示不出来（这是 W13 的根因）。注文在 alt 里、且是 HTML
+    字符引用（&#x82E5; 之类），必须 unescape。
+
+    转换后：`<span class="wr-note-ref"><a epub:type="noteref"
+    role="doc-noteref" href="#note-<uid>-<n>" id="notebadge-<uid>-<n>">[注n]</a></span>`
     """
-    orphan_keys = orphan_keys or set()
+    notes: list[tuple[str, str, str]] = []
+    seq = [0]
+
+    def _sub(m: re.Match[str]) -> str:
+        tag = m.group(0)
+        alt = re.search(r'\balt="([^"]*)"', tag, re.I)
+        title = re.search(r'\btitle="([^"]*)"', tag, re.I)
+        raw = (alt.group(1) if alt else "") or (title.group(1) if title else "")
+        text = unescape(raw).replace("\r", " ").replace("\n", " ").strip()
+        if not text:
+            # 没注文的空角标（alt 缺失）：整段删掉，不留死图
+            return ""
+        seq[0] += 1
+        n = seq[0]
+        target = "note-%s-%d" % (chapter_uid, n)
+        badge = "notebadge-%s-%d" % (chapter_uid, n)
+        notes.append((target, badge, text))
+        return ('<span class="wr-note-ref"><a epub:type="noteref" '
+                'role="doc-noteref" href="#%s" id="%s">[注%d]</a></span>'
+                % (target, badge, n))
+
+    rewritten = _FOOTNOTE_IMG_RE.sub(_sub, xhtml)
+    return rewritten, notes
+
+
+MAX_NOTES_PER_PART = 3000
+
+
+def _html_shell(page_title: str, heading: str, intro: str | None):
     root = etree.Element(q("html"), nsmap={None: XHTML, "epub": EPUBNS})
     head = etree.SubElement(root, q("head"))
-    title = etree.SubElement(head, q("title"))
-    title.text = APPENDIX_TITLE
+    t = etree.SubElement(head, q("title"))
+    t.text = page_title
     link = etree.SubElement(head, q("link"))
     link.set("rel", "stylesheet")
     link.set("href", "style.css")
@@ -202,59 +243,103 @@ def build_appendix_xhtml(sections: list[tuple[str, list[ThoughtEntry]]],
     body = etree.SubElement(root, q("body"))
     h1 = etree.SubElement(body, q("h1"))
     h1.set("class", "wr-ap-h1")
-    h1.text = APPENDIX_TITLE
-    intro = etree.SubElement(body, q("p"))
-    intro.text = "本书全部章节的想法汇总。正文中 [N] 角标对应此处条目，点角标可跳转至此，点条目编号可跳回原文。"
+    h1.text = heading
+    if intro:
+        p = etree.SubElement(body, q("p"))
+        p.text = intro
+    return root, body
 
-    n_entries = 0
-    for chapter_title, entries in sections:
+
+def _dump(root) -> bytes:
+    return etree.tostring(root, xml_declaration=True, encoding="utf-8")
+
+
+def _add_note(body, target_id: str, badge_id: str, text: str) -> None:
+    aside = etree.SubElement(body, q("aside"))
+    aside.set("{%s}type" % EPUBNS, "footnote")
+    aside.set("id", target_id)
+    aside.set("class", "wr-book-footnote")
+    p = etree.SubElement(aside, q("p"))
+    p.set("class", "wr-ap-item")
+    back = etree.SubElement(p, q("a"))
+    back.set("href", "#" + badge_id)
+    back.set("class", "wr-ap-back")
+    back.text = "[注%d]" % int(target_id.rsplit("-", 1)[1])
+    sp = etree.SubElement(p, q("span"))
+    sp.set("class", "wr-ap-note")
+    sp.text = " " + text
+
+
+def _add_thought(body, entry, is_orphan: bool) -> None:
+    target_id = "wrfn-%s-%s" % (entry.chapter_uid, entry.range_key)
+    ref_id = "wrbadge-%s-%s" % (entry.chapter_uid, entry.range_key)
+    aside = etree.SubElement(body, q("aside"))
+    aside.set("{%s}type" % EPUBNS, "footnote")
+    aside.set("id", target_id)
+    aside.set("class", "wr-book-footnote")
+    p = etree.SubElement(aside, q("p"))
+    p.set("class", "wr-ap-item")
+    if is_orphan:
+        # 正文没有这条划线的角标（注入失败）：不放假回链，改用纯文本编号
+        num = etree.SubElement(p, q("span"))
+        num.set("class", "wr-ap-back")
+        num.text = "[%d]" % len(entry.items)
+    else:
+        back = etree.SubElement(p, q("a"))
+        back.set("href", "#" + ref_id)
+        back.set("class", "wr-ap-back")
+        back.text = "[%d]" % len(entry.items)
+    if entry.quote:
+        quote = etree.SubElement(p, q("span"))
+        quote.set("class", "wr-ap-quote")
+        quote.text = " 「%s」" % entry.quote
+    for item in entry.items:
+        ip = etree.SubElement(aside, q("p"))
+        ip.set("class", "wr-ap-item")
+        au = etree.SubElement(ip, q("b"))
+        au.set("class", "wr-ap-author")
+        au.text = item.author
+        tx = etree.SubElement(ip, q("span"))
+        tx.set("class", "wr-ap-text")
+        tx.text = " " + item.content
+        if item.likes:
+            lk = etree.SubElement(ip, q("span"))
+            lk.set("class", "wr-ap-likes")
+            lk.text = " （%d赞）" % item.likes
+
+
+def build_notes_part(chapters, part_no: int, total_parts: int) -> bytes:
+    """生成一册「注释」。chapters = [(章标题, 注条目)]。"""
+    suffix = "" if total_parts <= 1 else "（%d/%d）" % (part_no, total_parts)
+    heading = APPENDIX_TITLE + " · 注释" + suffix
+    root, body = _html_shell(
+        heading, heading,
+        "正文中 [注n] 角标对应此处条目，点编号可跳回原文。" if part_no == 1 else None)
+    for title, notes in chapters:
         sec = etree.SubElement(body, q("h2"))
         sec.set("class", "wr-ap-sec")
-        sec.text = chapter_title
+        sec.text = title
+        for target_id, badge_id, text in notes:
+            _add_note(body, target_id, badge_id, text)
+    return _dump(root)
+
+
+def build_thoughts_part(sections, orphan_keys: set[str]) -> bytes:
+    """生成「想法」册。sections = [(章标题, 注条目, 想法条目)]。"""
+    heading = APPENDIX_TITLE + " · 想法"
+    root, body = _html_shell(
+        heading, heading,
+        "正文中 [N] 角标对应此处条目，点编号可跳回原文。")
+    for title, notes, entries in sections:
         if not entries:
-            none = etree.SubElement(body, q("p"))
-            none.set("class", "wr-ap-none")
-            none.text = "（本章无想法）"
             continue
+        sec = etree.SubElement(body, q("h2"))
+        sec.set("class", "wr-ap-sec")
+        sec.text = title
         for entry in entries:
-            target_id = "wrfn-%s-%s" % (entry.chapter_uid, entry.range_key)
-            ref_id = "wrbadge-%s-%s" % (entry.chapter_uid, entry.range_key)
             is_orphan = "%s:%s" % (entry.chapter_uid, entry.range_key) in orphan_keys
-            aside = etree.SubElement(body, q("aside"))
-            aside.set("{%s}type" % EPUBNS, "footnote")
-            aside.set("id", target_id)
-            aside.set("class", "wr-book-footnote")
-            p = etree.SubElement(aside, q("p"))
-            p.set("class", "wr-ap-item")
-            if is_orphan:
-                # 正文没有这条划线的角标（注入失败）：不放假回链，改用纯文本编号
-                num = etree.SubElement(p, q("span"))
-                num.set("class", "wr-ap-back")
-                num.text = "[%d]" % len(entry.items)
-            else:
-                back = etree.SubElement(p, q("a"))
-                back.set("href", "#" + ref_id)
-                back.set("class", "wr-ap-back")
-                back.text = "[%d]" % len(entry.items)
-            if entry.quote:
-                quote = etree.SubElement(p, q("span"))
-                quote.set("class", "wr-ap-quote")
-                quote.text = " 「%s」" % entry.quote
-            for item in entry.items:
-                ip = etree.SubElement(aside, q("p"))
-                ip.set("class", "wr-ap-item")
-                au = etree.SubElement(ip, q("b"))
-                au.set("class", "wr-ap-author")
-                au.text = item.author
-                tx = etree.SubElement(ip, q("span"))
-                tx.set("class", "wr-ap-text")
-                tx.text = " " + item.content
-                if item.likes:
-                    lk = etree.SubElement(ip, q("span"))
-                    lk.set("class", "wr-ap-likes")
-                    lk.text = " （%d赞）" % item.likes
-            n_entries += 1
-    return etree.tostring(root, xml_declaration=True, encoding="utf-8")
+            _add_thought(body, entry, is_orphan)
+    return _dump(root)
 
 
 def build_appendix(chapter_paths: list[tuple[str, str, Path]],
@@ -276,16 +361,21 @@ def build_appendix(chapter_paths: list[tuple[str, str, Path]],
       不入附录，记入 manifest 的 unlinked_underlines。
     """
     reviews = load_reviews(reviews_path)
-    sections: list[tuple[str, list[ThoughtEntry]]] = []
+    sections: list[tuple[str, list[tuple[str, str, str]], list[ThoughtEntry]]] = []
     rewritten_bodies: list[tuple[str, str]] = []
     badge_total = 0
+    note_total = 0
     unresolved: list[str] = []
     orphans: list[str] = []
 
     for uid, chapter_title, body_path in chapter_paths:
         known = set(reviews.get(uid, {}))
         xhtml = Path(body_path).read_text(encoding="utf-8")
-        rewritten, badges, missing = rewrite_badges(xhtml, uid, known)
+        # 注：死图角标 → 可点 [注n]（注文取自 alt）
+        rewritten, notes = rewrite_notes(xhtml, uid)
+        note_total += len(notes)
+        # 想法：wrthought 链接 → 指向附录
+        rewritten, badges, missing = rewrite_badges(rewritten, uid, known)
         rewritten_bodies.append((uid, rewritten))
         badge_total += badges
         unresolved.extend("%s:%s" % (uid, r) for r in missing)
@@ -294,28 +384,53 @@ def build_appendix(chapter_paths: list[tuple[str, str, Path]],
         # 想法本身有效，保留进附录；只上报，不当成构建失败。
         placed = set(re.findall(r"#wrfn-%s-(\d+-\d+)" % re.escape(uid), rewritten))
         orphans.extend("%s:%s" % (uid, r) for r in known - placed)
-        sections.append((chapter_title, entries))
+        sections.append((chapter_title, notes, entries))
 
-    entry_total = sum(len(e) for _, e in sections)
-    # R6：**被改写、指向附录**的角标必须在附录里都有落点。未覆盖的 range
+    entry_total = sum(len(e) for _, _, e in sections)
+    # R6：**被改写、指向附录**的想法角标必须在附录里都有落点。未覆盖的 range
     # （有划线链接但 reviews 无对应想法组——只划线没写想法，WeRead 常态）
     # 保留原样、不上附录，只如实上报；它们不指向附录，点了也无所谓，
     # 但不能因此让整本书导不出附录版。
     if badge_total != entry_total - len(orphans):
         raise AppendixError(
-            "统一附录数据不一致：指向附录的角标 %d 个，附录条目 %d 个"
+            "统一附录数据不一致：指向附录的想法角标 %d 个，想法条目 %d 个"
             "（其中 %d 个无正文角标，%d 个划线无想法组未入附录）"
             % (badge_total, entry_total, len(orphans), len(unresolved)))
 
-    appendix_xhtml = build_appendix_xhtml(sections, orphan_keys=set(orphans))
+    # —— 分册：注按条目数装箱，想法单册 ——
+    # 单文件 12 MB 的注附录在手机阅读器上会卡（后汉书实测），按 ~3000 条/册
+    # 拆分，单册约 1 MB。
+    note_chunks: list[list[tuple[str, list]]] = []
+    chunk: list[tuple[str, list]] = []
+    acc = 0
+    for title, notes, _entries in sections:
+        chunk.append((title, notes))
+        acc += len(notes)
+        if acc >= MAX_NOTES_PER_PART:
+            note_chunks.append(chunk)
+            chunk, acc = [], 0
+    if chunk and any(n for _t, n in chunk):
+        note_chunks.append(chunk)
+
+    files: list[tuple[str, bytes]] = []
+    total_parts = len(note_chunks)
+    for i, part in enumerate(note_chunks, 1):
+        name = "appendix-notes-%02d.xhtml" % i
+        files.append((name, build_notes_part(part, i, total_parts)))
+    if any(entries for _t, _n, entries in sections):
+        files.append(("appendix-thoughts.xhtml",
+                      build_thoughts_part(sections, set(orphans))))
+
     manifest_extra = {
         "appendix": {
-            "file": "text/" + APPENDIX_FILENAME,
+            "files": ["text/" + name for name, _ in files],
             "title": APPENDIX_TITLE,
-            "entries": entry_total,
-            "badges": badge_total,
+            "notes": note_total,
+            "thoughts": entry_total,
+            "thought_badges": badge_total,
             "chapters": len(sections),
-            "notes_kept_in_chapter": True,
+            "notes_parts": total_parts,
+            "notes_in_appendix": True,
         }
     }
     if unresolved:
@@ -325,4 +440,4 @@ def build_appendix(chapter_paths: list[tuple[str, str, Path]],
         # 想法在、划线没画上（WeRead 引文匹配失败）。条目已保留在附录，
         # 这里只如实说明「这些想法在正文里没有角标可点」。
         manifest_extra["appendix"]["orphan_entries"] = orphans
-    return appendix_xhtml, rewritten_bodies, manifest_extra
+    return files, rewritten_bodies, manifest_extra
