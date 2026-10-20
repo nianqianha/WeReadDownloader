@@ -41,33 +41,51 @@ def _body_with_hrefs(hrefs, extra=""):
     return "<p>正文%s%s</p>" % (links, extra)
 
 
+def _known(uid, *ranges, n_items=1):
+    """构造该章 known 字典（range -> ThoughtEntry）。"""
+    return {r: ua.ThoughtEntry(chapter_uid=uid, range_key=r, quote="",
+                               items=[ua.ThoughtItem("作者", "内容%d" % i)
+                                      for i in range(n_items)])
+            for r in ranges}
+
+
 class TestRewriteBadges(unittest.TestCase):
-    def test_href_rewritten_to_appendix_anchor(self):
+    def test_visible_badge_inserted_after_anchor(self):
+        # 参考旧产物：划线链接保留，后面插入可见 [N] 角标，href 带附录文件名
         body = _body_with_hrefs(["#wrthought-111-222-0-10"])
-        out, badges, missing = ua.rewrite_badges(body, "222", {"0-10"})
-        self.assertIn("#wrfn-222-0-10", out)
-        self.assertNotIn("wrthought", out)
-        self.assertEqual(badges, 1)
+        out, badges, missing = ua.rewrite_badges(
+            body, "222", _known("222", "0-10", n_items=3), "appendix-thoughts.xhtml")
+        self.assertIn('class="wr-thought-link"', out)          # 划线链接保留
+        self.assertIn('class="wr-fn-ref"', out)                 # 可见角标
+        self.assertIn('href="appendix-thoughts.xhtml#wrfn-222-0-10"', out)
+        self.assertIn('id="wrbadge-222-0-10"', out)
+        self.assertIn(">[3]</a>", out)                          # 条数
+        self.assertEqual(badges, {"0-10"})
         self.assertEqual(missing, [])
 
     def test_native_count_badge_removed(self):
         body = _body_with_hrefs(["#wrthought-111-222-0-10"])
-        out, _, _ = ua.rewrite_badges(body, "222", {"0-10"})
+        out, _, _ = ua.rewrite_badges(
+            body, "222", _known("222", "0-10"), "appendix-thoughts.xhtml")
         self.assertNotIn("wr-thought-count", out)
 
     def test_other_chapter_href_untouched(self):
         body = _body_with_hrefs(["#wrthought-111-999-0-10",
                                  "#wrthought-111-222-5-20"])
-        out, badges, missing = ua.rewrite_badges(body, "222", {"5-20"})
+        out, badges, missing = ua.rewrite_badges(
+            body, "222", _known("222", "5-20"), "appendix-thoughts.xhtml")
         self.assertIn("#wrthought-111-999-0-10", out)
-        self.assertEqual(badges, 1)
+        self.assertNotIn("wrbadge-999-", out)
+        self.assertEqual(len(badges), 1)
 
     def test_unresolved_range_reported_not_dropped(self):
         body = _body_with_hrefs(["#wrthought-111-222-0-10"])
-        out, badges, missing = ua.rewrite_badges(body, "222", set())
+        out, badges, missing = ua.rewrite_badges(
+            body, "222", {}, "appendix-thoughts.xhtml")
         self.assertEqual(missing, ["0-10"])
-        self.assertEqual(badges, 0)
+        self.assertEqual(len(badges), 0)
         self.assertIn("#wrthought-111-222-0-10", out)  # 链接保留，不静默删
+        self.assertNotIn('class="wr-fn-ref"', out)     # 不插假角标
 
 
 class TestBuildAppendix(unittest.TestCase):
@@ -190,7 +208,7 @@ class TestBuildAppendix(unittest.TestCase):
         # 正文里死图消失、变成可点角标
         body_out = dict(rewritten)["222"]
         self.assertNotIn("qqreader-footnote", body_out)
-        self.assertIn('href="#note-222-1"', body_out)
+        self.assertIn('href="appendix-notes-01.xhtml#note-222-1"', body_out)
         self.assertIn("[注1]", body_out)
 
     def test_note_alt_hex_entities_decoded(self):
