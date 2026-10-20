@@ -1203,7 +1203,13 @@ def _cover_extension(data: bytes) -> tuple[str, str] | None:
 
 def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
                chapter_paths: list[Path], css: str, assets: Path,
-               cover_path: Path | None) -> None:
+               cover_path: Path | None,
+               appendix: tuple[bytes, dict[str, Path]] | None = None) -> None:
+    """打包 EPUB。
+
+    appendix = (附录 XHTML 字节, {chapter_uid: 改写后 .body 路径}) 时，在书末追加
+    「注释和想法」章节、正文用角标改写后的版本；None 时输出与引入本功能前逐字节
+    一致（spec R5：默认关闭，回归要求）。"""
     if len(chapters) != len(chapter_paths): raise RuntimeError("chapter staging list mismatch")
     manifest = ['<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
                 '<item id="style" href="style.css" media-type="text/css"/>']
@@ -1217,6 +1223,9 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
         title = epub_escape(chapter.get("title") or f"Chapter {index}")
         manifest.append(f'<item id="{chapter_id}" href="{filename}" media-type="application/xhtml+xml"/>')
         spine.append(f'<itemref idref="{chapter_id}"/>')
+    if appendix is not None:
+        manifest.append('<item id="appendix" href="text/appendix.xhtml" media-type="application/xhtml+xml"/>')
+        spine.append('<itemref idref="appendix"/>')
     cover_meta = ""
     cover_info = _cover_extension(cover_path.read_bytes()[:12]) if cover_path and cover_path.is_file() else None
     if cover_info:
@@ -1231,22 +1240,31 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
         mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(asset.suffix.lower())
         if mime:
             manifest.append(f'<item id="asset{index}" href="images/{epub_escape(asset.name)}" media-type="{mime}"/>')
-    nav = '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Contents</title></head><body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><ol>' + "".join(f'<li><a href="text/chapter-{index:04d}.xhtml">{epub_escape(chapter.get("title") or index)}</a></li>' for index, chapter in enumerate(chapters, 1)) + "</ol></nav></body></html>"
+    nav_items = "".join(f'<li><a href="text/chapter-{index:04d}.xhtml">{epub_escape(chapter.get("title") or index)}</a></li>' for index, chapter in enumerate(chapters, 1))
+    if appendix is not None:
+        nav_items += '<li><a href="text/appendix.xhtml">注释和想法</a></li>'
+    nav = '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Contents</title></head><body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><ol>' + nav_items + "</ol></nav></body></html>"
     metadata_entries["OEBPS/nav.xhtml"] = nav.encode("utf-8")
     metadata_entries["OEBPS/style.css"] = css.encode("utf-8")
     modified = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     opf = f'<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="bookid">weread-{epub_escape(book["bookId"])}</dc:identifier><dc:title>{epub_escape(book.get("title"))}</dc:title><dc:creator>{epub_escape(book.get("author"))}</dc:creator><dc:publisher>WeRead</dc:publisher><dc:language>zh-CN</dc:language><meta property="dcterms:modified">{modified}</meta>{cover_meta}</metadata><manifest>{"".join(manifest)}</manifest><spine>{"".join(spine)}</spine></package>'
     metadata_entries["OEBPS/content.opf"] = opf.encode("utf-8")
     temp_path = path.with_suffix(path.suffix + ".part")
+    # 附录模式下正文用角标改写后的缓存副本；无附录时仍读原 .body 缓存
+    appendix_bodies = appendix[1] if appendix is not None else {}
     with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
         archive.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_STORED)
         for name, data in metadata_entries.items(): archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
         for index, chapter_path in enumerate(chapter_paths, 1):
             title = epub_escape(chapters[index - 1].get("title") or f"Chapter {index}")
-            with archive.open(f"OEBPS/text/chapter-{index:04d}.xhtml", "w") as target, chapter_path.open("rb") as source:
+            body_path = appendix_bodies.get(str(chapters[index - 1].get("chapterUid")), chapter_path)
+            with archive.open(f"OEBPS/text/chapter-{index:04d}.xhtml", "w") as target, body_path.open("rb") as source:
                 target.write((f'<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>{title}</title><link rel="stylesheet" href="../style.css" type="text/css"/></head><body>').encode("utf-8"))
                 shutil.copyfileobj(source, target, 64 * 1024)
                 target.write(b"</body></html>")
+        if appendix is not None:
+            with archive.open("OEBPS/text/appendix.xhtml", "w") as target:
+                target.write(appendix[0])
         for asset in asset_paths:
             if asset.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
                 archive.write(asset, "OEBPS/images/" + asset.name, compress_type=zipfile.ZIP_STORED)
@@ -1695,7 +1713,8 @@ def resolve_export_workspace(output: Path, book_id: str, package_name: str) -> P
 
 def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int = 1,
                 want_thoughts: bool = True,
-                want_underlines: bool = True) -> Path:
+                want_underlines: bool = True,
+                unified_appendix: bool = False) -> Path:
     secure_output_directory(output)
     # 每次导出从零开始计数：同一进程内连跑两本书时，上一本丢弃的注数不能带到
     # 这一本的 manifest 里。
@@ -2115,7 +2134,37 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         except requests.RequestException:
             cover_path = None
     epub_path = package_dir / (stem + ".epub")
-    write_epub(epub_path, book, chapters, chapter_paths, css, workspace_images, cover_path)
+    # reviews.jsonl 先汇总落盘：统一附录（下面）与 KOReader bundle（后面）都以它
+    # 为想法数据源。它只是把各章 review 缓存拼起来，提前写无副作用。
+    review_file = package_dir / "reviews.jsonl"
+    review_temp = review_file.with_suffix(".jsonl.part")
+    with review_temp.open("w", encoding="utf-8", newline="\n") as output_reviews:
+        for local_index, chapter in enumerate(chapters, 1):
+            row_path = review_paths[local_index - 1]
+            if row_path is None or not row_path.is_file(): raise RuntimeError("chapter review checkpoint is missing")
+            row = json.loads(row_path.read_text(encoding="utf-8"))
+            if str(row.get("chapter_uid")) != str(chapter["chapterUid"]): raise RuntimeError("chapter review checkpoint UID mismatch")
+            output_reviews.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    os.replace(review_temp, review_file)
+    # 统一附录（注释和想法）：默认关闭；开关打开才在书末追加附录章节。
+    # 数据不一致（角标数 != 条目数）时 unified_appendix 抛错，本步不产残缺 EPUB。
+    appendix_arg = None
+    appendix_manifest: dict[str, Any] = {}
+    if unified_appendix:
+        from unified_appendix import build_appendix
+        appendix_xhtml, rewritten_bodies, appendix_manifest = build_appendix(
+            [(str(ch["chapterUid"]), ch.get("title") or f"Chapter {i}", p)
+             for i, (ch, p) in enumerate(zip(chapters, chapter_paths), 1)],
+            review_file)
+        bodies_dir = workspace / "appendix-bodies"
+        bodies_dir.mkdir(parents=True, exist_ok=True)
+        appendix_bodies = {}
+        for uid, rewritten in rewritten_bodies:
+            body_copy = bodies_dir / ("chapter-%s.body" % uid)
+            atomic_text(body_copy, rewritten)
+            appendix_bodies[uid] = body_copy
+        appendix_arg = (appendix_xhtml, appendix_bodies)
+    write_epub(epub_path, book, chapters, chapter_paths, css, workspace_images, cover_path, appendix_arg)
     manifest = {"version": 1, "book_id": book_id, "title": book.get("title"),
         "author": book.get("author", ""), "epub": epub_path.name,
         "epub_size": epub_path.stat().st_size,
@@ -2128,17 +2177,9 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         # failing means the text is kept, but a reader who is not told that
         # images or highlights went missing will assume the book is whole.
         "omissions": omission_report}
+    if appendix_manifest:
+        manifest.update(appendix_manifest)
     atomic_text(package_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-    review_file = package_dir / "reviews.jsonl"
-    review_temp = review_file.with_suffix(".jsonl.part")
-    with review_temp.open("w", encoding="utf-8", newline="\n") as output_reviews:
-        for local_index, chapter in enumerate(chapters, 1):
-            row_path = review_paths[local_index - 1]
-            if row_path is None or not row_path.is_file(): raise RuntimeError("chapter review checkpoint is missing")
-            row = json.loads(row_path.read_text(encoding="utf-8"))
-            if str(row.get("chapter_uid")) != str(chapter["chapterUid"]): raise RuntimeError("chapter review checkpoint UID mismatch")
-            output_reviews.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
-    os.replace(review_temp, review_file)
     descriptor = {"version": 1, "manifest": "manifest.json", "reviews": "reviews.jsonl", "epub": epub_path.name}
     atomic_text(package_dir / "bundle.json", json.dumps(descriptor, ensure_ascii=False, indent=2))
     bundle_path = package_dir / (stem + ".weread.zip")
@@ -2182,6 +2223,11 @@ def main() -> int:
                              "it is the fastest and smallest of the three modes. Plain "
                              "text only -- the exported EPUB has no highlights. Implies "
                              "--no-thoughts.")
+    parser.add_argument("--unified-appendix", action="store_true",
+                        help="Append a single '注释和想法' chapter at the end of the book "
+                             "collecting every thought; body badges are rewritten to jump "
+                             "to it. Notes stay at their chapter ends. Requires thoughts "
+                             "(ignored with --no-thoughts).")
     args = parser.parse_args()
     want_thoughts = not args.no_thoughts
     want_underlines = not args.no_annotations
@@ -2190,6 +2236,12 @@ def main() -> int:
         # note-text switch would be meaningless. Say so once rather than letting
         # --no-annotations --no-thoughts look like two separate decisions.
         want_thoughts = False
+    # 统一附录的素材是想法：没有想法就没有条目可收，角标会全部悬空。
+    # 与其产一本「角标点开是空的」的书，不如明说开关没生效。
+    unified_appendix = args.unified_appendix and want_thoughts
+    if args.unified_appendix and not unified_appendix:
+        print("[APPENDIX] --unified-appendix ignored: thoughts are disabled "
+              "(--no-thoughts/--no-annotations)", flush=True)
     if not args.check_auth and not args.search and not args.book_info and not args.probe_book and not args.shelf and not args.book_id:
         parser.error("book_id is required unless --check-auth, --search, or --probe-book is used")
     if args.jobs < 1 or args.jobs > 4:
@@ -2239,7 +2291,7 @@ def main() -> int:
             shelf_books(settings)
             return 0
         result = export_book(args.book_id, args.output, settings, args.jobs, want_thoughts,
-                       want_underlines)
+                       want_underlines, unified_appendix)
         print("DONE", result, flush=True)
         return 0
     except Exception as exc:
