@@ -235,7 +235,7 @@ WeReadWorker.exe (CLI 引擎)
   阅读器显示不出来；旧产物反而把想法当"注"塞进分册，真注全部丢失。
 - **修复**：`rewrite_notes()` 把死图角标转成 `<span class="wr-note-ref"><a epub:type="noteref"
   href="#note-<uid>-<n>" id="notebadge-…">[注n]</a></span>`，注文从 `alt`（HTML 字符引用）
-  `unescape` 后收进附录；alt 为空的角标整段删除，不留死图。
+  `unescape` 后收进附录；角标文字用「注」（不带数字）；alt 为空的角标整段删除，不留死图。
 - **分册**：注按 ~3000 条/册拆分（后汉书 36,185 注 → 12 册，0.37–1.32 MB/册），
   想法单独一册（307 KB）——单文件 12.2 MB 实测会卡。
 - **验证**：后汉书 155 章生成 7.8 MB EPUB，正文注角标 36,185 == 附录注条目 36,185；

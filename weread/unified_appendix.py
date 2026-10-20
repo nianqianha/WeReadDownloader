@@ -205,7 +205,7 @@ def rewrite_notes(xhtml: str, chapter_uid: str,
 
     转换后（与旧版参考实现同一套样式）：
     `<span class="wr-fn-ref"><a epub:type="noteref" role="doc-noteref"
-    href="<notes_file>#note-<uid>-<n>" id="notebadge-<uid>-<n>">[注n]</a></span>`
+    href="<notes_file>#note-<uid>-<n>" id="notebadge-<uid>-<n>">注</a></span>`
 
     href 必须带分册文件名——注在附录文件里，只写 `#note-…` 是**同文件锚点**，
     点击会"找不到目标"（实测过的坑）。
@@ -228,8 +228,8 @@ def rewrite_notes(xhtml: str, chapter_uid: str,
         badge = "notebadge-%s-%d" % (chapter_uid, n)
         notes.append((target, badge, text))
         return ('<span class="wr-fn-ref"><a epub:type="noteref" '
-                'role="doc-noteref" href="%s#%s" id="%s">[注%d]</a></span>'
-                % (notes_file, target, badge, n))
+                'role="doc-noteref" href="%s#%s" id="%s">注</a></span>'
+                % (notes_file, target, badge))
 
     rewritten = _FOOTNOTE_IMG_RE.sub(_sub, xhtml)
     return rewritten, notes
@@ -271,7 +271,7 @@ def _add_note(body, target_id: str, badge_id: str, text: str) -> None:
     back = etree.SubElement(p, q("a"))
     back.set("href", "#" + badge_id)
     back.set("class", "wr-ap-back")
-    back.text = "[注%d]" % int(target_id.rsplit("-", 1)[1])
+    back.text = "注"
     sp = etree.SubElement(p, q("span"))
     sp.set("class", "wr-ap-note")
     sp.text = " " + text
