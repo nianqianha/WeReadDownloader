@@ -522,6 +522,60 @@ def atomic_text(path: Path, text: str) -> None:
     os.replace(temp, path)
 
 
+# 死链缓存：403/404/410 的图片 URL 在整本书里只请求一次。
+#
+# 以前这张表是 download_remote_images() 的局部变量，于是每换一个章节、同一个
+# note.png 就再发一次 404 —— 后汉书实测 6930 次，把 155 章的下载拖成两小时以上。
+# 更糟的是进程一退出缓存就没了，第二天续传又从零开始问一遍。
+#
+# 现在它分两层：进程内的 set 负责同一本书内跨章节、跨 worker 线程去重；
+# 工作目录里的 dead-images.json 负责跨进程（续传、重跑）去重。缓存只记 URL，
+# 不记状态码——排查时想知道的只是"这张图取过没有"。
+_DEAD_IMAGE_URLS: set[str] = set()
+_DEAD_IMAGE_LOCK = threading.Lock()
+
+
+def load_dead_image_cache(path: Path) -> int:
+    """把上一轮记下的死链读进进程缓存；返回条数。坏文件按空处理。"""
+    global _DEAD_IMAGE_URLS
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(rows, list):
+        return 0
+    cleaned = {str(url) for url in rows if url}
+    with _DEAD_IMAGE_LOCK:
+        _DEAD_IMAGE_URLS = cleaned
+    return len(cleaned)
+
+
+def save_dead_image_cache(path: Path) -> int:
+    """把进程缓存写回工作目录；返回条数。没有内容时不建文件。"""
+    with _DEAD_IMAGE_LOCK:
+        urls = sorted(_DEAD_IMAGE_URLS)
+    if not urls:
+        return 0
+    atomic_text(path, json.dumps(urls, ensure_ascii=False, indent=0))
+    return len(urls)
+
+
+def is_dead_image(url: str) -> bool:
+    with _DEAD_IMAGE_LOCK:
+        return url in _DEAD_IMAGE_URLS
+
+
+def mark_dead_image(url: str) -> None:
+    with _DEAD_IMAGE_LOCK:
+        _DEAD_IMAGE_URLS.add(url)
+
+
+def reset_dead_image_cache() -> None:
+    """只给测试用：清空进程缓存，避免用例之间互相影响。"""
+    with _DEAD_IMAGE_LOCK:
+        _DEAD_IMAGE_URLS.clear()
+
+
 # 上传书（用户自己推进微信读书的文件）的目录会把原文夹注拆成独立章节。实测
 # 《后汉书前20章-注角标可点开-demo》19487 个条目里，9722 条 title 就是「注」、
 # 9765 条是 wrfn-89-1 这种脚注编号，真正的正文只有 43 条。这些碎片的内容本来
@@ -1112,6 +1166,9 @@ def download_remote_images(xhtml: str, http: requests.Session,
     url_to_href: dict[str, str] = {}
     image_re = re.compile(r'(?i)(\bsrc\s*=\s*)(["\'])(.*?)(\2)')
     dropped: list[str] = []
+    # 本章已经记进 dropped 的死链，避免同一 URL 在本章重复计数；同时让
+    # "上一章就判死、这一章直接跳过请求"的那条路径在 manifest 里仍然可见。
+    reported_dead: set[str] = set()
 
     def _is_note_img(match: re.Match[str]) -> bool:
         """当前 src 所在的 <img> 是否为注角标（qqreader-footnote）。"""
@@ -1134,6 +1191,14 @@ def download_remote_images(xhtml: str, http: requests.Session,
             if not href:
                 return 'src=""' if _is_note_img(match) else ""
             return match.group(1) + match.group(2) + href + match.group(4)
+        # 上一章（或上一次运行）已经确认这张图是死链：直接按死链处理，不再发请求。
+        # 这是 note.png 类资源的主要加速点——它们每章都会出现，但只需要被问一次。
+        if is_dead_image(url):
+            url_to_href[url] = ""
+            if url not in reported_dead:
+                reported_dead.add(url)
+                dropped.append(f"cached-dead {url}")
+            return 'src=""' if _is_note_img(match) else ""
         response = http.get(url, headers={"Referer": referer}, timeout=(10, 45), stream=True)
         # A missing or unreadable image must not cost the reader the chapter.
         # Some catalogue entries reference artwork that no longer exists
@@ -1142,6 +1207,8 @@ def download_remote_images(xhtml: str, http: requests.Session,
         # <img> and say so; the prose is the point.
         if response.status_code in (403, 404, 410):
             dropped.append(f"{response.status_code} {url}")
+            reported_dead.add(url)
+            mark_dead_image(url)
             print(f"[IMAGE] dropping an unavailable image "
                   f"(HTTP {response.status_code}): {url}", file=sys.stderr, flush=True)
             # 记住这个 URL 不可用（空串），否则同一章里几十个相同的
@@ -1757,6 +1824,13 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     export_lock = acquire_export_lock(workspace, book_id)
     atexit.register(lambda lock=export_lock: lock.unlink(missing_ok=True))
     state_path = workspace / "state.json"
+    # 死链缓存落在工作目录里：同一本书续传或重跑时，"这张图已经取过 404"这件事
+    # 不该重新问一遍。清空断点不会清它——那是资源属性，不是章节状态。
+    dead_image_path = workspace / "dead-images.json"
+    reused_dead = load_dead_image_cache(dead_image_path)
+    if reused_dead:
+        print(f"[IMAGE] reusing {reused_dead} known-dead image URL(s) from the "
+              f"previous run; they will not be requested again", flush=True)
     chapter_uids = [str(chapter["chapterUid"]) for chapter in chapters]
     state = {"version": 1, "book_id": book_id, "title": book.get("title"),
              "total": len(chapters), "chapter_uids": chapter_uids, "completed": 0,
@@ -1957,16 +2031,24 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
                                                           want_underlines),
                                  throttle, unresolved)
 
-    if jobs == 1:
-        for index, chapter in pending:
-            fetch_with_retries(index, chapter)
-    else:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="weread-chapter") as pool:
-            futures = [pool.submit(fetch_with_retries, index, chapter)
-                       for index, chapter in pending]
-            for future in as_completed(futures):
-                future.result()
+    try:
+        if jobs == 1:
+            for index, chapter in pending:
+                fetch_with_retries(index, chapter)
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="weread-chapter") as pool:
+                futures = [pool.submit(fetch_with_retries, index, chapter)
+                           for index, chapter in pending]
+                for future in as_completed(futures):
+                    future.result()
+    finally:
+        # 无论这一轮是正常跑完还是中途抛错（限流、断网、Ctrl+C），把已确认的死链
+        # 落盘。否则下一次续传又要为同一个 note.png 发 6930 次 404。
+        saved_dead = save_dead_image_cache(dead_image_path)
+        if saved_dead:
+            print(f"[IMAGE] remembered {saved_dead} dead image URL(s) for the "
+                  f"next run", flush=True)
     failed_path = workspace / "failed_chapters.json"
     if unresolved:
         atomic_text(failed_path, json.dumps(unresolved, ensure_ascii=False, indent=2))
