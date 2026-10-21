@@ -2471,16 +2471,19 @@ class DesktopApp:
                      text_color=self.AMBER if rated else self.FAINT, anchor="w", font=_font(11)
                      ).pack(fill="x", anchor="w", pady=(3, 0))
 
-        # 排队下载：每张卡片加一个勾选框 + "加入队列"按钮（方案A）。
+        # 排队下载：每张卡片一个「加入队列」勾选框。
         # 勾选状态存在 self._card_checks 里，按页重建卡片时复用，避免勾选丢失。
+        #
+        # 必须放进 text_col（左列、expand），不能直接 pack 到 inner：inner 里
+        # cover 和 text_col 都是 side="left"，再横向填充一个控件只会拿到被
+        # expand 挤剩的那点空隙——标题一长，勾选框连同「加入队列」四个字就被
+        # 卡片右边裁掉了（用户截图：只剩半个圆圈）。
         check_var = self._card_checks.get(bid) or tk.BooleanVar(value=False)
         self._card_checks[bid] = check_var
-        ctrl = ctk.CTkFrame(inner, fg_color="transparent")
-        ctrl.pack(fill="x", anchor="w", pady=(4, 0))
-        ctk.CTkCheckBox(ctrl, text="加入队列", variable=check_var, font=_font(10),
+        ctk.CTkCheckBox(text_col, text="加入队列", variable=check_var, font=_font(10),
                         width=86, height=22,
                         command=lambda b=bid: self._on_card_check(b)
-                        ).pack(side="left")
+                        ).pack(anchor="w", pady=(5, 0))
 
         def choose(_event=None, selected=dict(item)):
             self._select_book(selected)

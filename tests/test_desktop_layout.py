@@ -189,6 +189,49 @@ def test_the_task_buttons_are_inside_the_window_not_merely_sized():
             root.destroy()
 
 
+def _find_checkboxes(widget):
+    import customtkinter as ctk
+    found = []
+    for child in widget.winfo_children():
+        if isinstance(child, ctk.CTkCheckBox):
+            found.append(child)
+        found.extend(_find_checkboxes(child))
+    return found
+
+
+@test
+def test_the_queue_checkbox_is_not_clipped_by_a_long_title():
+    """勾选框要完整落在卡片里。
+
+    真机截图：长标题（三字经·百家姓·千字文…）的卡片上，「加入队列」连同文字
+    被挤到卡片右边缘之外，只剩半个圆圈。原因是勾选框被 pack 到 inner 的剩余
+    空隙里，而不是放进会伸展的文字列。
+    """
+    root, instance = _make_gui()
+    try:
+        item = {"bookId": "111",
+                "title": "三字经·百家姓·千字文·弟子规（中华经典藏书·升级版）",
+                "author": "李逸安译注", "category": "文学-古典文学",
+                "newRating": "8.75", "newRatingCount": "22"}
+        instance.result_rows = [item]
+        instance._build_book_card(item)
+        root.update_idletasks()
+        card = instance.results.winfo_children()[-1]
+        boxes = _find_checkboxes(card)
+        assert boxes, "卡片上没有加入队列勾选框"
+        box = boxes[0]
+        # 不只是"在卡片内"：旧实现把它 pack 到 inner 的剩余空隙，正好贴在卡片
+        # 右缘、被滚动条盖住，「加入队列」四个字看不见。它必须在左侧文字列里。
+        offset = box.winfo_rootx() - card.winfo_rootx()
+        ratio = offset / max(1, card.winfo_width())
+        assert ratio < 0.6, (
+            "勾选框贴在卡片右侧（offset %d / width %d = %.2f），会被滚动条盖住"
+            % (offset, card.winfo_width(), ratio))
+        assert "加入队列" in str(box.cget("text")), box.cget("text")
+    finally:
+        root.destroy()
+
+
 if __name__ == "__main__":
     for test_case in ALL_TESTS:
         test_case()
