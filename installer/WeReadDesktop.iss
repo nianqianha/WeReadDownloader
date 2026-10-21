@@ -62,7 +62,8 @@ SetupIconFile=..\assets\weread-project.ico
 ; CloseApplications 就再也认不出正在运行的实例，安装会直接去覆盖被占用的 exe，
 ; 报 "拒绝访问" 而不是提示关闭。
 ; test_multi_account_isolation.test_installer_closes_the_running_apps 会守住这两处。
-AppMutex=WeReadDownloader-Graphics,WeReadDownloader-Web
+; 1.0.5 起只有图形版：Web 的互斥体名随网页版一起删了，留着没有任何东西会去创建它。
+AppMutex=WeReadDownloader-Graphics
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
@@ -79,8 +80,7 @@ Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 ; 用户装一个工具不该被问"你要装哪些组件"——主程序和下载组件是一起才跑得起来的
 ; 整体，问出来只会让人以为能只装一半。原先 1.0.2 把三个组件做成可勾选是过度设计，
 ; 用户明确要求去掉这个界面，所以回到"装就是一个完整可用的程序"。
-; 网页版（WeReadWeb）本身仍构建、仍在 release-fresh/ 里，只是不再进安装包；
-; 真要它的人单独分发，不走这条安装路径。
+; 1.0.5：网页版源码与构建脚本一并删除，release-fresh/ 里也不再有 WeReadWeb。
 
 ; 桌面图标任务：默认勾上（checkedonce 是 [Tasks] 里唯一能表达"默认勾选"的 flag，
 ; checked 不是合法值）。
