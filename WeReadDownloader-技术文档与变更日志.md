@@ -309,6 +309,15 @@ WeReadWorker.exe (CLI 引擎)
    并显示"队列已全部完成"（原来的写法在 pop 完最后一本时立刻置 False，完成提示
    永远不会出现）。
 
+**Fixed 队列选中的书详情永远不加载 / 分类永久「加载中」**
+
+- 队列起书为避免与下载抢 worker，`_select_book(load_info=False)` 跳过了读详情，
+  但当时把 `pending_book` 写成 `None`——面板永远停在「下载开始后加载」。
+  改为记进 `pending_book`，由 `_handle_done()` 的 finally 在空闲时补加载。
+- 搜索结束仍没拿到分类的卡片，选中后 `_render_page()` 重建会回到「分类加载中…」；
+  `_finish_card_categories()` 的结果没有写回 `book_rows`。现在降级结果写回数据，
+  并加 `search_done` 状态位：只有搜索进行中才显示「分类加载中…」。
+
 **真机验证（Windows，安装包 1.0.5）**
 
 - 全程用 GUI 点击：搜索「汉书」→ 选中 → 勾选「加入队列」→ 搜「三字经」→ 勾选 →
