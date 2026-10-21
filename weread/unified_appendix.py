@@ -61,6 +61,7 @@ APPENDIX_CSS = """\
 .wr-ap-none{color:#888;font-style:italic;}
 .wr-ap-sub{margin:.9em 0 .4em 0;font-size:.95em;font-weight:bold;color:#555;}
 .wr-ap-note{color:#333;}
+.wr-ap-origin{color:#888;font-size:.92em;}
 /* 正文角标（想法）：上标、蓝色、可点 */
 .wr-fn-ref{display:inline;font-size:.72em;vertical-align:super;line-height:1;
   white-space:nowrap;margin-left:.05em;}
@@ -134,7 +135,17 @@ def load_reviews(path: Path) -> dict[str, dict[str, ThoughtEntry]]:
                     ))
                 if not items:
                     continue
+                # 引文优先取组级字段；真实数据里 abstract 常常只在
+                # pageReviews[].review 上，组级永远为空——结果就是孤儿条目全部
+                # 没有引文，读者只看到一条无出处的评论。
                 quote = str(rv.get("abstract") or rv.get("contextAbstract") or "").strip()
+                if not quote:
+                    for page in rv.get("pageReviews") or []:
+                        review_body = (page or {}).get("review") or {}
+                        quote = str(review_body.get("abstract")
+                                    or review_body.get("markText") or "").strip()
+                        if quote:
+                            break
                 existing = bucket.get(range_key)
                 if existing is None:
                     bucket[range_key] = ThoughtEntry(
@@ -291,7 +302,8 @@ def _add_note(body, target_id: str, badge_id: str, text: str,
     sp.text = " " + text
 
 
-def _add_thought(body, entry, is_orphan: bool, chapter_file: str) -> None:
+def _add_thought(body, entry, is_orphan: bool, chapter_file: str,
+                 chapter_title: str | None = None) -> None:
     target_id = "wrfn-%s-%s" % (entry.chapter_uid, entry.range_key)
     ref_id = "wrbadge-%s-%s" % (entry.chapter_uid, entry.range_key)
     aside = etree.SubElement(body, q("aside"))
@@ -305,6 +317,11 @@ def _add_thought(body, entry, is_orphan: bool, chapter_file: str) -> None:
         num = etree.SubElement(p, q("span"))
         num.set("class", "wr-ap-back")
         num.text = "[%d]" % len(entry.items)
+        if chapter_title:
+            # 单独成节之后，条目脱离了章节上下文，必须把章名带在条目里。
+            origin = etree.SubElement(p, q("span"))
+            origin.set("class", "wr-ap-origin")
+            origin.text = " " + chapter_title
     else:
         back = etree.SubElement(p, q("a"))
         back.set("href", "%s#%s" % (chapter_file, ref_id))
@@ -351,15 +368,27 @@ def build_thoughts_part(sections, orphan_keys: set[str]) -> bytes:
     root, body = _html_shell(
         heading, heading,
         "正文中 [N] 角标对应此处条目，点编号可跳回原文。")
+    orphaned: list[tuple[str, str, "ThoughtEntry"]] = []
     for title, ch_file, notes, entries in sections:
-        if not entries:
+        placed = [e for e in entries
+                  if "%s:%s" % (e.chapter_uid, e.range_key) not in orphan_keys]
+        orphaned.extend((title, ch_file, e) for e in entries
+                        if "%s:%s" % (e.chapter_uid, e.range_key) in orphan_keys)
+        if not placed:
             continue
         sec = etree.SubElement(body, q("h2"))
         sec.set("class", "wr-ap-sec")
         sec.text = title
-        for entry in entries:
-            is_orphan = "%s:%s" % (entry.chapter_uid, entry.range_key) in orphan_keys
-            _add_thought(body, entry, is_orphan, ch_file)
+        for entry in placed:
+            _add_thought(body, entry, False, ch_file)
+    # 没能在原文定位的想法单独成节：它们没有可点的 [N]，混在章节目录里会让读者
+    # 以为每条都能跳回去。带章名，至少知道出自哪一章。
+    if orphaned:
+        sec = etree.SubElement(body, q("h2"))
+        sec.set("class", "wr-ap-sec")
+        sec.text = "未能在原文定位的想法（%d 条）" % len(orphaned)
+        for title, ch_file, entry in orphaned:
+            _add_thought(body, entry, True, ch_file, chapter_title=title)
     return _dump(root)
 
 
@@ -443,15 +472,6 @@ def build_appendix(chapter_paths: list[tuple[str, str, Path]],
         sections.append((chapter_title, "chapter-%04d.xhtml" % ch_idx, notes, entries))
 
     entry_total = sum(len(e) for _, _cf, _n, e in sections)
-    # R6：被改写、指向附录的想法角标必须在附录里都有落点。未覆盖的 range
-    # （有划线链接但 reviews 无对应想法组——只划线没写想法，WeRead 常态）
-    # 保留原样、不上附录，只如实上报。只做想法册时才有这条断言；注的
-    # 一致性由 rewrite_notes 与 build_notes_part 同源保证。
-    if include_thoughts and badge_total != entry_total - len(orphans):
-        raise AppendixError(
-            "统一附录数据不一致：指向附录的想法角标 %d 个，想法条目 %d 个"
-            "（其中 %d 个无正文角标，%d 个划线无想法组未入附录）"
-            % (badge_total, entry_total, len(orphans), len(unresolved)))
 
     # —— 组装分册文件 ——
     chunks: dict[int, list[tuple[str, list]]] = {}
@@ -467,6 +487,33 @@ def build_appendix(chapter_paths: list[tuple[str, str, Path]],
     if include_thoughts and any(entries for _t, _cf, _n, entries in sections):
         files.append(("appendix-thoughts.xhtml",
                       build_thoughts_part(sections, set(orphans))))
+
+    # —— 一致性校验：逐条解析角标指向的 (文件, 锚点) ——
+    # 原来这里是一个计数等式（条目 − 孤儿 == 角标），而孤儿本来就定义为
+    # "有条目没角标"，等式恒真、任何输入都不会失败。改成真的去解析：
+    # 每个角标的 href 必须落到一个已写出的文件、且该文件里真有这个 id；
+    # 注与想法同一套规则。
+    file_ids: dict[str, set[str]] = {}
+    for name, data in files:
+        file_ids[name] = set(re.findall(r'<aside[^>]*id="([^"]+)"', data.decode("utf-8")))
+    broken = []
+    for uid, body in rewritten_bodies:
+        for target, anchor in re.findall(r'href="([^"]+\.xhtml)#([^"]+)"', body):
+            if not target.startswith("appendix-"):
+                continue
+            if anchor not in file_ids.get(target, set()):
+                broken.append("%s -> %s#%s" % (uid, target, anchor))
+    note_ids = sum(len([i for i in ids if i.startswith("note-")])
+                   for name, ids in file_ids.items() if "notes" in name)
+    thought_ids = sum(len([i for i in ids if i.startswith("wrfn-")])
+                      for name, ids in file_ids.items() if "thoughts" in name)
+    if include_notes and note_ids != note_total:
+        broken.append("注条目数不一致：正文 %d，附录 %d" % (note_total, note_ids))
+    if include_thoughts and thought_ids != entry_total:
+        broken.append("想法条目数不一致：目录 %d，附录 %d" % (entry_total, thought_ids))
+    if broken:
+        raise AppendixError(
+            "附录校验失败（%d 处）：%s" % (len(broken), "；".join(broken[:5])))
 
     manifest_extra = {
         "appendix": {
