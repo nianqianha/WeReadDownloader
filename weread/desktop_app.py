@@ -378,6 +378,9 @@ class DesktopApp:
         # 失败要留得住：FAILED 行把友好原因存这里，选书/搜索都不会把它冲掉，
         # 直到用户重试或开始新任务。原实现只写一行状态，下一条输出就覆盖了。
         self.last_failure_status: str | None = None
+        # 「检查更新」在设置页按需创建；更新失败的回调可能先于那个页面存在，
+        # 所以先占位，使用处必须判断 None。
+        self.check_update_button = None
         # 搜索是否已经结束。卡片重绘时据此区分「还在加载」和「没拿到」：
         # 没有它，选中一本书触发的 _render_page() 会把已经降级的分类又变回
         # 「分类加载中…」，看起来像永远加载不出来。
@@ -1303,6 +1306,16 @@ class DesktopApp:
         btns.pack(fill="x", padx=18, pady=(8, 16))
         self._quiet_button(btns, "登录 / 切换账号", 136, self.open_login).pack(side="left")
         self._quiet_button(btns, "检查登录状态", 118, self.check_auth).pack(side="left", padx=(8, 0))
+        ctk.CTkFrame(card, height=1, fg_color=self.HAIRLINE).pack(fill="x", padx=18, pady=(14, 0))
+        ctk.CTkLabel(card, text="版本与更新", text_color=self.INK, anchor="w",
+                     font=_font(13, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
+        ctk.CTkLabel(card, text="当前版本 v%s。检查更新需要联网；覆盖安装会保留导出与登录信息。"
+                     % _version.APP_VERSION,
+                     text_color=self.FAINT, anchor="w", font=_font(12),
+                     wraplength=560, justify="left").pack(anchor="w", padx=18, pady=(2, 0))
+        self.check_update_button = self._quiet_button(
+            card, "检查更新", 110, self._check_for_update)
+        self.check_update_button.pack(anchor="w", padx=18, pady=(8, 16))
 
     def _ask(self, kind: str, title: str, message: str, **kwargs) -> str:
         """Run a modal dialog with the main window as its parent, and log it.
@@ -1387,7 +1400,12 @@ class DesktopApp:
         self.nav_items["划线清单"] = self._nav_item(nav, "划线清单", "≡",
                                                     command=lambda: self._switch_page("划线清单"))
 
-        ctk.CTkFrame(side, height=1, fg_color="#2A3646").pack(fill="x", padx=16, pady=8)
+        # 分隔线必须放进 nav，不能打进 side。打进 side 会在 nav 已经 expand 之后
+        # 再改它的高度：Tk 把行往上收，而 CustomTkinter 按钮内部画布不会跟着重排，
+        # 结果是「设置」这行画在旧位置、可点区域在新位置——实测点文字没反应，得在
+        # 文字上方约 30px 才点得到；点中之后这行又自己跳上去。留在 nav 里行高恒定，
+        # 绘制位置和命中区域就永远一致。
+        ctk.CTkFrame(nav, height=1, fg_color="#2A3646").pack(fill="x", padx=6, pady=8)
         self.nav_items["设置"] = self._nav_item(nav, "设置", "⚙",
                                                 command=lambda: self._switch_page("设置"))
 
@@ -1413,40 +1431,27 @@ class DesktopApp:
             text_color="#FFFFFF", font=_font(13))
         self.search_button.pack(side="left", pady=(0, 0))
 
-        self.auth_badge = ctk.CTkLabel(topbar, text="尚未检查", text_color=self.MUTED,
-                                       fg_color=self.SUNKEN, corner_radius=6,
-                                       padx=10, pady=5, font=_font(12))
-        self.auth_badge.pack(side="right", padx=(0, 24))
-        self.refresh_button = self._quiet_button(topbar, "刷新", 70, self.check_auth)
-        self.refresh_button.configure(height=32)
-        self.refresh_button.pack(side="right", padx=(0, 10))
-        self.login_button = ctk.CTkButton(
-            topbar, text="登录 / 切换账号", width=136, height=34,
-            corner_radius=6, fg_color=self.ACCENT,
-            hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
-            font=_font(13), command=self.open_login)
-        self.login_button.pack(side="right")
-        # 排队下载：把勾选的书加入队列 / 启动整列下载（方案A）。
-        self.enqueue_button = ctk.CTkButton(
-            topbar, text="加入队列", width=88, height=34,
-            corner_radius=6, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
-            text_color="#FFFFFF", font=_font(13), command=self._enqueue_checked)
-        self.enqueue_button.pack(side="right", padx=(0, 8))
-        # 队列不能只藏在状态栏里：常驻显示条数，点开可逐本移除/清空。
+        # 顶栏只留三件事：队列入口、账号、登录状态。原来「加入队列」「开始
+        # 队列下载」也挤在这里，加上登录/刷新/状态一共七个按钮，125% 缩放下
+        # 已经装不下（最后一个被压成 40 px 只露半个字），而且队列不是打开程序
+        # 就要做的事。现在：加入队列在搜索结果卡片上，开始下载在队列面板里。
         self.queue_button = self._quiet_button(topbar, "队列 0 本", 96, self._show_queue)
         self.queue_button.configure(height=32)
-        self.queue_button.pack(side="right", padx=(0, 8))
-        self.start_queue_button = ctk.CTkButton(
-            topbar, text="开始队列下载", width=118, height=34,
-            corner_radius=6, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
-            text_color="#FFFFFF", font=_font(13), command=self._start_queue)
-        self.start_queue_button.pack(side="right", padx=(0, 8))
-        # 应用内自更新：手动检查更新（静默查在启动后做一次，新版本且非忙时提示）。
-        self.check_update_button = ctk.CTkButton(
-            topbar, text="检查更新", width=88, height=34,
-            corner_radius=6, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
-            text_color="#FFFFFF", font=_font(13), command=self._check_for_update)
-        self.check_update_button.pack(side="right", padx=(0, 8))
+        self.queue_button.pack(side="right", padx=(0, 10))
+        # 账号按钮平时就是账号名；没登录时是「登录 / 切换账号」，点开扫码。
+        # 用描边按钮而不是整块实心绿：顶栏只该有一个视觉重点（搜索）。
+        self.login_button = self._quiet_button(
+            topbar, "登录 / 切换账号", 132, self.open_login)
+        self.login_button.configure(height=32)
+        self.login_button.pack(side="right", padx=(0, 10))
+        # 状态牌本身就是「重新检查」：点一下跑 check_auth。原来的「刷新」按钮
+        # 和这块状态牌说的是同一件事，两个控件留一个。
+        self.auth_badge = ctk.CTkButton(
+            topbar, text="尚未检查", width=92, height=32,
+            corner_radius=6, fg_color=self.SUNKEN, hover_color=self.ACCENT_TINT,
+            border_width=1, border_color="#D5D9DF",
+            text_color=self.MUTED, font=_font(12), command=self.check_auth)
+        self.auth_badge.pack(side="right", padx=(0, 24))
 
         # ---- page container ----------------------------------------------
         # Every sidebar entry owns one page frame stacked in page_host. The
@@ -1475,6 +1480,7 @@ class DesktopApp:
 
         head_row = ctk.CTkFrame(page, fg_color="transparent")
         head_row.pack(fill="x")
+        self.workshop_head = head_row
         ctk.CTkLabel(head_row, text="下载工坊", text_color=self.INK,
                      font=_font(18, "bold")).pack(side="left")
         self.result_count = ctk.CTkLabel(head_row, text="搜索结果会显示在这里",
@@ -1494,18 +1500,78 @@ class DesktopApp:
         # content height -- that is what squeezed the intro to 113 px even
         # after it learned to size itself.
         self.body.pack(fill="x", pady=(10, 0))
+        # grid_propagate(False)：不禁用的话 body 的高度由子控件的请求高度决定，
+        # configure(height=...) 根本不生效——窗口再高，卡片区也只长到内容那么高，
+        # 下半屏一直空着（实测 897 高窗口里剩 130px）。
+        self.body.grid_propagate(False)
         self.body.configure(height=420)
         self.body.grid_columnconfigure(0, weight=0)
         self.body.grid_columnconfigure(1, weight=1)
         self.body.grid_rowconfigure(0, weight=1)
+
+        # 内容要不要撑满窗口：窗口高时，固定 420 会在下面留一大片空白（实测
+        # 1920x1080 下约 130 px，像页面没加载完）。按窗口高度反算卡片区高度，
+        # 420 是下限；窗口矮时仍由外层滚动条接管。
+        #
+        # 只绑 root 的 <Configure>，并且只认 event.widget 是 root 的那次：
+        # 绑在 scrolling frame 上会形成「改高度 -> 重排 -> 又触发 Configure」
+        # 的循环，实测直接把解释器打崩（Segmentation fault）。
+        def _fit_body_to_window(_event=None):
+            head = getattr(self, "workshop_head", None)
+            panel = getattr(self, "export_panel", None)
+            if head is None or panel is None or getattr(self, "_fitting", False):
+                return
+            viewport = self.page_host.winfo_height()
+            if viewport <= 1:
+                return
+            self._fitting = True
+            # 卡片区 = 视口 - 标题行 - ③ 面板 - 两处 13px 间距 - 底部留白。
+            # 这些像素是物理像素，而 configure(height=) 吃的是逻辑像素，
+            # 125% 缩放下直接相减会大 25%，反而把页面撑出滚动条。
+            try:
+                scale = ctk.ScalingTracker.get_window_dpi_scaling(self.root) or 1.0
+            except Exception:
+                scale = 1.0
+            available = (viewport - head.winfo_height()
+                         - panel.winfo_height() - 36) / scale
+            target = int(max(340, available))
+            try:
+                current = int(self.body.cget("height"))
+            except (TypeError, ValueError):
+                current = 0
+            try:
+                if abs(current - target) > 8:
+                    self.body.configure(height=target)
+            finally:
+                self._fitting = False
+
+        def _on_root_configure(event):
+            if event.widget is self.root:
+                _fit_body_to_window()
+        self.root.bind("<Configure>", _on_root_configure)
 
         left = ctk.CTkFrame(self.body, fg_color=self.CARD, corner_radius=self.RADIUS,
                             border_width=1, border_color=self.HAIRLINE, width=380)
         left.grid(row=0, column=0, sticky="nsw", padx=(0, 14))
         left.pack_propagate(False)
         self._section(left, "①", "搜索结果", padx=18, pady=10)
+        # 排队入口放在结果卡片里，跟着「勾选」走：勾了几本这里就有几本，
+        # 没勾选时是灰的。顶栏不再为它单独占一个按钮。
+        queue_row = ctk.CTkFrame(left, fg_color="transparent")
+        queue_row.pack(fill="x", padx=18, pady=(4, 2))
+        self.queue_row = queue_row
+        ctk.CTkLabel(queue_row, text="勾选多本可排队下载", text_color=self.FAINT,
+                     font=_font(11)).pack(side="left")
+        self.queue_add_button = self._quiet_button(
+            queue_row, "加入队列 0 本", 112, self._enqueue_checked)
+        self.queue_add_button.configure(height=26, state="disabled")
+        self.queue_add_button.pack(side="right")
+        # height=120 是"请求高度"不是最终高度（下面 expand 会吃掉剩余空间）。
+        # 默认 200 会在矮窗口里把底部的翻页条挤出可视区：pack 先满足先入队的
+        # 控件，列表请求太高，后打包的 page_bar 只剩 1x1（测试里实测 4 页结果
+        # 时翻页条消失）。
         self.results = ctk.CTkScrollableFrame(
-            left, fg_color=self.CARD, corner_radius=0,
+            left, fg_color=self.CARD, corner_radius=0, height=120,
             scrollbar_button_color=self.HAIRLINE, scrollbar_button_hover_color=self.ACCENT_TINT)
         self.results.pack(fill="both", expand=True, padx=(10, 6), pady=(0, 4))
 
@@ -1515,7 +1581,12 @@ class DesktopApp:
         # thread, and a second search adds ~1 s destroying the old cards --
         # together enough for Windows to declare the window unresponsive.
         self.page_bar = ctk.CTkFrame(left, fg_color="transparent")
-        self.page_bar.pack(side="bottom", fill="x", padx=18, pady=(0, 10))
+        # after=self.queue_row：pack 按打包顺序分空间，翻页条要排在会 expand
+        # 的结果列表之前，否则列表的请求高度会把底部条挤成 1x1（4 页结果时
+        # 翻页条直接消失）。不能写 before=self.results——CTkScrollableFrame
+        # 的 pack 转给了内部 canvas，Tk 认为它没被 packed。
+        self.page_bar.pack(side="bottom", fill="x", padx=18, pady=(0, 10),
+                            after=self.queue_row)
         self.prev_button = self._quiet_button(
             self.page_bar, "上一页", 84, lambda: self._turn_page(-1))
         self.prev_button.pack(side="left")
@@ -1564,6 +1635,15 @@ class DesktopApp:
                                      font=_font(11, "normal", MONO), anchor="w")
         self.id_label.pack(fill="x", pady=(1, 0))
 
+        # 写死的 wraplength 在 125% 缩放下会比列本身还宽（540 * 1.25 = 675，
+        # 实际列宽约 555），「分类 · 出版社」那行于是被右边缘截断——实测显示成
+        # 「出版社: 中信出版集团 · 出」。按实际列宽重新设，窗口拉宽拉窄都跟着变。
+        def _fit_meta_wrap(event):
+            width = max(200, event.width - 8)
+            for label in (self.book_title_label, self.author_label, self.category_label):
+                label.configure(wraplength=width)
+        meta.bind("<Configure>", _fit_meta_wrap)
+
         ctk.CTkFrame(right, height=1, fg_color=self.HAIRLINE_SOFT).pack(fill="x", padx=20, pady=(9, 0))
         ctk.CTkLabel(right, text="简介", text_color=self.FAINT, height=1,
                      font=_font(12)).pack(anchor="w", padx=20, pady=(6, 2))
@@ -1587,6 +1667,10 @@ class DesktopApp:
         export = ctk.CTkFrame(page, fg_color=self.CARD, corner_radius=self.RADIUS,
                               border_width=1, border_color=self.HAIRLINE)
         export.pack(fill="x", pady=(10, 0))
+        self.export_panel = export
+        # ③ 面板的高度在运行中会变（状态文字换行、按钮行出现），只在窗口
+        # Configure 时算一次，面板一变高就把底部按钮挤出可视区。
+        export.bind("<Configure>", _fit_body_to_window)
         export.grid_columnconfigure(0, weight=0)
         self._section(export, "③", "下载到电脑",
                       grid_at={"row": 0, "column": 0, "columnspan": 1, "sticky": "w",
@@ -1746,6 +1830,12 @@ class DesktopApp:
         # No log panel in the window: it duplicated the "查看技术日志" button
         # and cost the space the book introduction actually needs. Worker lines
         # still go to the log file via _log()/_persist_log().
+        #
+        # 首帧之后补一次卡片区高度：Configure 只在窗口尺寸变化时来，启动时
+        # 窗口已经定好尺寸，不补这一次就仍是 420 的默认值、下半屏照样空着。
+        # 用 after(250) 而不是 after_idle：idle 会和首次布局抢同一次 update，
+        # 在测试里会把翻页条这类控件的映射推迟一轮。
+        self.root.after(250, _fit_body_to_window)
 
     @staticmethod
     def _make_combo_keyboard_reachable(box):
@@ -2322,7 +2412,14 @@ class DesktopApp:
                         # The title leads with the OUTCOME, not the gap: this is a succeeded
                         # download with notes, not a failure. The first title read as a
                         # failure and sent the user hunting for an error that does not exist.
-                        self._ask("showinfo", "下载成功（附说明）", notice)
+                        # 队列运行时不能弹模态：_ask() 会阻塞 Tk 主循环，而队列续跑
+                        # 就写在这个分支之后——实测一本下完弹出这条说明，队列停在
+                        # 「运行中」，下一本永远不开始。说明写进日志和状态栏即可。
+                        if self.queue_running:
+                            self._persist_log("[OMISSIONS] %s | %s"
+                                              % (self.selected_title, notice))
+                        else:
+                            self._ask("showinfo", "下载成功（附说明）", notice)
                     else:
                         self.status.set("下载完成，这本已收工。换下一本：在左侧搜索另一本书并点击即可。")
                 elif self.last_unresolved:
@@ -2472,7 +2569,8 @@ class DesktopApp:
         if total <= 1:
             self.page_bar.pack_forget()
         else:
-            self.page_bar.pack(side="bottom", fill="x", padx=20, pady=(0, 10))
+            self.page_bar.pack(side="bottom", fill="x", padx=20, pady=(0, 10),
+                                after=self.queue_row)
 
     def _turn_page(self, delta: int) -> None:
         target = self.page_index + delta
@@ -2481,6 +2579,36 @@ class DesktopApp:
         self.page_index = target
         self._render_page()
         self.status.set(f"已切换到第 {target + 1} / {self._page_count()} 页。")
+
+    def _restyle_selection(self) -> None:
+        """把选中态刷到当前页的卡片上，不重建任何控件。
+
+        _render_page() 会把整页卡片连同封面、分类、评分一起重建，点一次书
+        就闪一遍占位态。选中态只是两处颜色：卡片底色和左侧 3px 绿条。
+        """
+        for bid, widgets in self.card_widgets.items():
+            chosen = bid == self.selected_id
+            frame = widgets.get("frame")
+            bar = widgets.get("bar")
+            if frame is not None:
+                try:
+                    frame.configure(fg_color=self.GREEN_TINT if chosen else self.CARD)
+                except Exception:
+                    pass
+            if bar is not None:
+                try:
+                    bar.configure(fg_color=self.ACCENT if chosen else "transparent")
+                except Exception:
+                    pass
+
+    def _hover_card(self, book_id: str, card, entering: bool) -> None:
+        """Card hover, except on the selected row (its wash must not flicker)."""
+        if book_id == self.selected_id:
+            return
+        try:
+            card.configure(fg_color=self.SUNKEN if entering else self.CARD)
+        except Exception:
+            pass
 
     def _render_page(self) -> None:
         """Rebuild the card widgets for the current page.
@@ -2494,6 +2622,7 @@ class DesktopApp:
         for item in self._page_slice():
             self._build_book_card(item)
         self._set_page_buttons(self.page_index, self._page_count())
+        self._refresh_queue_add()
 
     def _add_book_card(self, item: dict):
         """Record a search result, paging the list if it grew past the page."""
@@ -2588,12 +2717,13 @@ class DesktopApp:
 
         for widget in (card, inner, cover, text_col, *text_col.winfo_children()):
             widget.bind("<Button-1>", choose)
-        if not selected:
-            card.bind("<Enter>", lambda _e, w=card: w.configure(fg_color=self.SUNKEN))
-            card.bind("<Leave>", lambda _e, w=card: w.configure(fg_color=self.CARD))
+        chosen = bid == self.selected_id
+        if not chosen:
+            card.bind("<Enter>", lambda _e, w=card, b=bid: self._hover_card(b, w, True))
+            card.bind("<Leave>", lambda _e, w=card, b=bid: self._hover_card(b, w, False))
 
-        self.card_widgets[bid] = {"frame": card, "cover": cover, "category": category_label,
-                                  "image": None}
+        self.card_widgets[bid] = {"frame": card, "bar": bar, "cover": cover,
+                                  "category": category_label, "image": None}
         self._request_card_cover(bid, str(item.get("cover") or "").strip())
 
     def _request_card_cover(self, book_id: str, url: str):
@@ -2643,9 +2773,13 @@ class DesktopApp:
         self.result_rows.clear()
         self.page_index = 0
         self._set_page_buttons(0, 0)
+        self._refresh_queue_add()
         self.search_done = False
         self.result_count.configure(text="正在搜索微信读书…")
         self.status.set("正在搜索。稍等片刻，结果会出现在左侧。")
+        # 结果只出现在「下载工坊」。在设置/书架页搜索时，不切回去的话用户会
+        # 盯着原地不动的一页，以为搜索没反应。
+        self._switch_page("下载工坊")
         started = False
         try:
             started = self._start_worker(["--search", keyword], "search", "正在搜索…")
@@ -2656,7 +2790,16 @@ class DesktopApp:
             self.status.set("搜索没有启动。请查看技术日志后重试。")
 
     def _select_book(self, item, load_info: bool = True):
-        self.selected_id = str(item.get("bookId", ""))
+        new_id = str(item.get("bookId", ""))
+        # 点已经选中的那本：不要重排卡片、也不要再起一次读详情的 worker。
+        # 原来每次点击都 _render_page() 重建整列卡片并重读详情，封面和分类
+        # 一格格「加载中→已加载」闪一遍，点几下就像页面在反复刷新。
+        if load_info and new_id and new_id == self.selected_id and (
+                self.info_loaded or self.pending_book is not None):
+            if not self.last_failure_status:
+                self.status.set("已选择《%s》。" % (self.selected_title or ""))
+            return
+        self.selected_id = new_id
         self.selected_title = str(item.get("title", ""))
         self.selected_author = str(item.get("author", ""))
         self.book_info = dict(item)
@@ -2673,10 +2816,9 @@ class DesktopApp:
             self.status.set(self.last_failure_status)
         else:
             self.status.set("已选择新书：%s。加载详情后即可下载。" % (self.selected_title or ""))
-        # Repaint the page so the selected row carries the reference design's
-        # green bar and wash. Only rows on the current page exist as widgets;
-        # _render_page rebuilds exactly those, cheaply.
-        self._render_page()
+        # 只重刷选中态（绿条 + 淡绿底），不重建卡片：重建会让封面、分类、
+        # 评分全部先回到占位状态再填回来。
+        self._restyle_selection()
         self.book_title_label.configure(text=self.selected_title or "暂无书名")
         self.author_label.configure(text=f"作者：{self.selected_author or '暂无信息'}")
         self.id_label.configure(text=f"书籍 ID：{self.selected_id or '暂无信息'}")
@@ -2708,11 +2850,13 @@ class DesktopApp:
         self._start_book_info(item)
 
     def _start_book_info(self, item: dict) -> bool:
-        self.category_label.configure(text="正在读取分类、评分、简介和封面…")
+        # 占位只留一句最轻的提示：原来分类/评分/封面/简介四行同时切成「加载中」，
+        # 数据回来后又一格格填回，点一次书就像整页刷新了一遍。
+        self.category_label.configure(text="正在读取详情…")
         self.rating_label.configure(text="")
-        self.cover.configure(text="加载封面…", image=None)
+        self.cover.configure(text="", image=None)
         self.cover_image = None
-        self._set_intro("正在读取书籍简介…")
+        self._set_intro("正在读取简介…")
         self.status.set("已选择书籍，正在加载详情。")
         started = False
         try:
@@ -3342,6 +3486,7 @@ class DesktopApp:
         书照样会下载——用户勾错了也拦不住。
         """
         title = self.book_rows.get(book_id, {}).get("title", book_id)
+        self._refresh_queue_add()
         if self._card_checks.get(book_id, tk.BooleanVar()).get():
             self._queue_skipped.discard(book_id)
             self.status.set("已勾选《%s》，点「加入队列」开始排队。" % title)
@@ -3359,6 +3504,15 @@ class DesktopApp:
                             % (title, len(self.download_queue)))
         else:
             self.status.set("已取消勾选《%s》。" % title)
+
+    def _refresh_queue_add(self) -> None:
+        """结果卡片上那个「加入队列 N 本」跟着勾选数走，0 本就置灰。"""
+        button = getattr(self, "queue_add_button", None)
+        if button is None:
+            return
+        count = len(self._selected_books_by_check())
+        button.configure(text="加入队列 %d 本" % count,
+                         state="normal" if count else "disabled")
 
     def _status_all_skipped(self) -> None:
         self.pause_button.configure(text="暂停下载", state="disabled")
@@ -3409,9 +3563,14 @@ class DesktopApp:
         dialog.transient(self.root)
         dialog.resizable(False, False)
         dialog.grab_set()
-        body = ctk.CTkScrollableFrame(dialog, width=460, height=260,
+        # 高度跟着书数走：固定 260 时队列只有 1 本也拉出一个大空白框，
+        # 看起来像内容没加载出来。4 本以内正好贴边，更多才滚动。
+        rows_height = min(260, 22 + 46 * len(self.download_queue))
+        body = ctk.CTkScrollableFrame(dialog, width=460, height=rows_height,
                                       fg_color=self.CARD, corner_radius=0)
-        body.pack(fill="both", expand=True, padx=14, pady=(14, 6))
+        # expand=False：让对话框按内容收缩。之前 expand=True 会把滚动区拉满
+        # 整个 Toplevel，1 本书也是一个大白框。
+        body.pack(fill="both", padx=14, pady=(14, 6))
         for index, book in enumerate(list(self.download_queue), 1):
             row = ctk.CTkFrame(body, fg_color="transparent")
             row.pack(fill="x", pady=2)
@@ -3426,10 +3585,21 @@ class DesktopApp:
         row.pack(fill="x", padx=14, pady=(0, 14))
         self._quiet_button(row, "清空队列", 96,
                            lambda: (self._clear_queue(), dialog.destroy())).pack(side="left")
-        ctk.CTkButton(row, text="关闭", width=80, height=34, corner_radius=6,
-                      fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
-                      text_color="#FFFFFF", font=_font(12),
-                      command=dialog.destroy).pack(side="right")
+        self._quiet_button(row, "关闭", 80, dialog.destroy).pack(side="right")
+        # 「开始队列下载」放在这里：它是队列自己的动作，和队列列表在一起，
+        # 不用在顶栏再占一个位置。运行中显示为不可点，暂停时变「继续队列」。
+        if self.queue_running:
+            start_text, start_cmd, start_state = "下载中…", None, "disabled"
+        elif self.queue_paused:
+            start_text, start_cmd, start_state = "继续队列", self._resume_queue, "normal"
+        else:
+            start_text, start_cmd, start_state = "开始队列下载", self._start_queue, "normal"
+        start_button = ctk.CTkButton(
+            row, text=start_text, width=124, height=34, corner_radius=6,
+            fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
+            font=_font(12), state=start_state,
+            command=(lambda: (dialog.destroy(), start_cmd())) if start_cmd else None)
+        start_button.pack(side="right", padx=(0, 8))
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
         dialog.update_idletasks()
         dialog.geometry("+%d+%d" % (
@@ -3452,8 +3622,9 @@ class DesktopApp:
             existing.add(bid)
             added += 1
         self._refresh_queue_button()
+        self._refresh_queue_add()
         if added:
-            self.status.set("已加入队列 %d 本，共 %d 本待下载。点「开始队列下载」开始。"
+            self.status.set("已加入队列 %d 本，共 %d 本待下载。点顶栏「队列」查看并开始。"
                             % (added, len(self.download_queue)))
         else:
             self.status.set("没有新增可加入队列的书（可能已加入或没有勾选）。")
@@ -3565,7 +3736,8 @@ class DesktopApp:
     def _download_and_apply(self, latest: dict) -> None:
         """下载 Setup.exe 到临时目录并拉起覆盖安装。后台线程跑，避免卡 UI。"""
         self.status.set("正在下载 v%s 安装包…" % latest["version"])
-        self.check_update_button.configure(state="disabled")
+        if self.check_update_button is not None:
+            self.check_update_button.configure(state="disabled")
 
         def run():
             path = _updater.download_setup(latest["setup_url"])
@@ -3580,7 +3752,8 @@ class DesktopApp:
         threading.Thread(target=run, daemon=True).start()
 
     def _on_update_failed(self, message: str) -> None:
-        self.check_update_button.configure(state="normal")
+        if self.check_update_button is not None:
+            self.check_update_button.configure(state="normal")
         self.status.set(message)
         self._ask("showerror", "更新失败", message)
 
@@ -3617,8 +3790,7 @@ class DesktopApp:
         """
         state = "disabled" if busy else "normal"
         for name in ("search_button", "probe_button", "export_button",
-                     "start_queue_button", "enqueue_button",
-                     "login_button", "refresh_button"):
+                     "queue_add_button", "login_button"):
             button = getattr(self, name, None)
             if button is None:
                 continue
@@ -3626,6 +3798,9 @@ class DesktopApp:
                 button.configure(state=state)
             except Exception:
                 pass
+        # 队列按钮不跟着置灰：下载中打开队列看看还剩几本是合理的。
+        if not busy:
+            self._refresh_queue_add()
 
     def _on_pause_click(self):
         if self.queue_paused:

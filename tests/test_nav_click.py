@@ -147,6 +147,33 @@ def test_the_selected_row_shows_the_active_look():
         root.destroy()
 
 
+@test
+def test_no_row_is_packed_after_the_expanding_nav_frame():
+    """Nothing may be added to the rail after the expanding nav frame.
+
+    Packing the divider into `side` after `nav` (which is expand=True) resizes
+    the nav frame once the rows already exist. Tk slides the rows up on the next
+    idle pass, but each CTkButton's internal canvas keeps painting where it was:
+    on 1.0.5 the 设置 row drew ~30 px below its own hitbox, so clicking the
+    words did nothing and clicking the empty space above them worked. Keeping
+    every row and the divider inside `nav` makes the frame's height final before
+    any row exists, so paint position and hit region cannot diverge.
+    """
+    root, inst = _make_instance()
+    try:
+        nav = inst.nav_items["设置"].master
+        side = nav.master
+        children = side.winfo_children()
+        after = children[children.index(nav) + 1:]
+        assert not after, (
+            "%d widget(s) packed into the sidebar after the nav rows; the row "
+            "geometry will shift after painting" % len(after))
+        for name, item in inst.nav_items.items():
+            assert item.master is nav, "%s is not a direct child of the nav frame" % name
+    finally:
+        root.destroy()
+
+
 def main() -> int:
     failures = 0
     for fn in ALL:

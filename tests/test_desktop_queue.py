@@ -313,6 +313,77 @@ def test_unchecking_a_running_queue_book_skips_it():
         app.messagebox.askyesno, app.messagebox.showinfo = original
 
 
+def test_the_add_button_follows_the_checked_count():
+    """结果卡片上的「加入队列 N 本」跟着勾选数走，0 本时不可点。
+
+    顶栏原来有独立的「加入队列」「开始队列下载」两个按钮，加上登录/刷新/状态
+    一共七个，125% 缩放下最后一个被压成半个字。队列入口收进结果卡片后，这个
+    计数按钮就是唯一的入口，状态不能和勾选脱节。
+    """
+    import tkinter
+    root, instance = _make_gui()
+    try:
+        instance.result_rows = [_row("111", "书一")]
+        checked = tkinter.BooleanVar(value=False)
+        instance._card_checks = {"111": checked}
+
+        instance._refresh_queue_add()
+        assert instance.queue_add_button.cget("state") == "disabled"
+        assert "0 本" in instance.queue_add_button.cget("text")
+
+        checked.set(True)
+        instance._on_card_check("111")
+        assert instance.queue_add_button.cget("state") == "normal"
+        assert "1 本" in instance.queue_add_button.cget("text")
+
+        checked.set(False)
+        instance._on_card_check("111")
+        assert instance.queue_add_button.cget("state") == "disabled"
+    finally:
+        root.destroy()
+
+
+def test_a_queue_does_not_stall_on_the_omission_dialog():
+    """队列里一本下完带「略去部分」说明时，不能弹模态把队列卡住。
+
+    实机 1.0.5：三字经 下完弹出「下载成功（附说明）」，队列按钮停在
+    「运行中」，下一本不再开始——_ask() 会阻塞 Tk 主循环，而续跑代码就写在
+    这行弹窗之后。队列无人值守，说明进日志和状态栏即可。
+    """
+    import tkinter
+    root, instance = _make_gui()
+    calls = []
+    asked = []
+    original = _mock_dialogs(instance)
+    real_ask = instance._ask
+    instance._ask = lambda *a, **k: asked.append(a[1] if len(a) > 1 else "") or "yes"
+    old_notice = app.describe_omissions
+    app.describe_omissions = lambda om, compact=False: "1 条划线没有定位，已略去。"
+    try:
+        _spy_start(instance, calls)
+        instance.result_rows = [_row("111", "书一"), _row("222", "书二")]
+        instance._card_checks = {
+            "111": tkinter.BooleanVar(value=True),
+            "222": tkinter.BooleanVar(value=True),
+        }
+        instance._enqueue_checked()
+        instance._start_queue()
+        instance._spawn_pending = True
+
+        instance.omissions = {"unplaced_underline_total": 1}
+        instance.events.put(("done", (instance.job_seq, 0)))
+        instance._drain_events()
+
+        assert not any("附说明" in title for title in asked), (
+            "队列运行时弹了模态：%r" % (asked,))
+        assert [k for _a, k in calls].count("export") == 2, (
+            "第一本下完后队列没有继续：%r" % (calls,))
+    finally:
+        app.describe_omissions = old_notice
+        root.destroy()
+        app.messagebox.askyesno, app.messagebox.showinfo = original
+
+
 def test_a_failed_queue_book_is_reported_not_called_all_done():
     """队列里有书没完成时，结束语必须说出来，不能显示"全部完成"。"""
     root, instance = _make_gui()

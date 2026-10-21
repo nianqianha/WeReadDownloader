@@ -397,16 +397,16 @@ def test_failed_book_info_request_restores_detail_placeholders():
         row = _search_row()
         instance._select_book(row)
         job = instance.job_seq
-        assert instance.category_label.cget("text") == "正在读取分类、评分、简介和封面…"
+        assert instance.category_label.cget("text") == "正在读取详情…"
 
         instance.events.put(("line", "FAILED RuntimeError: WeRead gateway error for /store/book?bookId=1: -1"))
         instance.events.put(("done", (job, 1)))
         instance._drain_events()
 
-        assert instance.category_label.cget("text") != "正在读取分类、评分、简介和封面…"
+        assert instance.category_label.cget("text") != "正在读取详情…"
         assert "分类：男生小说-游戏竞技" in instance.category_label.cget("text")
         assert instance.rating_label.cget("text") == "评分：8.88 / 10  ·  23718 人评分"
-        assert "正在读取书籍简介" not in instance.intro.get("1.0", "end")
+        assert "正在读取简介" not in instance.intro.get("1.0", "end")
         assert "微信读书服务暂时返回异常" in instance.status.get()
     finally:
         root.destroy()
@@ -513,6 +513,9 @@ def test_epoch_publish_time_is_treated_as_unknown():
     # A real date still shows, and empty stays absent.
     assert app.book_detail_lines({"category": "玄幻", "publishTime": "2019-03-01"}) == \
         ["分类：玄幻", "出版时间：2019-03-01"]
+    # 接口常带零点时间：只留日期，否则「出版时间」太长，整行被挤成两行。
+    assert app.book_detail_lines({"publishTime": "2018-04-01 00:00:00"}) == \
+        ["出版时间：2018-04-01"]
     assert app.book_detail_lines({"publishTime": ""}) == ["分类/出版社：暂无信息"]
 
 

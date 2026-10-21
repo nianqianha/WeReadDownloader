@@ -188,7 +188,12 @@ def book_detail_lines(data: dict) -> list[str]:
         value = data.get(key)
         if _is_missing_detail(value):
             continue
-        details.append(f"{label}：{str(value).strip()}")
+        text = str(value).strip()
+        if key == "publishTime":
+            # 接口给的是 "2018-04-01 00:00:00"，年份后面那串零点对读者没意义，
+            # 而且它足够长，会把「分类 · 出版社 · 出版时间」挤成两行。
+            text = text.split()[0]
+        details.append(f"{label}：{text}")
     return details or ["分类/出版社：暂无信息"]
 
 

@@ -25,6 +25,9 @@ class ShelfFailuresTests(unittest.TestCase):
         self.app._show_shelf_error = self.error
         self.app._finish_failed_action = lambda action: namespace["_finish_failed_action"](self.app, action)
         self.app._set_busy_controls = lambda busy: namespace["_set_busy_controls"](self.app, busy)
+        # _set_busy_controls 解除忙碌时会刷新结果卡片上的「加入队列 N 本」；
+        # 本用例测的是书架失败路径，队列那一栏不参与。
+        self.app._refresh_queue_add = Mock()
         self.namespace = namespace
 
     def test_worker_failure_replaces_the_loading_state(self):
