@@ -295,6 +295,30 @@ WeReadWorker.exe (CLI 引擎)
   `OEBPS/text/style.css`，阅读器里 `.wr-ap-*` 全部失效（章节标题没有分隔线、回链不是蓝色）。
   改为 `../style.css`，与正文页一致。**注意：这让输出与参考书不再逐字节相同，是有意修正。**
 
+**Fixed（真机实测发现）两个只在安装包里才暴露的缺陷**
+
+1. **打包漏模块**：`export_book()` 在 `if unified_appendix:` 分支里才
+   `from unified_appendix import ...`，PyInstaller 静态分析看不见，`WeReadWorker.spec`
+   的 hiddenimports 也没写。结果：汉书 171 章全部下完、到打包阶段才
+   `ModuleNotFoundError: No module named 'unified_appendix'`。已在 spec 里显式声明。
+2. **队列在失败时不续跑**：续跑代码写在 `elif action == "export"` 分支里，而失败会走
+   最前面的 `if self.last_failure` 分支，永远到不了那段——汉书失败后队列里的三字经
+   一直没开始。已把续跑移到 else 链之外，`action == "export"` 且 `queue_running` 时
+   无论成败都接下一本，并在状态里注明"上一本未完成，断点已保留"。
+   同时修正 `queue_running` 的收尾时机：最后一本还在跑时保持 True，跑完才置 False
+   并显示"队列已全部完成"（原来的写法在 pop 完最后一本时立刻置 False，完成提示
+   永远不会出现）。
+
+**真机验证（Windows，安装包 1.0.5）**
+
+- 全程用 GUI 点击：搜索「汉书」→ 选中 → 勾选「加入队列」→ 搜「三字经」→ 勾选 →
+  加入队列 → 开始队列下载 → 确认。
+- 汉书 171/171 章下载完成，打包成功：21 册注（69,322 条）+ 1 册想法（6,815 条），
+  EPUB 198 MB，`text_complete: true`，附录样式 `../style.css`。
+- 汉书成功后队列自动接三字经（复用缓存，34 条想法），界面最终显示「队列已全部完成」。
+- 安装与凭证：覆盖安装不动 `%LOCALAPPDATA%\WeReadDesktop`，两个凭证文件原样保留，
+  已安装的 worker `--check-auth` 输出 `AUTH_OK`。
+
 **验证**
 
 - `tests/test_desktop_annotation_modes.py` 重写：三档 × probe/export 的参数断言、

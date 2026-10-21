@@ -2260,19 +2260,20 @@ class DesktopApp:
                     self.status.set("扫描到末尾，但有章节数据不完整；没有生成不完整 EPUB。点击“查看技术日志”查看具体章节。")
                 else:
                     self.status.set("下载暂时停止；已完成章节已保存，可稍后点“继续下载”。")
-                # 队列：当前这本结束（成功/暂停在断点）后，自动起下一本。
-                # per-book 锁互不冲突，串行续跑即可；失败也继续，不把队列卡死。
-                # 注意：用两个独立的 if，不能用 if/elif。pop 最后一本书会让
-                # download_queue 在 if 块内变空，若用 elif 则不会再被求值，
-                # 导致 queue_running 永远停在 True。
-                if self.queue_running and self.download_queue:
+            # 队列：一本结束就起下一本——成功、暂停、失败都算结束。原实现把这段
+            # 写在 elif action == "export" 里，而失败会走最前面的
+            # `if self.last_failure` 分支，永远到不了这里：实测 汉书 打包失败后，
+            # 队列里的 三字经 一直没开始，界面停在失败提示上。
+            if action == "export" and self.queue_running:
+                if self.download_queue:
                     nxt = self.download_queue.pop(0)
-                    self.status.set("队列继续：开始下载《%s》（剩余 %d 本）。"
+                    reason = "；上一本未完成，断点已保留" if self.last_failure else ""
+                    self.status.set("队列继续：开始下载《%s》（剩余 %d 本%s）。"
                                     % (nxt.get("title") or nxt.get("bookId", ""),
-                                       len(self.download_queue)))
-                    self._select_book(nxt)
+                                       len(self.download_queue), reason))
+                    self._select_book(nxt, load_info=False)
                     self._start_one(nxt)
-                if self.queue_running and not self.download_queue:
+                else:
                     self.queue_running = False
                     self.status.set("队列已全部完成。")
         finally:
@@ -2540,7 +2541,7 @@ class DesktopApp:
             self.result_count.configure(text="搜索没有启动；请稍后再试")
             self.status.set("搜索没有启动。请查看技术日志后重试。")
 
-    def _select_book(self, item):
+    def _select_book(self, item, load_info: bool = True):
         self.selected_id = str(item.get("bookId", ""))
         self.selected_title = str(item.get("title", ""))
         self.selected_author = str(item.get("author", ""))
@@ -2561,6 +2562,18 @@ class DesktopApp:
         self.book_title_label.configure(text=self.selected_title or "暂无书名")
         self.author_label.configure(text=f"作者：{self.selected_author or '暂无信息'}")
         self.id_label.configure(text=f"书籍 ID：{self.selected_id or '暂无信息'}")
+        if not load_info:
+            # 队列路径：调用方紧接着就要起下载 worker。这里若再起一个「读详情」
+            # 的 worker，_start_worker() 会看到 _is_busy() 为真而直接返回 False，
+            # 队列就此静默失败（实测：点「开始队列下载」后状态停在「书籍详情已
+            # 加载」，下载中一直是 0）。详情留给下载完成后自己刷新，不为它排队。
+            self.pending_book = None
+            self.category_label.configure(text="下载开始后加载")
+            self.rating_label.configure(text="")
+            self.cover.configure(text="", image=None)
+            self.cover_image = None
+            self._set_intro("下载开始后显示简介。")
+            return
         if self._is_busy():
             self.pending_book = dict(item)
             self.category_label.configure(text="详情已排队，当前任务结束后自动加载")
@@ -3272,7 +3285,7 @@ class DesktopApp:
             return
         self.queue_running = True
         first = self.download_queue.pop(0)
-        self._select_book(first)
+        self._select_book(first, load_info=False)
         self._start_one(first)
 
     def export(self):

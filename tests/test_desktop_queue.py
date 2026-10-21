@@ -103,7 +103,7 @@ def test_queue_auto_continues_after_first_book_done():
         assert len(instance.download_queue) == 2
 
         # 启动队列：队首 111 应被 pop 并起 export worker。
-        # （注：_select_book 还会顺带触发一次 --book-info，属既有行为，不计入断言。）
+        # 不能顺带触发 --book-info：真机上那会让 _start_worker 看到「忙」而静默失败。
         instance._start_queue()
         assert instance.queue_running is True
         export_calls = [a for a, k in calls if k == "export"]
@@ -118,12 +118,74 @@ def test_queue_auto_continues_after_first_book_done():
         export_calls = [a for a, k in calls if k == "export"]
         assert export_calls == [["111", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both"],
                                 ["222", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both"]], calls
-        # 队列已空且标记结束
+        # 队列空了，但最后一本还在跑：queue_running 要等它结束才置 False，
+        # 否则「队列已全部完成」永远不会显示。
         assert instance.download_queue == []
+        assert instance.queue_running is True
+
+        # 最后一本也结束 → 队列收尾
+        instance.events.put(("done", (instance.job_seq, 0)))
+        instance._drain_events()
         assert instance.queue_running is False
     finally:
         app.messagebox.askyesno, app.messagebox.showinfo = original
         root.destroy()
+
+
+def test_queue_start_spawns_only_the_export_worker():
+    """队列起第一本时只能起 export，不能再插一个 --book-info。
+
+    真机实测的故障：_start_queue 先 _select_book()（它会起一个读详情的 worker），
+    紧接着 _start_one() 调 _start_worker() 时 _is_busy() 为真，于是直接返回 False——
+    点「开始队列下载」后状态停在「书籍详情已加载」，下载中一直是 0。
+    """
+    root, instance = _make_gui()
+    calls = []
+    original = _mock_dialogs(instance)
+    try:
+        _spy_start(instance, calls)
+        instance.result_rows = [_row("111", "书一")]
+        instance._card_checks = {"111": __import__("tkinter").BooleanVar(value=True)}
+        instance._enqueue_checked()
+        instance._start_queue()
+        assert [k for _a, k in calls] == ["export"], calls
+    finally:
+        root.destroy()
+        app.messagebox.askyesno, app.messagebox.showinfo = original
+
+
+def test_queue_continues_after_a_failed_book():
+    """一本下载失败也要接着跑下一本，队列不能卡在失败上。
+
+    真机实测：汉书 171 章下完、打包阶段失败，队列里的 三字经 一直没开始。
+    原因是续跑代码写在 `elif action == "export"` 里，而失败走的是最前面的
+    `if self.last_failure` 分支，永远到不了那段。
+    """
+    root, instance = _make_gui()
+    calls = []
+    original = _mock_dialogs(instance)
+    try:
+        _spy_start(instance, calls)
+        instance.result_rows = [_row("111", "书一"), _row("222", "书二")]
+        instance._card_checks = {
+            "111": __import__("tkinter").BooleanVar(value=True),
+            "222": __import__("tkinter").BooleanVar(value=True),
+        }
+        instance._enqueue_checked()
+        instance._start_queue()
+
+        # 第一本失败退出
+        instance.last_failure = True
+        instance.last_unresolved = False
+        instance.events.put(("done", (instance.job_seq, 1)))
+        instance._drain_events()
+
+        export_calls = [a for a, k in calls if k == "export"]
+        assert [c[0] for c in export_calls] == ["111", "222"], calls
+        assert instance.selected_id == "222"
+    finally:
+        root.destroy()
+        app.messagebox.askyesno, app.messagebox.showinfo = original
 
 
 def test_queue_continues_through_partial_stop():
