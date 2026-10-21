@@ -245,6 +245,100 @@ def test_a_category_that_never_arrived_is_recorded_not_left_loading():
         root.destroy()
 
 
+def test_pausing_a_queue_stops_there_instead_of_skipping_ahead():
+    """队列里暂停 = 停当前这本、队列原地不动（书插回队首）。"""
+    root, instance = _make_gui()
+    calls = []
+    original = _mock_dialogs(instance)
+    try:
+        _spy_start(instance, calls)
+        instance.result_rows = [_row("111", "书一"), _row("222", "书二")]
+        instance._card_checks = {
+            "111": __import__("tkinter").BooleanVar(value=True),
+            "222": __import__("tkinter").BooleanVar(value=True),
+        }
+        instance._enqueue_checked()
+        instance._start_queue()
+        instance._spawn_pending = True
+        instance.current_action = "export"
+        instance.process = type("P", (), {"terminate": lambda self: None,
+                                          "poll": lambda self: None})()
+
+        instance.stop()                      # 用户点「暂停下载」
+        assert instance._pause_requested is True
+        instance.last_failure = False
+        instance.events.put(("done", (instance.job_seq, 0)))
+        instance._drain_events()
+
+        assert instance.queue_paused is True
+        assert [a[0] for a, k in calls if k == "export"] == ["111"], calls
+        assert instance.download_queue[0]["bookId"] == "111", instance.download_queue
+        assert instance.pause_button.cget("text") == "继续队列"
+
+        instance._spawn_pending = False
+        instance._resume_queue()
+        assert [a[0] for a, k in calls if k == "export"] == ["111", "111"], calls
+        assert instance.queue_paused is False
+    finally:
+        root.destroy()
+        app.messagebox.askyesno, app.messagebox.showinfo = original
+
+
+def test_unchecking_a_running_queue_book_skips_it():
+    """运行中取消勾选 = 轮到它时跳过，不是照样下载。"""
+    root, instance = _make_gui()
+    calls = []
+    original = _mock_dialogs(instance)
+    try:
+        _spy_start(instance, calls)
+        instance.result_rows = [_row("111", "书一"), _row("222", "书二")]
+        instance._card_checks = {
+            "111": __import__("tkinter").BooleanVar(value=True),
+            "222": __import__("tkinter").BooleanVar(value=True),
+        }
+        instance._enqueue_checked()
+        instance._start_queue()
+        instance._spawn_pending = True
+
+        instance._card_checks["222"].set(False)
+        instance._on_card_check("222")
+
+        instance.last_failure = False
+        instance.events.put(("done", (instance.job_seq, 0)))
+        instance._drain_events()
+        assert [a[0] for a, k in calls if k == "export"] == ["111"], calls
+        assert instance.queue_running is False
+    finally:
+        root.destroy()
+        app.messagebox.askyesno, app.messagebox.showinfo = original
+
+
+def test_a_failed_queue_book_is_reported_not_called_all_done():
+    """队列里有书没完成时，结束语必须说出来，不能显示"全部完成"。"""
+    root, instance = _make_gui()
+    calls = []
+    original = _mock_dialogs(instance)
+    try:
+        _spy_start(instance, calls)
+        instance.result_rows = [_row("111", "书一")]
+        instance._card_checks = {"111": __import__("tkinter").BooleanVar(value=True)}
+        instance._enqueue_checked()
+        instance._start_queue()
+        instance._spawn_pending = True
+
+        instance.last_failure = True
+        instance.last_failure_status = "下载没有完成"
+        instance.events.put(("done", (instance.job_seq, 1)))
+        instance._drain_events()
+
+        text = instance.status.get()
+        assert "全部完成" not in text, text
+        assert ("未完成" in text) or ("没完成" in text), text
+    finally:
+        root.destroy()
+        app.messagebox.askyesno, app.messagebox.showinfo = original
+
+
 def test_queue_continues_through_partial_stop():
     """第一本停在断点（code!=0、无未解决章节）→ 队列仍继续下一本，不被卡死。"""
     root, instance = _make_gui()

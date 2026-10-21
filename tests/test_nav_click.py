@@ -68,7 +68,7 @@ def test_invoking_the_nav_item_switches_the_page():
     """The row's command must run -- this is what a real click does."""
     root, inst = _make_instance()
     try:
-        for name in ("我的书架", "下载记录", "统计分析", "划线清单", "设置", "下载工坊"):
+        for name in ("我的书架", "下载记录", "存储占用", "划线清单", "设置", "下载工坊"):
             inst.nav_items[name].invoke()   # exactly what a click triggers
             root.update()
             assert inst._current_page == name, (
@@ -85,7 +85,7 @@ def test_a_click_reaching_the_row_switches_the_page():
     try:
         root.focus_force()
         root.update()
-        for name in ("我的书架", "统计分析", "设置", "下载工坊"):
+        for name in ("我的书架", "存储占用", "设置", "下载工坊"):
             target = _click_target(inst.nav_items[name])
             assert target.winfo_viewable(), "navigation click target is not mapped"
             assert target.bind("<Button-1>") or target.bind("<ButtonRelease-1>"), \
@@ -110,7 +110,7 @@ def test_every_nav_row_is_a_single_clickable_button():
     root, inst = _make_instance()
     try:
         expected = ("下载工坊", "我的书架", "下载记录",
-                    "统计分析", "划线清单", "设置")
+                    "存储占用", "划线清单", "设置")
         assert set(inst.nav_items) == set(expected), sorted(inst.nav_items)
         for name, item in inst.nav_items.items():
             assert isinstance(item, app.ctk.CTkButton), (

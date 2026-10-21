@@ -372,6 +372,9 @@ class DesktopApp:
         self._pause_requested: bool = False
         # 运行中取消勾选 = 跳过这本，而不是"它照样下载"。
         self._queue_skipped: set[str] = set()
+        # 队列里每本的结果：(书名, 是否成功, 失败原因)。跑完一次性汇总，
+        # 不然 5 本里 3 本失败，用户看到的仍是"全部完成"。
+        self.queue_results: list[tuple[str, bool, str]] = []
         # 失败要留得住：FAILED 行把友好原因存这里，选书/搜索都不会把它冲掉，
         # 直到用户重试或开始新任务。原实现只写一行状态，下一条输出就覆盖了。
         self.last_failure_status: str | None = None
@@ -777,7 +780,7 @@ class DesktopApp:
         builders = {
             "我的书架": self._create_bookshelf_page,
             "下载记录": self._create_download_history_page,
-            "统计分析": self._create_statistics_page,
+            "存储占用": self._create_statistics_page,
             "划线清单": self._create_highlights_page,
             "设置": self._create_settings_page,
         }
@@ -1190,8 +1193,13 @@ class DesktopApp:
                          font=_font(12)).pack(side="left", fill="x", expand=True)
 
     def _create_statistics_page(self, host):
-        """统计分析：what the exports directory holds, and what it wastes."""
-        page, card = self._page_scaffold(self.page_host, "统计分析")
+        """存储占用：exports 目录占了多少、能回收多少。
+
+        这页原来叫「统计分析」，点进去却是磁盘清理——名字承诺的是阅读/划线统计，
+        内容给的是空间回收，而且和书架页那条「可回收」横幅是同一件事。改名为它
+        实际做的事。
+        """
+        page, card = self._page_scaffold(self.page_host, "存储占用")
         rows = self._scan_exports()
         done = [r for r in rows if r[3] == "done"]
         failed = [r for r in rows if r[3] == "failed"]
@@ -1280,8 +1288,15 @@ class DesktopApp:
         ctk.CTkFrame(card, height=1, fg_color=self.HAIRLINE).pack(fill="x", padx=18, pady=(14, 0))
         ctk.CTkLabel(card, text="登录", text_color=self.INK, anchor="w",
                      font=_font(13, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
-        ctk.CTkLabel(card, text="扫码凭证只保存在本机；「退出登录」删除的是会话文件，"
-                                "weread-live-settings.lua 里的基础凭证不受影响。",
+        ctk.CTkLabel(card, text="扫码凭证只保存在本机。「退出登录」会让你选范围："
+                                "仅退出会话保留 api_key，彻底清除则两个凭证文件都删。",
+                     text_color=self.FAINT, anchor="w", font=_font(12),
+                     wraplength=560, justify="left").pack(anchor="w", padx=18, pady=(2, 0))
+        ctk.CTkFrame(card, height=1, fg_color=self.HAIRLINE).pack(fill="x", padx=18, pady=(14, 0))
+        ctk.CTkLabel(card, text="标注方式", text_color=self.INK, anchor="w",
+                     font=_font(13, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
+        ctk.CTkLabel(card, text="默认「注释和想法」：正文只留角标，注释与想法收进书末附录。"
+                                "每本书下载前都可以在下载卡片里改。",
                      text_color=self.FAINT, anchor="w", font=_font(12),
                      wraplength=560, justify="left").pack(anchor="w", padx=18, pady=(2, 0))
         btns = ctk.CTkFrame(card, fg_color="transparent")
@@ -1367,8 +1382,8 @@ class DesktopApp:
                                                     command=lambda: self._switch_page("我的书架"))
         self.nav_items["下载记录"] = self._nav_item(nav, "下载记录", "↺",
                                                     command=lambda: self._switch_page("下载记录"))
-        self.nav_items["统计分析"] = self._nav_item(nav, "统计分析", "▥",
-                                                    command=lambda: self._switch_page("统计分析"))
+        self.nav_items["存储占用"] = self._nav_item(nav, "存储占用", "▥",
+                                                    command=lambda: self._switch_page("存储占用"))
         self.nav_items["划线清单"] = self._nav_item(nav, "划线清单", "≡",
                                                     command=lambda: self._switch_page("划线清单"))
 
@@ -1417,6 +1432,10 @@ class DesktopApp:
             corner_radius=6, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
             text_color="#FFFFFF", font=_font(13), command=self._enqueue_checked)
         self.enqueue_button.pack(side="right", padx=(0, 8))
+        # 队列不能只藏在状态栏里：常驻显示条数，点开可逐本移除/清空。
+        self.queue_button = self._quiet_button(topbar, "队列 0 本", 96, self._show_queue)
+        self.queue_button.configure(height=32)
+        self.queue_button.pack(side="right", padx=(0, 8))
         self.start_queue_button = ctk.CTkButton(
             topbar, text="开始队列下载", width=118, height=34,
             corner_radius=6, fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
@@ -1883,6 +1902,7 @@ class DesktopApp:
         # A running worker already carries its own annotation decision, so
         # changing it now would silently not apply to this job.
         self.annotations_box.configure(state="disabled")
+        self._set_busy_controls(True)
         self.last_unresolved = False
         self.omissions = None
         self.pause_button.configure(state="normal" if action == "export" else "disabled")
@@ -1896,6 +1916,7 @@ class DesktopApp:
         # 没有 worker 在跑，标注格不该停在 disabled——否则一次启动失败之后，
         # 用户再也改不了模式（全文件只有 _handle_done 会恢复它）。
         self.annotations_box.configure(state="readonly")
+        self._set_busy_controls(False)
         self._persist_log(f"[WORKER_START_ERROR] {detail}")
         self.status.set("任务没有启动。请查看技术日志后重试。")
         if action == "shelf":
@@ -2251,6 +2272,7 @@ class DesktopApp:
         action = self.current_action
         self.process = None
         self.current_action = ""
+        self._set_busy_controls(False)
         self.pause_button.configure(state="disabled")
         self.annotations_box.configure(state="readonly")
         try:
@@ -2312,6 +2334,10 @@ class DesktopApp:
             # `if self.last_failure` 分支，永远到不了这里：实测 汉书 打包失败后，
             # 队列里的 三字经 一直没开始，界面停在失败提示上。
             if action == "export" and self.queue_running:
+                self.queue_results.append((
+                    self.selected_title or self.selected_id,
+                    not self.last_failure,
+                    "" if not self.last_failure else (self.last_failure_status or "")))
                 if self._pause_requested:
                     # 用户按了暂停：把刚停下的这本插回队首，队列原地不动。
                     self._pause_requested = False
@@ -2339,7 +2365,20 @@ class DesktopApp:
                         self.queue_paused = False
                         self._queue_skipped.clear()
                         self.pause_button.configure(text="暂停下载", state="disabled")
-                        self.status.set("队列已全部完成。")
+                        failed = [r for r in self.queue_results if not r[1]]
+                        self._refresh_queue_button()
+                        if failed:
+                            lines = "；".join("%s（%s）" % (t, why or "未完成")
+                                             for t, _ok, why in failed)
+                            self.status.set("队列结束：%d 本成功，%d 本未完成。"
+                                            % (len(self.queue_results) - len(failed),
+                                               len(failed)))
+                            self._ask("showinfo", "队列结束，有书没完成",
+                                      "未完成的书：" + lines +
+                                      "。已下载的章节都保留，可在书架里点那本书继续下载。")
+                        else:
+                            self.status.set("队列已全部完成（%d 本）。"
+                                            % len(self.queue_results))
         finally:
             self._flush_pending_book()
 
@@ -3314,6 +3353,7 @@ class DesktopApp:
         before = len(self.download_queue)
         self.download_queue = [b for b in self.download_queue
                                if str(b.get("bookId") or "") != book_id]
+        self._refresh_queue_button()
         if len(self.download_queue) != before:
             self.status.set("已从队列移除《%s》，队列还剩 %d 本。"
                             % (title, len(self.download_queue)))
@@ -3333,6 +3373,69 @@ class DesktopApp:
                 out.append(row)
         return out
 
+    def _refresh_queue_button(self) -> None:
+        text = "队列 %d 本" % len(self.download_queue)
+        if self.queue_paused:
+            text += "（已暂停）"
+        elif self.queue_running:
+            text += "（运行中）"
+        self.queue_button.configure(text=text)
+
+    def _remove_from_queue(self, book_id: str) -> None:
+        before = len(self.download_queue)
+        self.download_queue = [b for b in self.download_queue
+                               if str(b.get("bookId") or "") != book_id]
+        self._refresh_queue_button()
+        if len(self.download_queue) != before:
+            self.status.set("已从队列移除，队列还剩 %d 本。" % len(self.download_queue))
+
+    def _clear_queue(self) -> None:
+        if self.queue_running:
+            self.status.set("队列正在运行，先暂停再清空。")
+            return
+        self.download_queue.clear()
+        self._queue_skipped.clear()
+        self._refresh_queue_button()
+        self.status.set("队列已清空。")
+
+    def _show_queue(self) -> None:
+        """队列详情：每本一行，可移除；底部清空/关闭。"""
+        if not self.download_queue:
+            self._ask("showinfo", "队列是空的",
+                      "先勾选左侧的书，再点「加入队列」。")
+            return
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("下载队列（%d 本）" % len(self.download_queue))
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        body = ctk.CTkScrollableFrame(dialog, width=460, height=260,
+                                      fg_color=self.CARD, corner_radius=0)
+        body.pack(fill="both", expand=True, padx=14, pady=(14, 6))
+        for index, book in enumerate(list(self.download_queue), 1):
+            row = ctk.CTkFrame(body, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkLabel(row, text="%d. %s" % (index, book.get("title") or book.get("bookId")),
+                         text_color=self.INK, anchor="w", font=_font(12),
+                         wraplength=340, justify="left").pack(side="left", fill="x", expand=True)
+            self._quiet_button(row, "移除", 56,
+                               lambda b=book: (self._remove_from_queue(str(b.get("bookId") or "")),
+                                               dialog.destroy(), self._show_queue())
+                               ).pack(side="right")
+        row = ctk.CTkFrame(dialog, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=(0, 14))
+        self._quiet_button(row, "清空队列", 96,
+                           lambda: (self._clear_queue(), dialog.destroy())).pack(side="left")
+        ctk.CTkButton(row, text="关闭", width=80, height=34, corner_radius=6,
+                      fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+                      text_color="#FFFFFF", font=_font(12),
+                      command=dialog.destroy).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.update_idletasks()
+        dialog.geometry("+%d+%d" % (
+            self.root.winfo_rootx() + (self.root.winfo_width() - dialog.winfo_width()) // 2,
+            self.root.winfo_rooty() + (self.root.winfo_height() - dialog.winfo_height()) // 2))
+
     def _enqueue_checked(self) -> None:
         """把当前勾选的书按结果顺序加入 download_queue（已存在的跳过）。"""
         existing = {b["bookId"] for b in self.download_queue}
@@ -3348,6 +3451,7 @@ class DesktopApp:
             })
             existing.add(bid)
             added += 1
+        self._refresh_queue_button()
         if added:
             self.status.set("已加入队列 %d 本，共 %d 本待下载。点「开始队列下载」开始。"
                             % (added, len(self.download_queue)))
@@ -3386,7 +3490,9 @@ class DesktopApp:
             return
         self.queue_running = True
         self.queue_paused = False
+        self.queue_results.clear()
         first = self._pop_next_book()
+        self._refresh_queue_button()
         if first is None:
             self.queue_running = False
             self._status_all_skipped()
@@ -3502,6 +3608,24 @@ class DesktopApp:
         self.retry_button.pack_forget()
         self._start_one({"bookId": self.selected_id, "title": self.selected_title,
                          "author": self.selected_author})
+
+    def _set_busy_controls(self, busy: bool) -> None:
+        """任务运行时把"会起第二个 worker"的按钮置灰，而不是点了才报错。
+
+        单 worker 模型下这些动作本来就会被拒；按钮看起来可点、点完只丢一句状态，
+        用户会以为程序没反应。页面切换仍是允许的——下载中看书架/记录不需要 worker。
+        """
+        state = "disabled" if busy else "normal"
+        for name in ("search_button", "probe_button", "export_button",
+                     "start_queue_button", "enqueue_button",
+                     "login_button", "refresh_button"):
+            button = getattr(self, name, None)
+            if button is None:
+                continue
+            try:
+                button.configure(state=state)
+            except Exception:
+                pass
 
     def _on_pause_click(self):
         if self.queue_paused:

@@ -2,7 +2,7 @@
 """The data pages must REFRESH on every visit, not cache the first snapshot.
 
 The bug this locks: _create_page built each page on first visit and cached it,
-so a user who opened 统计分析 before downloading saw that emptiness forever --
+so a user who opened 存储占用 before downloading saw that emptiness forever --
 the EPUB landed on disk, the page still said nothing was there. This test
 drives two visits and asserts the second reflects changed data.
 """
@@ -63,17 +63,17 @@ def test_a_second_visit_reflects_new_downloads():
         # visit 1: page built while the data is already there is NOT the point;
         # to model the reported bug (page built BEFORE the download), remove it
         # after the first render, then restore it for the second visit.
-        inst._switch_page("统计分析")
+        inst._switch_page("存储占用")
         root.update()
-        texts1 = _collect(inst.pages["统计分析"])
+        texts1 = _collect(inst.pages["存储占用"])
 
         # simulate: first visit happened before the download completed
         (book / "测试书 - full.epub").unlink()
         inst._switch_page("下载工坊")
         root.update()
-        inst._switch_page("统计分析")
+        inst._switch_page("存储占用")
         root.update()
-        texts_empty = _collect(inst.pages["统计分析"])
+        texts_empty = _collect(inst.pages["存储占用"])
         assert not any("测试书" in t for t in texts_empty), \
             "sanity: without the EPUB the page must not show the book"
 
@@ -83,9 +83,9 @@ def test_a_second_visit_reflects_new_downloads():
         # visit 3: SAME session, same page key -- must show the new state
         inst._switch_page("下载工坊")
         root.update()
-        inst._switch_page("统计分析")
+        inst._switch_page("存储占用")
         root.update()
-        texts2 = _collect(inst.pages["统计分析"])
+        texts2 = _collect(inst.pages["存储占用"])
         joined = "\n".join(texts2)
         # the book NAME sits inside row labels the collector does not always reach;
         # the count and size are the stable user-visible signals
