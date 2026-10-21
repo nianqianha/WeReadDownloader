@@ -73,7 +73,19 @@ def main() -> int:
                           r'<a href="text/chapter-\d+\.xhtml"[^>]*>(.*?)</a>',
                           nav_html, re.S)]
 
-    def title_of(idx: int, b: Path) -> str:
+    # manifest.json 的 chapterUid→title 是最权威映射（缺章也不会错位）
+    manifest_map: dict[str, str] = {}
+    mf = EXP / "manifest.json"
+    if mf.exists():
+        try:
+            for c in json.loads(mf.read_text(encoding="utf-8")).get("chapters", []):
+                manifest_map[str(c.get("chapterUid"))] = c.get("title") or ""
+        except Exception:
+            pass
+
+    def title_of(idx: int, uid: str, b: Path) -> str:
+        if manifest_map.get(uid):
+            return manifest_map[uid]
         if idx < len(nav_titles) and nav_titles[idx]:
             return nav_titles[idx]
         body_text = b.read_text(encoding="utf-8", errors="replace")
@@ -84,7 +96,8 @@ def main() -> int:
                 return name
         return b.stem
 
-    chapter_paths = [(b.stem.replace("chapter-uid-", ""), title_of(i, b), b)
+    chapter_paths = [(b.stem.replace("chapter-uid-", ""),
+                      title_of(i, b.stem.replace("chapter-uid-", ""), b), b)
                      for i, b in enumerate(bodies)]
     if limit:
         chapter_paths = chapter_paths[:limit]

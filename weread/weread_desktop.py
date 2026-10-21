@@ -1113,15 +1113,26 @@ def download_remote_images(xhtml: str, http: requests.Session,
     image_re = re.compile(r'(?i)(\bsrc\s*=\s*)(["\'])(.*?)(\2)')
     dropped: list[str] = []
 
+    def _is_note_img(match: re.Match[str]) -> bool:
+        """当前 src 所在的 <img> 是否为注角标（qqreader-footnote）。"""
+        start = match.string.rfind("<img", 0, match.start())
+        if start < 0:
+            return False
+        end = match.string.find(">", match.end())
+        tag = match.string[start:end + 1] if end > 0 else ""
+        return "qqreader-footnote" in tag
+
     def replace(match: re.Match[str]) -> str:
         raw_url = match.group(3).replace("&amp;", "&")
         url = urljoin(WEB + "/", raw_url)
         if not url.startswith(("http://", "https://")): return match.group(0)
         if url in url_to_href:
             href = url_to_href[url]
-            # 空串 = 该 URL 已知不可用，直接删掉这个 <img>，不再请求
+            # 空串 = 该 URL 已知不可用，不再请求。
+            # 注角标的注文在 alt 里，图 404 但注必须保留——只清空 src，
+            # 让后续统一附录把 alt 转成「注」；其余死图直接删掉。
             if not href:
-                return ""
+                return 'src=""' if _is_note_img(match) else ""
             return match.group(1) + match.group(2) + href + match.group(4)
         response = http.get(url, headers={"Referer": referer}, timeout=(10, 45), stream=True)
         # A missing or unreadable image must not cost the reader the chapter.
@@ -1137,7 +1148,8 @@ def download_remote_images(xhtml: str, http: requests.Session,
             # note.png 角标会各发一次请求——后汉书实测 6930 次 404，
             # 把 155 章的下载拖成两小时以上。
             url_to_href[url] = ""
-            return ""
+            # 注角标的注文在 alt 里：图可以丢，注不能丢（W13 根因）。
+            return 'src=""' if _is_note_img(match) else ""
         response.raise_for_status()
         filename = safe_name(namespace) + "-remote-" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
         image_path = root / "incoming" / (filename + ".part")
@@ -1179,7 +1191,11 @@ def download_remote_images(xhtml: str, http: requests.Session,
         # Only remove <img> tags whose src we actually blanked. The second
         # pattern used to match every self-closing <img> in the chapter, which
         # deleted real illustrations whenever a single note.png was dropped.
-        result = re.sub(r'(?is)<img\b[^>]*\bsrc\s*=\s*(?:""|\'\')[^>]*>', "", result)
+        # 注角标（qqreader-footnote）例外：它的注文在 alt 里，图丢了注不能丢
+        # （W13 根因——后汉书 35 章、数千条注曾被这条正则整章删除）。
+        result = re.sub(
+            r'(?is)<img\b(?![^>]*qqreader-footnote)[^>]*\bsrc\s*=\s*(?:""|\'\')[^>]*>',
+            "", result)
     return result, mapping, dropped
 
 
