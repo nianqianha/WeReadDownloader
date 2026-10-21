@@ -105,6 +105,10 @@ def test_queue_auto_continues_after_first_book_done():
         # 启动队列：队首 111 应被 pop 并起 export worker。
         # 不能顺带触发 --book-info：真机上那会让 _start_worker 看到「忙」而静默失败。
         instance._start_queue()
+        # 真实现里 export 的 spawn 在飞行中（_spawn_pending=True），此时
+        # _flush_pending_book() 不会插一个读详情的 worker。假 start 不设这个标志，
+        # 这里手动补上，否则详情 worker 会把 current_action 从 export 改掉。
+        instance._spawn_pending = True
         assert instance.queue_running is True
         export_calls = [a for a, k in calls if k == "export"]
         assert export_calls == [["111", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both"]], calls
@@ -186,6 +190,59 @@ def test_queue_continues_after_a_failed_book():
     finally:
         root.destroy()
         app.messagebox.askyesno, app.messagebox.showinfo = original
+
+
+def test_queue_selected_book_loads_its_details_after_the_download():
+    """队列选中的书，详情要在下载结束后补加载。
+
+    真机实测：队列起书时为了避免和下载抢 worker，跳过了读详情；当时写的是
+    pending_book=None，于是面板永远停在「下载开始后加载」，看起来一直没加载出来。
+    """
+    root, instance = _make_gui()
+    calls = []
+    original = _mock_dialogs(instance)
+    try:
+        _spy_start(instance, calls)
+        instance.result_rows = [_row("111", "书一")]
+        instance._card_checks = {"111": __import__("tkinter").BooleanVar(value=True)}
+        instance._enqueue_checked()
+        instance._start_queue()
+        assert instance.pending_book is not None, "详情被丢掉了"
+        assert instance.pending_book["bookId"] == "111"
+        assert not any(k == "book-info" for _a, k in calls), calls
+
+        instance.events.put(("done", (instance.job_seq, 0)))
+        instance._drain_events()
+        assert any(k == "book-info" for _a, k in calls), calls
+    finally:
+        root.destroy()
+        app.messagebox.askyesno, app.messagebox.showinfo = original
+
+
+class _FakeLabel:
+    def __init__(self, text):
+        self.text = text
+
+    def cget(self, key):
+        return self.text
+
+    def configure(self, **kw):
+        if "text" in kw:
+            self.text = kw["text"]
+
+
+def test_a_category_that_never_arrived_is_recorded_not_left_loading():
+    """搜索结束后没拿到分类的卡片，选中时重建不能又回到「分类加载中…」。"""
+    root, instance = _make_gui()
+    try:
+        label = _FakeLabel("分类加载中…")
+        instance.book_rows = {"111": {"bookId": "111", "title": "书一"}}
+        instance.card_widgets = {"111": {"category": label}}
+        instance._finish_card_categories()
+        assert label.text == "分类：暂无信息", label.text
+        assert instance.book_rows["111"]["category"] == "暂无信息"
+    finally:
+        root.destroy()
 
 
 def test_queue_continues_through_partial_stop():

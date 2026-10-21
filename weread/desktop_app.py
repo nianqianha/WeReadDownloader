@@ -358,6 +358,10 @@ class DesktopApp:
         self._card_checks: dict[str, tk.BooleanVar] = {}
         self.download_queue: list[dict] = []
         self.queue_running: bool = False
+        # 搜索是否已经结束。卡片重绘时据此区分「还在加载」和「没拿到」：
+        # 没有它，选中一本书触发的 _render_page() 会把已经降级的分类又变回
+        # 「分类加载中…」，看起来像永远加载不出来。
+        self.search_done: bool = False
         self.status = tk.StringVar(value="准备就绪。第一步：检查登录状态。")
         # Non-zero while a modal dialog owns the main loop, so the stall
         # watchdog can tell a waiting dialog from a wedged thread.
@@ -2220,6 +2224,7 @@ class DesktopApp:
                 if not self.book_rows:
                     self.result_count.configure(
                         text="没有找到匹配的书籍" if code == 0 else "搜索没有完成；请稍后再试")
+                self.search_done = True
                 self._finish_card_categories()
             elif action == "book-info":
                 if not self.info_loaded:
@@ -2323,6 +2328,11 @@ class DesktopApp:
                 continue
             if str(label.cget("text")).strip() in ("", "分类加载中…"):
                 label.configure(text="分类：暂无信息")
+                # 也记进数据里：选中这本书会 _render_page() 重建卡片，不记的话
+                # 新卡片又回到「分类加载中…」，看起来像一直没加载出来。
+                row = self.book_rows.get(book_id)
+                if row is not None and not str(row.get("category") or "").strip():
+                    row["category"] = "暂无信息"
 
     def _update_card_category(self, book_id: str, category: str):
         # Always record the value: the row may not be on the page on screen.
@@ -2444,6 +2454,8 @@ class DesktopApp:
                      ).pack(fill="x", anchor="w")
         ctk.CTkLabel(text_col, text=author, text_color=self.MUTED, anchor="w",
                      font=_font(11)).pack(fill="x", anchor="w", pady=(3, 0))
+        if not category and self.search_done:
+            category = "暂无信息"
         category_label = ctk.CTkLabel(text_col,
                                       text=category if category else "分类加载中…",
                                       text_color=self.FAINT, anchor="w",
@@ -2530,6 +2542,7 @@ class DesktopApp:
         self.result_rows.clear()
         self.page_index = 0
         self._set_page_buttons(0, 0)
+        self.search_done = False
         self.result_count.configure(text="正在搜索微信读书…")
         self.status.set("正在搜索。稍等片刻，结果会出现在左侧。")
         started = False
@@ -2566,13 +2579,16 @@ class DesktopApp:
             # 队列路径：调用方紧接着就要起下载 worker。这里若再起一个「读详情」
             # 的 worker，_start_worker() 会看到 _is_busy() 为真而直接返回 False，
             # 队列就此静默失败（实测：点「开始队列下载」后状态停在「书籍详情已
-            # 加载」，下载中一直是 0）。详情留给下载完成后自己刷新，不为它排队。
-            self.pending_book = None
-            self.category_label.configure(text="下载开始后加载")
+            # 加载」，下载中一直是 0）。
+            # 详情不能就此丢掉：记进 pending_book，_handle_done() 的 finally 会在
+            # 空闲时（这一本或整个队列跑完）替我们加载——原来这里写 None，于是
+            # 面板永远停在「下载开始后加载」，看起来一直没加载出来。
+            self.pending_book = dict(item)
+            self.category_label.configure(text="下载中，完成后自动加载")
             self.rating_label.configure(text="")
             self.cover.configure(text="", image=None)
             self.cover_image = None
-            self._set_intro("下载开始后显示简介。")
+            self._set_intro("下载完成后自动加载简介。")
             return
         if self._is_busy():
             self.pending_book = dict(item)
