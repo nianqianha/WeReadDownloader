@@ -636,6 +636,10 @@ On the measured axis a newline costs NOTHING -- the server's coordinate
 
 # --- the real book ----------------------------------------------------------
 
+# 首选的验收书。它是用户自己导出的书，不是仓库里的夹具：把导出目录清掉之后，
+# 这个测试会在代码没变的情况下变红（2026-10-21 实测就红了一次）。任何带划线的
+# 真实导出测的都是同一件事，所以首选书不在时按划线数量挑一本还在的，并在输出里
+# 写明实际用的是哪本——不能静默跳过。
 BOOK_ID = "19480992"
 REPLAY_CHAPTERS = 200
 
@@ -657,14 +661,66 @@ _ENVELOPE_HEAD = ('<?xml version="1.0" encoding="utf-8"?>\n'
 _ENVELOPE_TAIL = '\n</body></html>'
 
 
-def _book_work_dir():
+def _underline_marks(directory):
+    """Count the injected underlines a book's work tree still holds."""
+    total = 0
+    for path in directory.glob("chapter-*.body"):
+        try:
+            total += path.read_text(encoding="utf-8", errors="replace").count(
+                'class="wr-underline"')
+        except OSError:
+            continue
+    return total
+
+
+def _epub_marks(directory):
+    """Count highlight spans in a finished book's EPUBs (work tree cleaned)."""
+    import zipfile
+    total = 0
+    for epub in sorted(directory.glob("*.epub")):
+        try:
+            with zipfile.ZipFile(epub) as z:
+                for name in z.namelist():
+                    if name.lower().endswith((".xhtml", ".html")):
+                        total += z.read(name).decode("utf-8", "replace").count(
+                            'class="wr-underline"')
+        except (zipfile.BadZipFile, OSError, KeyError):
+            continue
+    return total
+
+
+def _corpus_book_ids():
+    """Book ids that still carry highlight markup, richest first.
+
+    The preferred BOOK_ID always leads when present, so the usual run measures
+    the same book it always did. A book whose export survives but holds no
+    underlines (never highlighted) is not a corpus for this gate.
+    """
+    counts = {}
     for entry in sorted(wd.OUTPUT.iterdir()):
-        if entry.is_dir() and entry.name.endswith(".work") and BOOK_ID in entry.name:
+        if not entry.is_dir():
+            continue
+        work = entry.name.endswith(".work")
+        stem = entry.name[:-len(".work")] if work else entry.name
+        marks = _underline_marks(entry) if work else 0
+        if not marks and stem not in counts:
+            marks = _epub_marks(entry)
+        if marks:
+            counts[stem] = max(counts.get(stem, 0), marks)
+    preferred = [stem for stem in counts if BOOK_ID in stem]
+    others = sorted((stem for stem in counts if BOOK_ID not in stem),
+                    key=lambda stem: counts[stem], reverse=True)
+    return preferred + others
+
+
+def _book_work_dir(book_id):
+    for entry in sorted(wd.OUTPUT.iterdir()):
+        if entry.is_dir() and entry.name.endswith(".work") and book_id in entry.name:
             return entry
     return None
 
 
-def _epub_corpus():
+def _epub_corpus(book_id):
     """Rebuild the replay corpus from the finished EPUB.
 
     The .work tree holds the post-injection chapter bodies, but it is cleaned
@@ -677,7 +733,7 @@ def _epub_corpus():
     """
     import zipfile
     for entry in sorted(wd.OUTPUT.iterdir()):
-        if not entry.is_dir() or BOOK_ID not in entry.name:
+        if not entry.is_dir() or book_id not in entry.name:
             continue
         for epub in sorted(entry.glob("*.epub")):
             try:
@@ -744,7 +800,23 @@ def test_real_corpus_placement_still_verifies():
     the cap is far above the point where the ratio stops moving, and the refusal
     breakdown is printed so a regression in the rate is visible, not guessed.
     """
-    work = _book_work_dir()
+    book_id = None
+    work = None
+    corpus = []
+    for candidate in _corpus_book_ids():
+        candidate_work = _book_work_dir(candidate)
+        if candidate_work is not None:
+            book_id, work = candidate, candidate_work
+            break
+        candidate_corpus = _epub_corpus(candidate)
+        if candidate_corpus:
+            book_id, corpus = candidate, candidate_corpus
+            break
+    assert book_id is not None, (
+        "no acceptance corpus in %s: no export carries highlight markup. This "
+        "gate measures the fix against real exported output, so it must not "
+        "pass by skipping -- export any highlighted book once, then re-run."
+        % (wd.OUTPUT,))
     if work is not None:
         files = sorted(p for p in work.glob("chapter-*.body"))
         assert files, "no chapter bodies under %s" % work
@@ -752,13 +824,7 @@ def test_real_corpus_placement_still_verifies():
         read = lambda p: p.read_text(encoding="utf-8")  # noqa: E731
         name_of = lambda p: p.name  # noqa: E731
     else:
-        corpus = _epub_corpus()
-        assert corpus, (
-            "no acceptance corpus for %s in %s: neither a *.work tree nor an "
-            "exported EPUB is present. This gate measures the fix against real "
-            "exported output, so it must not pass by skipping -- export the book "
-            "once, then re-run." % (BOOK_ID, wd.OUTPUT))
-        source = "EPUB of %s" % BOOK_ID
+        source = "EPUB of %s" % book_id
         files = corpus
         read = lambda item: item[1]  # noqa: E731
         name_of = lambda item: item[0]  # noqa: E731
@@ -802,7 +868,7 @@ def test_real_corpus_placement_still_verifies():
         if good == len(records):
             fully_placed += 1
 
-    print("\n  real corpus %s: %d of %d chapters replayed" % (BOOK_ID, chapters, len(files)))
+    print("\n  real corpus %s: %d of %d chapters replayed" % (book_id, chapters, len(files)))
     print("  records %d, ok %d (%.1f%%), refused %d (%.1f%%)"
           % (total, placed, 100.0 * placed / total, total - placed,
              100.0 * (total - placed) / total))
