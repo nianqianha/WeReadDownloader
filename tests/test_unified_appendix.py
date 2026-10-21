@@ -209,6 +209,7 @@ class TestBuildAppendix(unittest.TestCase):
         body_out = dict(rewritten)["222"]
         self.assertNotIn("qqreader-footnote", body_out)
         self.assertIn('href="appendix-notes-01.xhtml#note-222-1"', body_out)
+        self.assertIn("wr-fn-mark", body_out)
         self.assertIn(">注</a>", body_out)
 
     def test_note_alt_hex_entities_decoded(self):

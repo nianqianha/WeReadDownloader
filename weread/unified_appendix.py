@@ -61,10 +61,14 @@ APPENDIX_CSS = """\
 .wr-ap-none{color:#888;font-style:italic;}
 .wr-ap-sub{margin:.9em 0 .4em 0;font-size:.95em;font-weight:bold;color:#555;}
 .wr-ap-note{color:#333;}
-/* 正文角标（注与想法共用，与旧版参考实现一致）：上标、蓝色、可点 */
+/* 正文角标（想法）：上标、蓝色、可点 */
 .wr-fn-ref{display:inline;font-size:.72em;vertical-align:super;line-height:1;
   white-space:nowrap;margin-left:.05em;}
 .wr-fn-ref a{text-decoration:none;color:#0366d6;}
+/* 正文注角标：橙色实心圆「注」（对齐微信读书视觉） */
+.wr-fn-mark{display:inline-block;background:#f06a1e;color:#fff;font-size:.58em;
+  line-height:1.5;border-radius:50%;padding:0 .26em;margin:0 .12em;
+  vertical-align:super;text-align:center;text-decoration:none;font-weight:600;}
 """
 
 
@@ -180,6 +184,12 @@ def rewrite_badges(xhtml: str, chapter_uid: str,
             missing.append(range_key)
             return m.group(0)
         anchor = _THOUGHT_COUNT_RE.sub("", m.group(0))
+        # 划线原文：reviews 组里常没有 abstract，从 wr-underline 文本补，
+        # 让弹窗能显示「这条想法对应哪段话」。
+        if not entry.quote:
+            um = re.search(r'<span class="wr-underline">(.*?)</span>', anchor, re.S)
+            if um:
+                entry.quote = re.sub(r"<[^>]+>", "", um.group(1)).strip()
         placed.add(range_key)
         badge = ('<span class="wr-fn-ref"><a epub:type="noteref" role="doc-noteref" '
                  'href="%s#wrfn-%s-%s" id="wrbadge-%s-%s">[%d]</a></span>'
@@ -227,8 +237,8 @@ def rewrite_notes(xhtml: str, chapter_uid: str,
         target = "note-%s-%d" % (chapter_uid, n)
         badge = "notebadge-%s-%d" % (chapter_uid, n)
         notes.append((target, badge, text))
-        return ('<span class="wr-fn-ref"><a epub:type="noteref" '
-                'role="doc-noteref" href="%s#%s" id="%s">注</a></span>'
+        return ('<a class="wr-fn-mark" epub:type="noteref" role="doc-noteref" '
+                'href="%s#%s" id="%s">注</a>'
                 % (notes_file, target, badge))
 
     rewritten = _FOOTNOTE_IMG_RE.sub(_sub, xhtml)
@@ -261,7 +271,8 @@ def _dump(root) -> bytes:
     return etree.tostring(root, xml_declaration=True, encoding="utf-8")
 
 
-def _add_note(body, target_id: str, badge_id: str, text: str) -> None:
+def _add_note(body, target_id: str, badge_id: str, text: str,
+              chapter_file: str) -> None:
     aside = etree.SubElement(body, q("aside"))
     aside.set("{%s}type" % EPUBNS, "footnote")
     aside.set("id", target_id)
@@ -269,7 +280,7 @@ def _add_note(body, target_id: str, badge_id: str, text: str) -> None:
     p = etree.SubElement(aside, q("p"))
     p.set("class", "wr-ap-item")
     back = etree.SubElement(p, q("a"))
-    back.set("href", "#" + badge_id)
+    back.set("href", "%s#%s" % (chapter_file, badge_id))
     back.set("class", "wr-ap-back")
     back.text = "注"
     sp = etree.SubElement(p, q("span"))
@@ -277,7 +288,7 @@ def _add_note(body, target_id: str, badge_id: str, text: str) -> None:
     sp.text = " " + text
 
 
-def _add_thought(body, entry, is_orphan: bool) -> None:
+def _add_thought(body, entry, is_orphan: bool, chapter_file: str) -> None:
     target_id = "wrfn-%s-%s" % (entry.chapter_uid, entry.range_key)
     ref_id = "wrbadge-%s-%s" % (entry.chapter_uid, entry.range_key)
     aside = etree.SubElement(body, q("aside"))
@@ -293,7 +304,7 @@ def _add_thought(body, entry, is_orphan: bool) -> None:
         num.text = "[%d]" % len(entry.items)
     else:
         back = etree.SubElement(p, q("a"))
-        back.set("href", "#" + ref_id)
+        back.set("href", "%s#%s" % (chapter_file, ref_id))
         back.set("class", "wr-ap-back")
         back.text = "[%d]" % len(entry.items)
     if entry.quote:
@@ -316,28 +327,28 @@ def _add_thought(body, entry, is_orphan: bool) -> None:
 
 
 def build_notes_part(chapters, part_no: int, total_parts: int) -> bytes:
-    """生成一册「注释」。chapters = [(章标题, 注条目)]。"""
+    """生成一册「注释」。chapters = [(章标题, 章文件名, 注条目)]。"""
     suffix = "" if total_parts <= 1 else "（%d/%d）" % (part_no, total_parts)
     heading = APPENDIX_TITLE + " · 注释" + suffix
     root, body = _html_shell(
         heading, heading,
         "正文中 [注n] 角标对应此处条目，点编号可跳回原文。" if part_no == 1 else None)
-    for title, notes in chapters:
+    for title, ch_file, notes in chapters:
         sec = etree.SubElement(body, q("h2"))
         sec.set("class", "wr-ap-sec")
         sec.text = title
         for target_id, badge_id, text in notes:
-            _add_note(body, target_id, badge_id, text)
+            _add_note(body, target_id, badge_id, text, ch_file)
     return _dump(root)
 
 
 def build_thoughts_part(sections, orphan_keys: set[str]) -> bytes:
-    """生成「想法」册。sections = [(章标题, 注条目, 想法条目)]。"""
+    """生成「想法」册。sections = [(章标题, 章文件名, 注条目, 想法条目)]。"""
     heading = APPENDIX_TITLE + " · 想法"
     root, body = _html_shell(
         heading, heading,
         "正文中 [N] 角标对应此处条目，点编号可跳回原文。")
-    for title, notes, entries in sections:
+    for title, ch_file, notes, entries in sections:
         if not entries:
             continue
         sec = etree.SubElement(body, q("h2"))
@@ -345,7 +356,7 @@ def build_thoughts_part(sections, orphan_keys: set[str]) -> bytes:
         sec.text = title
         for entry in entries:
             is_orphan = "%s:%s" % (entry.chapter_uid, entry.range_key) in orphan_keys
-            _add_thought(body, entry, is_orphan)
+            _add_thought(body, entry, is_orphan, ch_file)
     return _dump(root)
 
 
@@ -391,14 +402,14 @@ def build_appendix(chapter_paths: list[tuple[str, str, Path]],
                      for uid, p in part_of.items()}
 
     # —— 第二遍：改写正文（注角标指向对应分册，想法角标指向想法册）——
-    sections: list[tuple[str, list[tuple[str, str, str]], list[ThoughtEntry]]] = []
+    sections: list[tuple[str, str, list[tuple[str, str, str]], list[ThoughtEntry]]] = []
     rewritten_bodies: list[tuple[str, str]] = []
     badge_total = 0
     note_total = 0
     unresolved: list[str] = []
     orphans: list[str] = []
 
-    for uid, chapter_title, _body_path, xhtml, _nc in bodies:
+    for ch_idx, (uid, chapter_title, _body_path, xhtml, _nc) in enumerate(bodies, 1):
         known = reviews.get(uid, {})
         rewritten, notes = rewrite_notes(xhtml, uid, notes_file_of[uid])
         note_total += len(notes)
@@ -411,9 +422,10 @@ def build_appendix(chapter_paths: list[tuple[str, str, Path]],
         # 有想法但正文没有对应角标：划线注入失败（插件拒绝画错位置）。
         # 想法本身有效，保留进附录；只上报，不当成构建失败。
         orphans.extend("%s:%s" % (uid, r) for r in set(known) - badges)
-        sections.append((chapter_title, notes, entries))
+        # 章文件名与 write_epub 的命名一致（chapter-0001.xhtml…），供附录回链使用
+        sections.append((chapter_title, "chapter-%04d.xhtml" % ch_idx, notes, entries))
 
-    entry_total = sum(len(e) for _, _, e in sections)
+    entry_total = sum(len(e) for _, _cf, _n, e in sections)
     # R6：被改写、指向附录的想法角标必须在附录里都有落点。未覆盖的 range
     # （有划线链接但 reviews 无对应想法组——只划线没写想法，WeRead 常态）
     # 保留原样、不上附录，只如实上报。
@@ -425,15 +437,15 @@ def build_appendix(chapter_paths: list[tuple[str, str, Path]],
 
     # —— 组装分册文件 ——
     chunks: dict[int, list[tuple[str, list]]] = {}
-    for (title, notes, _entries), (uid, _t, _p, _x, _nc) in zip(sections, bodies):
-        chunks.setdefault(part_of[uid], []).append((title, notes))
+    for (title, ch_file, notes, _entries), (uid, _t, _p, _x, _nc) in zip(sections, bodies):
+        chunks.setdefault(part_of[uid], []).append((title, ch_file, notes))
     files: list[tuple[str, bytes]] = []
     for pno in sorted(chunks):
-        if not any(n for _t, n in chunks[pno]):
+        if not any(n for _t, _cf, n in chunks[pno]):
             continue
         files.append(("appendix-notes-%02d.xhtml" % pno,
                       build_notes_part(chunks[pno], pno, total_parts)))
-    if any(entries for _t, _n, entries in sections):
+    if any(entries for _t, _cf, _n, entries in sections):
         files.append(("appendix-thoughts.xhtml",
                       build_thoughts_part(sections, set(orphans))))
 
