@@ -35,8 +35,7 @@ from pathlib import Path
 # report a healthy bundle as broken.
 REQUIRED = {
     "WeReadDesktop": ["desktop_app", "first_run", "weread_core", "weread_login"],
-    "WeReadWeb": ["weread_web", "weread_core"],
-    "WeReadWorker": ["weread_worker", "weread_desktop", "weread_login"],
+    "WeReadWorker": ["weread_worker", "weread_desktop", "weread_login", "unified_appendix"],
 }
 
 

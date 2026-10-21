@@ -2084,6 +2084,11 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
              "refused_underlines": 0, "chapters_with_unverified_underlines": 0,
              "chapters_with_refused_underlines": 0, "refused_underline_reasons": {}}
     quote_mismatch_samples: list[dict[str, str]] = []
+    # 未落点的划线按"哪一章、哪一段"记进 manifest，GUI 的「划线清单」直接读它。
+    # 以前那页只会解析 desktop-general.log，而这类决定写在各书自己的日志里，
+    # 所以页面永远是空的。
+    unplaced_details: list[dict[str, str]] = []
+    unplaced_total = 0
     for index in range(1, len(chapters) + 1):
         chapter_css = css_paths[index - 1].read_text(encoding="utf-8")
         if chapter_css and chapter_css not in style_set:
@@ -2094,9 +2099,18 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         dropped = int(row.get("dropped_underline_ranges", 0) or 0)
         annotation_coverage["dropped_underline_ranges"] += dropped
         if dropped: annotation_coverage["chapters_with_dropped_underlines"] += 1
-        for ident in (row.get("missing_underline_ids") or [])[:2]:
+        missing_ids = row.get("missing_underline_ids") or []
+        unplaced_total += len(missing_ids)
+        chapter = chapters[index - 1]
+        for ident in missing_ids:
             if ident not in missing_underline_samples:
                 missing_underline_samples.append(ident)
+            if len(unplaced_details) < 200:
+                unplaced_details.append({
+                    "chapter": str(chapter.get("chapterUid")),
+                    "title": str(chapter.get("title") or ""),
+                    "range": str(ident),
+                })
         gone = int(row.get("dropped_images", 0) or 0)
         dropped_images += gone
         if gone:
@@ -2216,6 +2230,9 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     # 上传书的目录把「注」拆成独立章节，那些碎片在 fetch_book 里被剔掉了。剔掉是
     # 对的（否则会产出上万页重复文件），但必须让读者知道注没进来——这本书的正文
     # 完整、注缺失，和"书是完整的"是两回事。
+    omission_report["unplaced_underline_total"] = unplaced_total
+    if unplaced_details:
+        omission_report["unplaced_underline_details"] = unplaced_details
     dropped_annotations = _dropped_annotations()
     if dropped_annotations:
         omission_report["annotation_fragments_dropped"] = dropped_annotations

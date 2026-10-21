@@ -70,6 +70,9 @@ def _make_gui():
     # still opens one is a bug worth seeing as a failure, not a hang.
     instance._ask = lambda kind, title, message, **kw: (
         setattr(instance, "status", type(instance.status)(value=message)) or "ok")
+    # 退出登录改成三选一（仅会话 / 彻底清除 / 取消）。默认走"彻底清除"，
+    # 与旧测试期望的"两个文件都没了"一致；只测某一档的用例自己覆盖它。
+    instance._ask_choice = lambda title, message, options: "all"
     root.update()
     return root, instance
 
@@ -151,6 +154,29 @@ def test_logout_is_recorded_in_the_log():
         instance.logout_button.invoke()
         root.update()
         assert "[LOGOUT]" in _logs(), "a logout left no trace in the log"
+    finally:
+        root.destroy()
+
+
+@test
+def test_session_only_logout_keeps_the_base_credential_file():
+    """「仅退出会话」只删扫码 cookie，api_key 必须留着。
+
+    旧实现是"是/否"二元：选"否"直接 return（什么都没做，界面却说已退出）。
+    现在两档各有真实动作，这里守住较轻的那一档不会误删基础文件。
+    """
+    root, instance = _make_gui()
+    try:
+        _write_credentials()
+        _PROFILE.mkdir(parents=True, exist_ok=True)
+        base = _PROFILE / "weread-live-settings.lua"
+        base.write_text("return {api_key='wrk-test'}\n", encoding="utf-8")
+        instance._ask_choice = lambda title, message, options: "session"
+        instance.logout()
+        root.update()
+        assert not _CRED.exists(), "仅退出会话仍应删除扫码 cookie"
+        assert base.is_file(), "仅退出会话不应删除 api_key 基础文件"
+        assert "api_key 保留" in instance.status.get(), instance.status.get()
     finally:
         root.destroy()
 

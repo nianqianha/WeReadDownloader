@@ -82,6 +82,14 @@ _ANNOTATION_MODES = (
 )
 _DEFAULT_ANNOTATION_MODE = _ANNOTATION_MODES[0]
 
+# 每个档位在界面上的后果，直接给用户看：附录有多大、会不会要划线。
+_ANNOTATION_HINTS = {
+    "注释和想法": "正文只留角标，注释与想法收进书末附录（文件明显变大）",
+    "注释": "只在书末附注释，不拉取想法",
+    "想法": "只在书末附想法，注角标保持原样",
+    "纯正文": "不要划线和笔记，最快、体积最小",
+}
+
 # 并发固定 1。GUI 上的并发选择器已删：实测 jobs>1 更容易触发 426 限流，而队列是
 # 串行执行的、单本下载也没有并发收益。worker 仍接受 --jobs，只是不再由界面决定。
 WORKER_JOBS = 1
@@ -358,6 +366,15 @@ class DesktopApp:
         self._card_checks: dict[str, tk.BooleanVar] = {}
         self.download_queue: list[dict] = []
         self.queue_running: bool = False
+        # 队列暂停：_pause_requested 由「暂停下载」置位，_handle_done 看到它就不接
+        # 下一本；queue_paused 表示队列真的停住了，按钮此时变「继续队列」。
+        self.queue_paused: bool = False
+        self._pause_requested: bool = False
+        # 运行中取消勾选 = 跳过这本，而不是"它照样下载"。
+        self._queue_skipped: set[str] = set()
+        # 失败要留得住：FAILED 行把友好原因存这里，选书/搜索都不会把它冲掉，
+        # 直到用户重试或开始新任务。原实现只写一行状态，下一条输出就覆盖了。
+        self.last_failure_status: str | None = None
         # 搜索是否已经结束。卡片重绘时据此区分「还在加载」和「没拿到」：
         # 没有它，选中一本书触发的 _render_page() 会把已经降级的分类又变回
         # 「分类加载中…」，看起来像永远加载不出来。
@@ -708,22 +725,34 @@ class DesktopApp:
         return list(reversed(rows))[:200]
 
     def _read_annotation_notes(self):
-        """Unplaced-underline decisions from the log, newest first."""
+        """每本书 manifest 里「没能在原文定位的划线」，按书名分组。
+
+        这一页以前解析 desktop-general.log，而引擎按书把这类决定写进
+        desktop-<书ID>.log，两者几乎不会重合——页面常态是空的，空状态却承诺
+        "这类决定会记录在这里"。manifest 是打包时写死的成品事实，读它才可靠。
+        """
         rows = []
         try:
-            log_path = Path(LOG_DIR) / "desktop-general.log"
-            if not log_path.is_file():
-                return rows
-            for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                # The engine's actual phrasing: "[ANNOTATION] chapter UID N: text
-                # kept, X of Y underline(s) not placed by WeRead: ..."
-                if line.startswith("[ANNOTATION]") and "not placed" in line:
-                    rows.append(("拒绝标注", line[:200]))
-                elif line.startswith("[UNRESOLVED]") or line.startswith("[INCOMPLETE]"):
-                    rows.append(("章节存疑", line[:200]))
+            manifests = sorted(Path(OUTPUT).glob("*/manifest.json"))
         except OSError:
-            pass
-        return rows[:200]
+            return rows
+        for path in manifests:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            title = str(data.get("title") or path.parent.name)
+            omissions = data.get("omissions") or {}
+            details = omissions.get("unplaced_underline_details") or []
+            total = int(omissions.get("unplaced_underline_total") or 0)
+            for item in details:
+                chapter = str(item.get("title") or "")
+                if not chapter:
+                    chapter = "第 %s 章" % item.get("chapter")
+                rows.append((chapter[:14], "%s · 区间 %s" % (title, item.get("range"))))
+            if total > len(details):
+                rows.append(("其余", "%s · 另有 %d 条未逐条列出" % (title, total - len(details))))
+        return rows[:300]
 
     def _open_export(self, name: str):
         """Open one export folder; the name comes from our own scan."""
@@ -1211,13 +1240,13 @@ class DesktopApp:
                      justify="left").pack(anchor="w", padx=18, pady=(8, 16))
 
     def _create_highlights_page(self, host):
-        """划线清单：what the engine refused to place, from the log."""
+        """划线清单：每本书里没能定位的划线，来自成品 manifest。"""
         page, card = self._page_scaffold(self.page_host, "划线清单")
         rows = self._read_annotation_notes()
         if not rows:
-            ctk.CTkLabel(card, text="没有需要留意的划线记录。\n\n"
-                                    "当某条划线无法安全落点时，引擎会拒绝标注而不是标错位置，\n"
-                                    "这类决定会记录在这里供你复核。",
+            ctk.CTkLabel(card, text="没有未定位的划线。\n\n"
+                                    "当微信读书给不出某条划线的原文位置时，引擎会拒绝标注\n"
+                                    "而不是标错句子；这类划线的章节和区间会记录在这里。",
                          text_color=self.FAINT, font=_font(13), justify="center"
                          ).pack(expand=True)
             return
@@ -1311,7 +1340,6 @@ class DesktopApp:
         return value
 
     def _build(self):
-        self._stats = {}
         # ---- overall structure: dark rail + white top bar + content -----
         self.root.configure(fg_color=self.BG)
         shell = ctk.CTkFrame(self.root, fg_color=self.BG, corner_radius=0)
@@ -1434,14 +1462,6 @@ class DesktopApp:
                                          text_color=self.FAINT, font=_font(12))
         self.result_count.pack(side="left", padx=(16, 0), pady=(4, 0))
 
-        # ---- stat cards ---------------------------------------------------
-        stats = ctk.CTkFrame(page, fg_color="transparent", height=70)
-        stats.pack(fill="x", pady=(10, 0))
-        stats.pack_propagate(False)
-        self._stats["books"] = self._stat_card(stats, "已导出书籍", "—", self.GREEN)
-        self._stats["marks"] = self._stat_card(stats, "累计划线", "—", self.AMBER)
-        self._stats["active"] = self._stat_card(stats, "下载中", "0", self.GREEN)
-
         # ---- main grid: results card + detail card -----------------------
         self.body = ctk.CTkFrame(page, fg_color="transparent")
         # Minimum height, not a fixed one: inside the scrollable page the body
@@ -1550,8 +1570,17 @@ class DesktopApp:
         export.pack(fill="x", pady=(10, 0))
         export.grid_columnconfigure(0, weight=0)
         self._section(export, "③", "下载到电脑",
-                      grid_at={"row": 0, "column": 0, "columnspan": 2, "sticky": "w",
+                      grid_at={"row": 0, "column": 0, "columnspan": 1, "sticky": "w",
                                "padx": 18, "pady": (8, 0)})
+        # 下拉框原来没有标签，用户会把「注释和想法」当成筛选/视图；四个档位的
+        # 差别只写在代码注释里，默认档会在书末追加几十页附录也不告诉人。
+        ctk.CTkLabel(export, text="标注方式", text_color=self.FAINT,
+                     font=_font(12)).grid(row=0, column=1, sticky="e",
+                                          padx=(0, 6), pady=(12, 0))
+        self.annotations_hint = ctk.CTkLabel(export, text="", text_color=self.FAINT,
+                                             font=_font(11), anchor="w")
+        self.annotations_hint.grid(row=0, column=3, sticky="w", padx=(10, 12),
+                                   pady=(12, 0))
         # 并发选择器去掉了：实测把 jobs 提到 2 以上更容易触发 426 限流，而队列本身
         # 是串行的（per-book 锁互不冲突），单本下载也没有并发收益。worker 固定按
         # jobs=1 启动，见 _queue_args()。
@@ -1569,7 +1598,12 @@ class DesktopApp:
             text_color=self.INK, font=_font(12), dropdown_font=_font(12),
             dropdown_fg_color=self.CARD, dropdown_text_color=self.INK,
             button_color=self.HAIRLINE, button_hover_color=self.SUNKEN)
-        self.annotations_box.grid(row=0, column=1, sticky="e", padx=(0, 12), pady=(12, 0))
+        self.annotations_box.grid(row=0, column=2, sticky="e", padx=(0, 0), pady=(12, 0))
+        self.annotations_hint.configure(
+            text=_ANNOTATION_HINTS.get(self.annotations_var.get(), ""))
+        self.annotations_var.trace_add(
+            "write", lambda *_a: self.annotations_hint.configure(
+                text=_ANNOTATION_HINTS.get(self.annotations_var.get(), "")))
         self._make_combo_keyboard_reachable(self.annotations_box)
         # 这里以前是 configure(state="disabled")，而全文件只有 _handle_done() 会把它
         # 恢复成 readonly——也就是首次下载之前用户根本改不了标注模式，只能用它硬编码
@@ -1679,8 +1713,9 @@ class DesktopApp:
         self.pause_button = ctk.CTkButton(
             task_row, text="暂停下载", width=104, height=32, corner_radius=6,
             fg_color=self.RED_TINT, hover_color="#F6DEDE", text_color=self.RED,
-            font=_font(12), command=self.stop, state="disabled")
+            font=_font(12), command=self._on_pause_click, state="disabled")
         self.pause_button.pack(side="left")
+        self.retry_button = self._quiet_button(task_row, "重试", 64, self._retry_last)
         self.open_button = self._quiet_button(task_row, "打开下载目录", 128, self.open_output)
         self.open_button.pack(side="right")
         self.log_button = self._quiet_button(task_row, "查看技术日志", 118, self.open_logs)
@@ -1837,6 +1872,11 @@ class DesktopApp:
             return
         self._spawn_pending = False
         self.process = process
+        self.last_failure_status = None
+        try:
+            self.retry_button.pack_forget()
+        except Exception:
+            pass
         self.job_seq += 1
         job = self.job_seq
         self.last_failure = False
@@ -2141,7 +2181,9 @@ class DesktopApp:
             self._persist_log(value)
             friendly = friendly_error(value)
             self._log("本次操作未完成：" + friendly)
+            self.last_failure_status = friendly
             self.status.set(friendly)
+            self.retry_button.pack(side="left", padx=(8, 0))
             return
 
         self._log(value)
@@ -2270,17 +2312,34 @@ class DesktopApp:
             # `if self.last_failure` 分支，永远到不了这里：实测 汉书 打包失败后，
             # 队列里的 三字经 一直没开始，界面停在失败提示上。
             if action == "export" and self.queue_running:
-                if self.download_queue:
-                    nxt = self.download_queue.pop(0)
-                    reason = "；上一本未完成，断点已保留" if self.last_failure else ""
-                    self.status.set("队列继续：开始下载《%s》（剩余 %d 本%s）。"
-                                    % (nxt.get("title") or nxt.get("bookId", ""),
-                                       len(self.download_queue), reason))
-                    self._select_book(nxt, load_info=False)
-                    self._start_one(nxt)
+                if self._pause_requested:
+                    # 用户按了暂停：把刚停下的这本插回队首，队列原地不动。
+                    self._pause_requested = False
+                    self.queue_paused = True
+                    current = {"bookId": self.selected_id, "title": self.selected_title,
+                               "author": self.selected_author}
+                    if current["bookId"]:
+                        self.download_queue.insert(0, current)
+                    self.pause_button.configure(text="继续队列", state="normal")
+                    self.status.set("队列已暂停：《%s》停在已下载的章节，队列还剩 %d 本。"
+                                    "点「继续队列」接着跑。"
+                                    % (current["title"] or current["bookId"],
+                                       len(self.download_queue)))
                 else:
-                    self.queue_running = False
-                    self.status.set("队列已全部完成。")
+                    nxt = self._pop_next_book()
+                    if nxt is not None:
+                        reason = "；上一本未完成，断点已保留" if self.last_failure else ""
+                        self.status.set("队列继续：开始下载《%s》（剩余 %d 本%s）。"
+                                        % (nxt.get("title") or nxt.get("bookId", ""),
+                                           len(self.download_queue), reason))
+                        self._select_book(nxt, load_info=False)
+                        self._start_one(nxt)
+                    else:
+                        self.queue_running = False
+                        self.queue_paused = False
+                        self._queue_skipped.clear()
+                        self.pause_button.configure(text="暂停下载", state="disabled")
+                        self.status.set("队列已全部完成。")
         finally:
             self._flush_pending_book()
 
@@ -2570,7 +2629,11 @@ class DesktopApp:
         # the next book has no signal that they are allowed to just... pick
         # another one -- the previous user (me) needed this written down.
         self.progress.set(0)
-        self.status.set("已选择新书：%s。加载详情后即可下载。" % (self.selected_title or ""))
+        if self.last_failure_status:
+            # 上一次失败还没被处理：保留提示，别让"已选择新书"把它冲掉。
+            self.status.set(self.last_failure_status)
+        else:
+            self.status.set("已选择新书：%s。加载详情后即可下载。" % (self.selected_title or ""))
         # Repaint the page so the selected row carries the reference design's
         # green bar and wash. Only rows on the current page exist as widgets;
         # _render_page rebuilds exactly those, cheaply.
@@ -3234,13 +3297,32 @@ class DesktopApp:
     # 排队下载（方案A）：勾选卡片 -> 加入队列 -> 开始队列下载 -> 自动续下一本
     # ------------------------------------------------------------------
     def _on_card_check(self, book_id: str) -> None:
-        """勾选/取消勾选时的即时反馈；真正入队在 _enqueue_checked 里发生。"""
+        """勾选/取消勾选时的即时反馈；真正入队在 _enqueue_checked 里发生。
+
+        取消勾选要真的生效：没开始就出队；运行中标记跳过。原来只改了一行状态，
+        书照样会下载——用户勾错了也拦不住。
+        """
+        title = self.book_rows.get(book_id, {}).get("title", book_id)
         if self._card_checks.get(book_id, tk.BooleanVar()).get():
-            self.status.set("已勾选《%s》，点「加入队列」开始排队。" %
-                            (self.book_rows.get(book_id, {}).get("title", book_id)))
-        elif book_id not in [b["bookId"] for b in self.download_queue]:
-            self.status.set("已取消勾选《%s》。" %
-                            (self.book_rows.get(book_id, {}).get("title", book_id)))
+            self._queue_skipped.discard(book_id)
+            self.status.set("已勾选《%s》，点「加入队列」开始排队。" % title)
+            return
+        if self.queue_running:
+            self._queue_skipped.add(book_id)
+            self.status.set("已标记跳过《%s》：轮到它时不会下载。重新勾选可撤销。" % title)
+            return
+        before = len(self.download_queue)
+        self.download_queue = [b for b in self.download_queue
+                               if str(b.get("bookId") or "") != book_id]
+        if len(self.download_queue) != before:
+            self.status.set("已从队列移除《%s》，队列还剩 %d 本。"
+                            % (title, len(self.download_queue)))
+        else:
+            self.status.set("已取消勾选《%s》。" % title)
+
+    def _status_all_skipped(self) -> None:
+        self.pause_button.configure(text="暂停下载", state="disabled")
+        self.status.set("队列里的书都被取消了，没有需要下载的项目。")
 
     def _selected_books_by_check(self) -> list[dict]:
         """返回勾选框为 True 的卡片对应的书籍信息（按当前结果顺序）。"""
@@ -3303,7 +3385,12 @@ class DesktopApp:
                          "队列会保留。继续吗？" % len(self.download_queue)):
             return
         self.queue_running = True
-        first = self.download_queue.pop(0)
+        self.queue_paused = False
+        first = self._pop_next_book()
+        if first is None:
+            self.queue_running = False
+            self._status_all_skipped()
+            return
         self._select_book(first, load_info=False)
         self._start_one(first)
 
@@ -3392,9 +3479,59 @@ class DesktopApp:
         self._ask("showerror", "更新失败", message)
 
     def stop(self):
-        if self._is_busy():
-            self.process.terminate()
+        if not self._is_busy():
+            return
+        if self.queue_running and self.current_action == "export":
+            # 队列里点暂停 = 停在这本、队列原地不动。原来的实现只是杀 worker，
+            # 而 _handle_done 会立刻接下一本——用户以为整列停了，回来发现后面
+            # 几本已经各自断在一半。
+            self._pause_requested = True
+            self.status.set("正在暂停：当前这本停下后，队列会停在这里等「继续队列」。")
+        else:
             self.status.set("已请求暂停，已写入的章节会保留，下次可继续下载。")
+        try:
+            self.process.terminate()
+        except Exception:
+            pass
+
+    def _retry_last(self):
+        """重跑上一次没完成的那本（选中项仍是它时）。"""
+        if self._is_busy() or not self.selected_id:
+            return
+        self.last_failure_status = None
+        self.retry_button.pack_forget()
+        self._start_one({"bookId": self.selected_id, "title": self.selected_title,
+                         "author": self.selected_author})
+
+    def _on_pause_click(self):
+        if self.queue_paused:
+            self._resume_queue()
+        else:
+            self.stop()
+
+    def _resume_queue(self):
+        """从暂停处继续：队首是刚才被中断的那本（暂停时已插回队首）。"""
+        if not self.queue_paused or self._is_busy():
+            return
+        self.queue_paused = False
+        self.pause_button.configure(text="暂停下载", state="disabled")
+        nxt = self._pop_next_book()
+        if nxt is None:
+            self.queue_running = False
+            self.status.set("队列已全部完成。")
+            return
+        self._select_book(nxt, load_info=False)
+        self._start_one(nxt)
+
+    def _pop_next_book(self):
+        """取下一本，跳过运行中被取消勾选的书。"""
+        while self.download_queue:
+            book = self.download_queue.pop(0)
+            if str(book.get("bookId") or "") in self._queue_skipped:
+                self._queue_skipped.discard(str(book.get("bookId") or ""))
+                continue
+            return book
+        return None
 
     def open_output(self):
         OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -3416,14 +3553,14 @@ class DesktopApp:
             self.status.set("当前有任务在运行，请先暂停或等它结束再退出登录。")
             return
 
-        # Ask user whether to do a full cleanup (including weread-live-settings.lua)
-        if not self._ask("askyesno",
-                "退出登录",
-                "是否彻底清除所有本地凭证？\n\n"
-                "• 是：删除 session-cookies.json 和 weread-live-settings.lua\n"
-                "      下次启动需重新扫码 + 重抄一次 api_key\n\n"
-                "• 否：仅删除 session-cookies.json（刷新重置）\n"
-                "      weread-live-settings.lua 保留，下次打开直接可用"):
+        # 三选一：两档删除范围各有真实后果，不能再拿"是/否"让人猜。
+        scope = self._ask_choice(
+            "退出登录",
+            "仅退出会话：删除扫码 cookie（session-cookies.json），api_key 保留，"
+            "下次打开直接可用。\n\n"
+            "彻底清除：两个凭证文件都删，下次需要重新扫码并重抄一次 api_key。",
+            [("仅退出会话", "session"), ("彻底清除", "all")])
+        if not scope:
             return
 
         try:
@@ -3438,29 +3575,28 @@ class DesktopApp:
             self.logout_button.configure(state="disabled")
             return
 
-        # Also remove the base credentials file (weread-live-settings.lua).
-        #
-        # 路径必须走 _settings_path()：它经由 weread_core.PRIVATE 解析，那是资料
-        # 目录唯一的所有者，测试也都 patch 它来做重定向。这里原先自己用
-        # %LOCALAPPDATA% 手拼路径（原注释把那个分支写成 "test environment 的
-        # fallback"），但 `from .weread_desktop import SETTINGS` 在 weread/ 没有
-        # __init__.py 的情况下必然 ImportError，所以那个分支实际是唯一会执行的
-        # 分支：结果是 logout 的测试删掉的是开发者本人的真实凭证文件，之后每个
-        # 操作都报 "Credential file not found"。改用 _settings_path() 后，测试
-        # 能重定向它，而且不再需要把 weread_desktop（LuaJIT/lxml）拖进 GUI 包。
-        try:
-            base = _settings_path()
-            if base.is_file():
-                base.unlink(missing_ok=True)
-                self._persist_log("[LOGOUT] weread-live-settings.lua removed")
-        except OSError as exc:
-            self._persist_log(f"[LOGOUT_ERROR] failed to remove SETTINGS: {exc}")
+        if scope == "all":
+            # 只有「彻底清除」才动基础凭证文件。路径必须走 _settings_path()：它经由
+            # weread_core.PRIVATE 解析，那是资料目录唯一的所有者，测试也都 patch 它
+            # 来做重定向（早期版本自己用 %LOCALAPPDATA% 手拼，害得 logout 的测试
+            # 删掉开发者本人的真实凭证）。
+            try:
+                base = _settings_path()
+                if base.is_file():
+                    base.unlink(missing_ok=True)
+                    self._persist_log("[LOGOUT] weread-live-settings.lua removed")
+            except OSError as exc:
+                self._persist_log(f"[LOGOUT_ERROR] failed to remove SETTINGS: {exc}")
 
         self._set_login_identity(None)
         self.logout_button.configure(state="disabled")
-        self._persist_log("[LOGOUT] session-cookies.json and weread-live-settings.lua removed by the user")
-        self.status.set("已彻底清除本地凭证。下次启动需重新扫码 + 重抄一次 api_key。")
-        self._persist_log("[LOGOUT] full credential wipe completed by the user")
+        if scope == "all":
+            self._persist_log("[LOGOUT] session-cookies.json and weread-live-settings.lua removed by the user")
+            self.status.set("已彻底清除本地凭证。下次启动需重新扫码 + 重抄一次 api_key。")
+            self._persist_log("[LOGOUT] full credential wipe completed by the user")
+        else:
+            self._persist_log("[LOGOUT] session-cookies.json removed; api_key kept")
+            self.status.set("已退出登录：扫码会话已删除，api_key 保留，下次打开直接可用。")
 
     def _refresh_logout_button(self):
         """Only offer 退出登录 when there is actually something to log out of.

@@ -40,7 +40,6 @@ def load_module(name: str, filename: str) -> Any:
 # Load all modules under test
 weread_login = load_module("weread_login", "weread_login.py")
 weread_desktop = load_module("weread_desktop", "weread_desktop.py")
-weread_web = load_module("weread_web", "weread_web.py")
 weread_core = load_module("weread_core", "weread_core.py")
 
 
@@ -285,13 +284,11 @@ def test_dpapi_user_isolation() -> None:
 def test_manual_login_form_does_not_leak_cookies() -> None:
     """Verify manual login form doesn't expose stored cookies in plaintext.
     
-    The weread_web.py manual login handler writes credentials directly without
-    ever reading back the stored session, so there's no leakage path.
+    The manual login path writes credentials directly without ever reading the
+    stored session back, so there's no leakage path.
     """
-    # This is a design verification test - the code path in weread_web.py
-    # WebController.save_manual_credentials() writes fresh credentials without
-    # ever reading the existing sealed file, so stored cookies are never exposed
-    # to the HTML form.
+    # Design verification: a fresh manual save never reads the existing sealed
+    # file, so stored cookies cannot leak back into any form.
     
     from io import StringIO
     import contextlib
@@ -308,7 +305,6 @@ def test_manual_login_form_does_not_leak_cookies() -> None:
         }, session_file)
         
         # Now simulate WebController.save_manual_credentials writing NEW credentials
-        # (This mimics the code path in weread_web.py lines 164-195)
         def simulate_manual_save(api_key: str, skey: str) -> dict:
             payload = {
                 "cookies": {"wr_skey": skey},
@@ -438,146 +434,14 @@ def test_workspace_per_book_isolation() -> None:
         lock_b.unlink()
 
 
-# -----------------------------------------------------------------------------
-# 3. WEB MODE MULTI-INSTANCE TESTS
-# -----------------------------------------------------------------------------
-
-def test_web_session_port_isolation() -> None:
-    """Test that web-session-{port}.txt files are isolated per port."""
-    with tempfile.TemporaryDirectory() as temp:
-        log_dir = Path(temp)
-        
-        # Create two sessions on different ports
-        session1 = weread_web._Session(8080)
-        session2 = weread_web._Session(8081)
-        
-        # Write session files - patch LOG_DIR temporarily
-        import weread_core
-        original_log_dir = weread_core.LOG_DIR
-        weread_core.LOG_DIR = log_dir
-        weread_web.LOG_DIR = log_dir  # Also patch in weread_web module
-        try:
-            weread_web._write_session_file(session1)
-            weread_web._write_session_file(session2)
-        finally:
-            weread_core.LOG_DIR = original_log_dir
-        
-        # Verify separate files exist
-        file1 = log_dir / "web-session-8080.txt"
-        file2 = log_dir / "web-session-8081.txt"
-        
-        assert file1.exists(), "Session file for port 8080 should exist"
-        assert file2.exists(), "Session file for port 8081 should exist"
-        
-        # Verify content isolation
-        content1 = file1.read_text(encoding="utf-8")
-        content2 = file2.read_text(encoding="utf-8")
-        
-        assert "port=8080" in content1
-        assert "port=8081" in content2
-        assert f"t={session1.token}" in content1
-        assert f"t={session2.token}" in content2
-        assert session1.token != session2.token, "Tokens must be unique per instance"
-        
-        # Cleanup
-        weread_web._clear_session_file(8080)
-        weread_web._clear_session_file(8081)
-        assert not file1.exists()
-        assert not file2.exists()
 
 
-def test_web_token_isolation() -> None:
-    """Test that CSP nonce and one-time tokens are unique per launch."""
-    # Each _Session instantiation creates a new token
-    sessions = [weread_web._Session(8080 + i) for i in range(10)]
-    tokens = [s.token for s in sessions]
-    
-    # All tokens should be unique
-    assert len(set(tokens)) == len(tokens), "All session tokens must be unique"
-    
-    # All tokens should be valid URL-safe base64
-    for token in tokens:
-        assert len(token) > 20, "Token should be reasonably long"
-        # URL-safe base64: A-Z, a-z, 0-9, -, _
-        assert all(c.isalnum() or c in "-_" for c in token), f"Invalid token chars: {token}"
-    
-    # Cookie names should include port
-    cookie_names = [s.cookie_name for s in sessions]
-    assert cookie_names == [f"weread_session_{8080+i}" for i in range(10)]
-    
-    # Each session should only accept its own token
-    for s in sessions:
-        assert s.token_ok(s.token)
-        for other in sessions:
-            if other is not s:
-                assert not s.token_ok(other.token), "Session must reject other session's token"
 
 
-def test_web_cookie_jar_per_port() -> None:
-    """Test that cookie names are port-scoped so browser doesn't mix sessions."""
-    session1 = weread_web._Session(8080)
-    session2 = weread_web._Session(8081)
-    
-    # Cookie names differ by port
-    assert session1.cookie_name == "weread_session_8080"
-    assert session2.cookie_name == "weread_session_8081"
-    assert session1.cookie_name != session2.cookie_name
-    
-    # is_session_cookie detects cookies with the prefix (not port-specific)
-    # This is by design: all weread_session_* cookies are considered session cookies
-    assert session1.is_session_cookie("weread_session_8080")
-    assert session1.is_session_cookie("weread_session_8080=abc")
-    assert session1.is_session_cookie("weread_session_8081")  # Same prefix!
-    assert not session1.is_session_cookie("other_cookie")
-    
-    # Cookie headers include port-specific name
-    h1 = session1.cookie_header()
-    h2 = session2.cookie_header()
-    assert "weread_session_8080=" in h1
-    assert "weread_session_8081=" in h2
-    assert session1.token in h1
-    assert session2.token in h2
 
 
-def test_web_csp_nonce_isolation() -> None:
-    """Test that CSP nonce is unique per server instance."""
-    # The UI_NONCE_TOKEN placeholder in webui.html gets replaced with session.token
-    # at runtime. Since each _Session has a unique token, each server instance
-    # gets a unique nonce.
-    
-    html_template = f"""<html><head><meta csp-nonce="{weread_web.UI_NONCE_TOKEN}"></head></html>"""
-    
-    session1 = weread_web._Session(8080)
-    session2 = weread_web._Session(8081)
-    
-    html1 = html_template.replace(weread_web.UI_NONCE_TOKEN, session1.token)
-    html2 = html_template.replace(weread_web.UI_NONCE_TOKEN, session2.token)
-    
-    assert session1.token in html1
-    assert session2.token in html2
-    assert session1.token not in html2
-    assert session2.token not in html1
 
 
-def test_web_login_state_isolation() -> None:
-    """Test that login state is not shared between web instances on different ports."""
-    with tempfile.TemporaryDirectory() as temp:
-        log_dir = Path(temp)
-        
-        # Create two controllers with separate state
-        ctrl1 = weread_web.WebController(log_dir)
-        ctrl2 = weread_web.WebController(log_dir)
-        
-        # They share the same SESSION_COOKIES file (by design - same user)
-        # But their in-memory state is isolated
-        ctrl1.login = {"state": "qr", "message": "scan", "otpNeeded": False, "qrSeq": 1}
-        ctrl2.login = {"state": "idle", "message": "", "otpNeeded": False, "qrSeq": 0}
-        
-        assert ctrl1.login["state"] == "qr"
-        assert ctrl2.login["state"] == "idle"
-        
-        # Credentials file is shared (per-user), but that's intentional:
-        # both web instances on same machine for same user should see same login
 
 
 # -----------------------------------------------------------------------------
@@ -642,33 +506,8 @@ def test_desktop_graphics_key_constant() -> None:
     assert SINGLE_INSTANCE_KEY == "WeReadDownloader-Graphics"
 
 
-def _web_instance_key() -> str:
-    """Pull the web mode's mutex name out of weread_web.py.
-
-    Parsed rather than imported: weread_web.py starts a local HTTP server, and a
-    test that imports it inherits that side effect.
-    """
-    import re
-    from pathlib import Path
-
-    src = (Path(__file__).resolve().parent.parent / "weread" / "weread_web.py")
-    text = src.read_text(encoding="utf-8", errors="replace")
-    match = re.search(r'is_first_instance\(\s*"([^"]+)"', text)
-    assert match, "no is_first_instance(\"...\") call found in weread_web.py"
-    return match.group(1)
 
 
-def test_web_mode_single_instance_key() -> None:
-    """Web mode must use a different mutex than the GUI, so both can run at once.
-
-    Read out of the source instead of written out here. The old version compared
-    two string literals that were both spelled in the test, so it passed no matter
-    what the program did -- it could not have caught the rename.
-    """
-    from desktop_app import SINGLE_INSTANCE_KEY
-
-    assert SINGLE_INSTANCE_KEY != _web_instance_key(), (
-        "GUI and web share a mutex, so starting one refuses to start the other")
 
 
 def test_installer_closes_the_running_apps() -> None:
@@ -678,7 +517,7 @@ def test_installer_closes_the_running_apps() -> None:
     these mutexes. When desktop_app.py was renamed to WeReadDownloader-Graphics
     and this list kept WeReadDesktop-Graphics, the installer stopped recognising
     a running GUI: it tried to overwrite a locked exe and failed with "access is
-    denied" instead of offering to close it. The names live in three separate
+    denied" instead of offering to close it. The name lives in two
     files, so nothing keeps them together except this test.
     """
     import re
@@ -686,7 +525,6 @@ def test_installer_closes_the_running_apps() -> None:
 
     from desktop_app import SINGLE_INSTANCE_KEY
 
-    web_key = _web_instance_key()
     iss = Path(__file__).resolve().parent.parent / "installer" / "WeReadDesktop.iss"
     text = iss.read_text(encoding="utf-8", errors="replace")
     match = re.search(r"^AppMutex=(.+)$", text, re.MULTILINE)
@@ -697,9 +535,6 @@ def test_installer_closes_the_running_apps() -> None:
         "installer AppMutex does not list the GUI mutex %r (it has %s), so "
         "CloseApplications cannot find a running GUI"
         % (SINGLE_INSTANCE_KEY, sorted(listed)))
-    assert web_key in listed, (
-        "installer AppMutex does not list the web mutex %r (it has %s)"
-        % (web_key, sorted(listed)))
 
 
 # -----------------------------------------------------------------------------
@@ -795,26 +630,6 @@ def test_concurrent_export_locks_different_books() -> None:
         assert success_count == NUM_BOOKS, f"Only {success_count}/{NUM_BOOKS} exports succeeded"
 
 
-def test_web_multiple_ports_can_start() -> None:
-    """Verify multiple web servers can bind to different ports."""
-    # This tests the _Session port allocation logic
-    ports = [8080, 8081, 8082, 8083]
-    sessions = [weread_web._Session(p) for p in ports]
-    
-    # All should have distinct ports and tokens
-    assert len({s.port for s in sessions}) == len(ports)
-    assert len({s.token for s in sessions}) == len(ports)
-    assert len({s.cookie_name for s in sessions}) == len(ports)
-    
-    # Each session should only accept its own host:port
-    for s in sessions:
-        for host in s.allowed_hosts:
-            assert s.host_ok(host)
-        # Should reject other sessions' hosts
-        for other in sessions:
-            if other is not s:
-                for host in other.allowed_hosts:
-                    assert not s.host_ok(host)
 
 
 # -----------------------------------------------------------------------------
@@ -833,24 +648,16 @@ TESTS = [
     test_lock_pid_starttime_verification,
     test_workspace_per_book_isolation,
     
-    # Web mode multi-instance
-    test_web_session_port_isolation,
-    test_web_token_isolation,
-    test_web_cookie_jar_per_port,
-    test_web_csp_nonce_isolation,
-    test_web_login_state_isolation,
     
     # GUI single-instance lock
     test_single_instance_mutex_creation,
     test_single_instance_brings_window_forward,
     test_desktop_graphics_key_constant,
-    test_web_mode_single_instance_key,
     test_installer_closes_the_running_apps,
     
     # Integration
     test_concurrent_session_writes_with_dpapi,
     test_concurrent_export_locks_different_books,
-    test_web_multiple_ports_can_start,
 ]
 
 
