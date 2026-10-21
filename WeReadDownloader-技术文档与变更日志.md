@@ -271,6 +271,10 @@ WeReadWorker.exe (CLI 引擎)
   - 四档映射：`注释和想法`(both) / `注释`(notes，`--no-thoughts` + 只收注) /
     `想法`(thoughts，只收想法) / `纯正文`(无附录)。`_queue_args()` 会追加
     `--unified-appendix --appendix-scope <scope>`；`probe()` 不追加（首章检查不写书）。
+  - **GUI 并发选择器删除**：实测 jobs>1 更容易触发 426 限流，而队列本身串行、
+    单本下载也没有并发收益。worker 固定按 `--jobs 1` 启动（`WORKER_JOBS = 1`），
+    GUI 不再暴露该参数；CLI 仍保留 `--jobs` 供高级用法。标注下拉框改为占据
+    原来并发框的位置，样式与它一致（圆角、卡片底色、下拉列表同色、无额外描边）。
   - 附录侧新增 `build_appendix(..., include_notes=, include_thoughts=)`：关掉的那一类
     **不参与正文改写**，避免「角标指向不存在的附录页」——「想法」档下注角标保持下载器原样，
     「注释」档下不生成想法角标。

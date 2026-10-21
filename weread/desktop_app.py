@@ -82,6 +82,10 @@ _ANNOTATION_MODES = (
 )
 _DEFAULT_ANNOTATION_MODE = _ANNOTATION_MODES[0]
 
+# 并发固定 1。GUI 上的并发选择器已删：实测 jobs>1 更容易触发 426 限流，而队列是
+# 串行执行的、单本下载也没有并发收益。worker 仍接受 --jobs，只是不再由界面决定。
+WORKER_JOBS = 1
+
 # Every user-facing sentence about a worker line lives in weread_core so the
 # web-mode server can reuse the exact same phrasing without pulling tkinter and
 # PIL into its frozen bundle. Appending this directory is required because the
@@ -354,7 +358,6 @@ class DesktopApp:
         self._card_checks: dict[str, tk.BooleanVar] = {}
         self.download_queue: list[dict] = []
         self.queue_running: bool = False
-        self.jobs = tk.StringVar(value="1")
         self.status = tk.StringVar(value="准备就绪。第一步：检查登录状态。")
         # Non-zero while a modal dialog owns the main loop, so the stall
         # watchdog can tell a waiting dialog from a wedged thread.
@@ -1543,40 +1546,26 @@ class DesktopApp:
         export.pack(fill="x", pady=(10, 0))
         export.grid_columnconfigure(0, weight=0)
         self._section(export, "③", "下载到电脑",
-                      grid_at={"row": 0, "column": 0, "columnspan": 4, "sticky": "w",
+                      grid_at={"row": 0, "column": 0, "columnspan": 2, "sticky": "w",
                                "padx": 18, "pady": (8, 0)})
-        # 并发 rides on the section row instead of taking a row of its own, so
-        # the introduction keeps the vertical space.
-        ctk.CTkLabel(export, text="并发", text_color=self.FAINT,
-                     font=_font(12)).grid(row=0, column=1, sticky="e",
-                                          padx=(0, 6), pady=(12, 0))
-        self.jobs_box = ctk.CTkComboBox(
-            export, values=["1", "2", "3", "4"], width=56, height=28,
-            corner_radius=6, fg_color=self.CARD, border_color="#D5D9DF",
-            text_color=self.INK, font=_font(12), dropdown_fg_color=self.CARD,
-            dropdown_text_color=self.INK, button_color=self.HAIRLINE,
-            button_hover_color=self.SUNKEN, variable=self.jobs, state="readonly")
-        self.jobs_box.grid(row=0, column=2, sticky="e", padx=(0, 6), pady=(12, 0))
-        self._make_combo_keyboard_reachable(self.jobs_box)
-        # 标注 has three states, not two, because the note text and the highlights
-        # are separable. A plain-text export wants neither; 只要划线 wants
-        # highlights but no notes; 注释和想法 wants both, with the note bodies and
-        # the thoughts collected into the book's end appendix. Two switches could
-        # not say that without an invalid combination (notes without highlights,
-        # since a note hangs off a highlight).
+        # 并发选择器去掉了：实测把 jobs 提到 2 以上更容易触发 426 限流，而队列本身
+        # 是串行的（per-book 锁互不冲突），单本下载也没有并发收益。worker 固定按
+        # jobs=1 启动，见 _queue_args()。
+        # 标注有四档，不是两个开关：注释和想法（两样都进书末附录）/ 注释 / 想法 /
+        # 纯正文。用一张模块级表派生选项、默认值和 worker 参数——三处各写一份字面量
+        # 漂移过，就是 W3 那次下载按钮崩溃的成因。
         self.annotations_var = ctk.StringVar(value=_DEFAULT_ANNOTATION_MODE.label)
         self.annotations_box = ctk.CTkComboBox(
             export, values=tuple(mode.label for mode in _ANNOTATION_MODES),
-            variable=self.annotations_var, width=104, height=28, state="readonly",
-            dropdown_font=_font(12), font=_font(12),
-            # Not fg_color="transparent": that is a Frame-only colour in
-            # CustomTkinter, and a CTkComboBox rejects it outright with
-            # "transparency is not allowed for this attribute". The top bar is
-            # CARD, so use that and let the border carry the outline.
-            fg_color=self.CARD, border_width=1, border_color=self.HAIRLINE,
-            text_color=self.INK, button_color=self.HAIRLINE,
-            button_hover_color=self.SUNKEN)
-        self.annotations_box.grid(row=0, column=3, sticky="e", padx=(0, 10), pady=(12, 0))
+            variable=self.annotations_var, width=112, height=28, state="readonly",
+            # 与原来「并发」框同一套质感：圆角、卡片底色、下拉列表也用卡片色，
+            # 按钮区沿用顶栏的细线色。不设 border_width——CTkComboBox 默认无边框，
+            # 加了反而比原来的并发框多一圈描边。
+            corner_radius=6, fg_color=self.CARD, border_color="#D5D9DF",
+            text_color=self.INK, font=_font(12), dropdown_font=_font(12),
+            dropdown_fg_color=self.CARD, dropdown_text_color=self.INK,
+            button_color=self.HAIRLINE, button_hover_color=self.SUNKEN)
+        self.annotations_box.grid(row=0, column=1, sticky="e", padx=(0, 12), pady=(12, 0))
         self._make_combo_keyboard_reachable(self.annotations_box)
         # 这里以前是 configure(state="disabled")，而全文件只有 _handle_done() 会把它
         # 恢复成 readonly——也就是首次下载之前用户根本改不了标注模式，只能用它硬编码
@@ -3253,8 +3242,7 @@ class DesktopApp:
 
     def _queue_args(self, book: dict) -> list[str]:
         """为一本书构造 worker 参数（与 export() 共用，保证标注语义一致）。"""
-        jobs = max(1, min(4, int(self.jobs.get())))
-        args = [str(book["bookId"]), "--jobs", str(jobs)]
+        args = [str(book["bookId"]), "--jobs", str(WORKER_JOBS)]
         # appendix=True: 这是唯一真正会写书的地方，"注释和想法" 档把它翻译成
         # --unified-appendix，让书末多出注释分册和想法册（参考 EPUB 的形态）。
         return args + self._annotation_flags(appendix=True)

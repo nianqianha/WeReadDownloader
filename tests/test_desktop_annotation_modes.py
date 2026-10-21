@@ -28,7 +28,8 @@ class DesktopAnnotationModesTests(unittest.TestCase):
                           and n.name == "_AnnotationMode")
         mode_tables = [n for n in tree.body if isinstance(n, ast.Assign)
                        and any(getattr(t, "id", "") in ("_ANNOTATION_MODES",
-                                                        "_DEFAULT_ANNOTATION_MODE")
+                                                        "_DEFAULT_ANNOTATION_MODE",
+                                                        "WORKER_JOBS")
                                for t in n.targets)]
         # The real module starts with `from __future__ import annotations`; the
         # extracted snippet needs it too, or `str | None` in a signature is
@@ -45,7 +46,7 @@ class DesktopAnnotationModesTests(unittest.TestCase):
         self.app = SimpleNamespace(
             selected_id="123", selected_title="Synthetic book", selected_author="Test",
             _is_busy=lambda: False, status=SimpleNamespace(set=lambda value: None),
-            jobs=SimpleNamespace(get=lambda: "1"), progress=SimpleNamespace(set=lambda value: None),
+            progress=SimpleNamespace(set=lambda value: None),
             _start_worker=lambda *args: self.starts.append(args) or True,
             _ask=lambda *args: self.confirmations.append(args) or True,
         )
