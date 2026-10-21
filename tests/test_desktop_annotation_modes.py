@@ -1,11 +1,11 @@
 """Run the real callbacks without a display, account or worker process.
 
-The three dropdown rows are not three degrees of one switch: 「注释和想法」 asks
-the worker for the unified appendix (notes and thoughts into the book's end
-appendix — the form the reference EPUB uses), 「只要划线」 keeps highlights and
-drops note text, 「纯正文」 asks for neither. This file pins the exact worker
-arguments each row produces, and that the appendix flag reaches only the export
-that writes a book -- the first-chapter probe has nothing to append to.
+The four dropdown rows are not degrees of one switch: 「注释和想法」 collects notes
+and thoughts into the book's end appendix (the form the reference EPUB uses),
+「注释」 collects only the notes, 「想法」 only the thoughts, 「纯正文」 asks for
+neither. This file pins the exact worker arguments each row produces, and that
+the appendix flags reach only the export that writes a book -- the first-chapter
+probe has nothing to append to.
 """
 import ast
 from pathlib import Path
@@ -30,7 +30,13 @@ class DesktopAnnotationModesTests(unittest.TestCase):
                        and any(getattr(t, "id", "") in ("_ANNOTATION_MODES",
                                                         "_DEFAULT_ANNOTATION_MODE")
                                for t in n.targets)]
-        nodes = [mode_class] + mode_tables + methods
+        # The real module starts with `from __future__ import annotations`; the
+        # extracted snippet needs it too, or `str | None` in a signature is
+        # evaluated at definition time and blows up on Python 3.9.
+        future = ast.ImportFrom(module="__future__",
+                                names=[ast.alias(name="annotations", asname=None)],
+                                level=0)
+        nodes = [future, mode_class] + mode_tables + methods
         namespace = {}
         exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
                      str(path), "exec"), namespace)
@@ -51,11 +57,12 @@ class DesktopAnnotationModesTests(unittest.TestCase):
 
     def test_each_displayed_mode_reaches_both_callbacks_with_correct_flags(self):
         rows = (
-            ("注释和想法", [], True),
-            ("只要划线", ["--no-thoughts"], False),
-            ("纯正文", ["--no-annotations"], False),
+            ("注释和想法", [], "both"),
+            ("注释", ["--no-thoughts"], "notes"),
+            ("想法", [], "thoughts"),
+            ("纯正文", ["--no-annotations"], None),
         )
-        for label, flags, appendix in rows:
+        for label, flags, scope in rows:
             for action in ("probe", "export"):
                 with self.subTest(label=label, action=action):
                     self.app.annotations_var = SimpleNamespace(get=lambda label=label: label)
@@ -65,9 +72,14 @@ class DesktopAnnotationModesTests(unittest.TestCase):
                     self.assertEqual(len(self.starts), 1)
                     arguments = self.starts[0][0]
                     self.assertEqual([a for a in arguments if a.startswith("--no-")], flags)
+                    wants_appendix = scope is not None and action == "export"
                     self.assertEqual("--unified-appendix" in arguments,
-                                     appendix and action == "export",
-                                     arguments)
+                                     wants_appendix, arguments)
+                    if wants_appendix:
+                        i = arguments.index("--appendix-scope")
+                        self.assertEqual(arguments[i + 1], scope, arguments)
+                    else:
+                        self.assertNotIn("--appendix-scope", arguments)
                     self.assertIn("123", arguments)
                     if action == "export":
                         self.assertEqual(len(self.confirmations), 1)

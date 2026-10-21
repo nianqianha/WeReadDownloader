@@ -51,20 +51,19 @@ except ImportError:
 class _AnnotationMode:
     """One row of the 标注 dropdown: what the worker should be asked for.
 
-    The three choices are not degrees of one switch. "注释和想法" keeps the note
-    markers and the thought badges but moves their bodies into the book's end
-    appendix (that is the form the reference EPUB uses); "只要划线" keeps the
-    highlights and drops the notes; "纯正文" asks for neither.
+    The four choices are not degrees of one switch. `注释和想法` collects both into
+    the book's end appendix (the form the reference EPUB uses); `注释` collects
+    only the notes, `想法` only the thoughts; `纯正文` asks for neither.
     """
 
-    __slots__ = ("label", "want_thoughts", "want_underlines", "unified_appendix")
+    __slots__ = ("label", "want_thoughts", "want_underlines", "appendix_scope")
 
     def __init__(self, label: str, want_thoughts: bool, want_underlines: bool,
-                 unified_appendix: bool) -> None:
+                 appendix_scope: str | None) -> None:
         self.label = label
         self.want_thoughts = want_thoughts
         self.want_underlines = want_underlines
-        self.unified_appendix = unified_appendix
+        self.appendix_scope = appendix_scope
 
 
 # The single source of truth for the dropdown. The combobox values, the default
@@ -73,11 +72,13 @@ class _AnnotationMode:
 # broke the download button (W3).
 _ANNOTATION_MODES = (
     _AnnotationMode("注释和想法", want_thoughts=True, want_underlines=True,
-                    unified_appendix=True),
-    _AnnotationMode("只要划线", want_thoughts=False, want_underlines=True,
-                    unified_appendix=False),
+                    appendix_scope="both"),
+    _AnnotationMode("注释", want_thoughts=False, want_underlines=True,
+                    appendix_scope="notes"),
+    _AnnotationMode("想法", want_thoughts=True, want_underlines=True,
+                    appendix_scope="thoughts"),
     _AnnotationMode("纯正文", want_thoughts=False, want_underlines=False,
-                    unified_appendix=False),
+                    appendix_scope=None),
 )
 _DEFAULT_ANNOTATION_MODE = _ANNOTATION_MODES[0]
 
@@ -3188,8 +3189,11 @@ class DesktopApp:
             flags.append("--no-annotations")
         elif not mode.want_thoughts:
             flags.append("--no-thoughts")
-        if appendix and mode.unified_appendix:
+        if appendix and mode.appendix_scope:
             flags.append("--unified-appendix")
+            # 四档里只有「注释和想法」是 both；「注释」「想法」各收一类。
+            # 显式传 scope 而不是让 worker 猜，改档位时两边不会漂。
+            flags.extend(["--appendix-scope", mode.appendix_scope])
         return flags
 
     def probe(self):

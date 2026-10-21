@@ -120,16 +120,17 @@ WeReadWorker.exe --shelf                               # 书架列表 JSON
 
 ### 1.3 标注三模式与导出物
 
-GUI 的下拉框三档对应下面的 worker 参数（2026-10-21 起「注释和想法」是默认档）：
+GUI 的下拉框四档对应下面的 worker 参数（2026-10-21 起「注释和想法」是默认档）：
 
-| 模式（GUI 标签） | worker 参数 | 划线 | 想法 | 速度 | 产物 reviews.jsonl |
+| 模式（GUI 标签） | worker 参数 | 划线 | 注释 | 想法 | 产物 reviews.jsonl |
 |---|---|---|---|---|---|
-| `注释和想法`（默认） | `--unified-appendix` | 有 | 有，收进书末附录 | 最慢 | 有（完整） |
-| `只要划线` | `--no-thoughts` | 有 | 无 | 中 | 有（仅落点） |
-| `纯正文` | `--no-annotations` | 无 | 无 | 最快 | 无 |
+| `注释和想法`（默认） | `--unified-appendix --appendix-scope both` | 有 | 进书末附录 | 进书末附录 | 有（完整） |
+| `注释` | `--no-thoughts --unified-appendix --appendix-scope notes` | 有 | 进书末附录 | 无 | 有（仅落点） |
+| `想法` | `--unified-appendix --appendix-scope thoughts` | 有 | 不上附录（注角标保持原样） | 进书末附录 | 有（完整） |
+| `纯正文` | `--no-annotations` | 无 | 无 | 无 | 无 |
 
-`--unified-appendix` 只是「注释和想法」档附带的一个开关，不是第四种模式；CLI 上它仍是
-显式参数（默认不带，见 §1.4）。
+`--unified-appendix` 与 `--appendix-scope` 是档位附带的开关，不是独立的第 N 种模式；
+CLI 上两者都是显式参数（默认不带）。
 
 成品目录：`exports\书名-书籍ID\`：`书名 - full.epub`、`书名 - full.weread.zip`
 （KOReader 导入包）、`manifest.json`（含 omissions 缺失说明）、`reviews.jsonl`。
@@ -162,7 +163,8 @@ GUI 的下拉框三档对应下面的 worker 参数（2026-10-21 起「注释和
   切换开关只会重新打包，不会重下章节。
 
 **GUI**：`_ANNOTATION_MODES`（`desktop_app.py`）是档位唯一事实源——下拉框选项、默认值、
-worker 参数都由它派生；`_annotation_mode()` 遇到未知标签回退到默认档（W3 的教训：标签与映射
+worker 参数都由它派生，四档分别是 `注释和想法`(both) / `注释`(notes) / `想法`(thoughts) /
+`纯正文`(无附录)。`_annotation_mode()` 遇到未知标签回退到默认档（W3 的教训：标签与映射
 漂移会让导出直接崩）。`_queue_args()` 是唯一拼 worker 参数的地方，`probe()` 不传附录开关。
 
 **验收场景**：
@@ -173,6 +175,8 @@ worker 参数都由它派生；`_annotation_mode()` 遇到未知标签回退到�
 | 大书（后汉书前 40 章，2026-10-21 实测 10,723 注/679 想法） | 4 册注（约 0.47–1.05 MB/册）+ 1 册想法；正文注角标 == 附录注条目 |
 | 后汉书全本（155 章，约 42,577 注） | 14 册注 + 1 册想法；单册约 3000 条 ≤ 1.1 MB |
 | GUI 默认档 | 下拉框默认「注释和想法」；首次下载前即可改选（不需要先跑完一次任务） |
+| GUI「注释」档 | 只生成注分册，不生成想法册；正文不插 `[N]` 角标 |
+| GUI「想法」档 | 只生成想法册，不生成注分册；注角标保持原样（不指向不存在的附录） |
 | 开关关闭 | 导出物与当前版本逐字节一致（回归） |
 | 正文角标与附录条目数不一致 | 构建失败并报错，不产残缺 EPUB |
 
@@ -262,10 +266,14 @@ WeReadWorker.exe (CLI 引擎)
 - 用户要求「下载选择里的选择改成这本书的形态」。参考书
   `后汉书全本全注全译（全十卷）-统一附录-v2-前40章.epub` 经比对就是本实现自身的产物，
   所以引擎侧不需要改，缺的是 GUI：
-  - 下拉框 `划线 + 想法 / 只要划线 / 纯正文` → **`注释和想法 / 只要划线 / 纯正文`**，
+  - 下拉框 `划线 + 想法 / 只要划线 / 纯正文` → **`注释和想法 / 注释 / 想法 / 纯正文`**，
     默认第一项。
-  - `注释和想法` 映射为 `want_thoughts=True, want_underlines=True, unified_appendix=True`，
-    `_queue_args()` 会追加 `--unified-appendix`；`probe()` 不追加（首章检查不写书）。
+  - 四档映射：`注释和想法`(both) / `注释`(notes，`--no-thoughts` + 只收注) /
+    `想法`(thoughts，只收想法) / `纯正文`(无附录)。`_queue_args()` 会追加
+    `--unified-appendix --appendix-scope <scope>`；`probe()` 不追加（首章检查不写书）。
+  - 附录侧新增 `build_appendix(..., include_notes=, include_thoughts=)`：关掉的那一类
+    **不参与正文改写**，避免「角标指向不存在的附录页」——「想法」档下注角标保持下载器原样，
+    「注释」档下不生成想法角标。
   - 档位定义收敛成模块级 `_ANNOTATION_MODES`，下拉框选项、默认值、worker 参数全部由它派生；
     `_annotation_mode()` 遇到未知标签回退默认档而不是抛错（W3 的教训）。
 - **修掉 GUI 从未传过 `--unified-appendix`**：此前这个开关只存在于 CLI，GUI 下载永远产出

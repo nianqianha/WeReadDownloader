@@ -275,5 +275,60 @@ class TestBuildAppendix(unittest.TestCase):
         self.assertEqual(manifest["appendix"]["thought_badges"], 1)
 
 
+class TestAppendixScope(unittest.TestCase):
+    """GUI 四档里「注释」「想法」各只要一类，附录不能把另一类也带进来。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.reviews = self.root / "reviews.jsonl"
+        with self.reviews.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "chapter_uid": "222",
+                "reviews": [{"range": "0-10", "pageReviews": [
+                    {"likesCount": 0, "review": {"content": "妙"}}]}],
+            }, ensure_ascii=False) + "\n")
+        self.body = self.root / "chapter-222.body"
+        self.body.write_text(
+            _body_with_hrefs(["#wrthought-111-222-0-10"],
+                             extra='<img class="qqreader-footnote" alt="注文在此"/>'),
+            encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_notes_only_scope_emits_no_thoughts_file(self):
+        files, rewritten, manifest = ua.build_appendix(
+            [("222", "第一章", self.body)], self.reviews,
+            include_notes=True, include_thoughts=False)
+        names = [n for n, _d in files]
+        self.assertTrue(any("appendix-notes" in n for n in names), names)
+        self.assertFalse(any("thoughts" in n for n in names), names)
+        body_out = dict(rewritten)["222"]
+        # 注转成可点角标
+        self.assertIn('href="appendix-notes-01.xhtml#note-222-1"', body_out)
+        # 想法不参与：不插 [N] 角标，划线链接原样保留
+        self.assertNotIn('class="wr-fn-ref"', body_out)
+        self.assertIn("#wrthought-111-222-0-10", body_out)
+        self.assertFalse(manifest["appendix"]["thoughts_in_appendix"])
+        self.assertTrue(manifest["appendix"]["notes_in_appendix"])
+
+    def test_thoughts_only_scope_leaves_note_markers_untouched(self):
+        files, rewritten, manifest = ua.build_appendix(
+            [("222", "第一章", self.body)], self.reviews,
+            include_notes=False, include_thoughts=True)
+        names = [n for n, _d in files]
+        self.assertFalse(any("notes" in n for n in names), names)
+        self.assertTrue(any("thoughts" in n for n in names), names)
+        body_out = dict(rewritten)["222"]
+        # 注不在附录里，所以注角标也不能指向一个不存在的页
+        self.assertIn("qqreader-footnote", body_out)
+        self.assertNotIn("appendix-notes", body_out)
+        # 想法照常插角标
+        self.assertIn('class="wr-fn-ref"', body_out)
+        self.assertTrue(manifest["appendix"]["thoughts_in_appendix"])
+        self.assertFalse(manifest["appendix"]["notes_in_appendix"])
+
+
 if __name__ == "__main__":
     unittest.main()

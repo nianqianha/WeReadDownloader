@@ -1805,7 +1805,8 @@ def resolve_export_workspace(output: Path, book_id: str, package_name: str) -> P
 def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int = 1,
                 want_thoughts: bool = True,
                 want_underlines: bool = True,
-                unified_appendix: bool = False) -> Path:
+                unified_appendix: bool = False,
+                appendix_scope: str = "both") -> Path:
     secure_output_directory(output)
     # 每次导出从零开始计数：同一进程内连跑两本书时，上一本丢弃的注数不能带到
     # 这一本的 manifest 里。
@@ -2252,7 +2253,8 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             if str(row.get("chapter_uid")) != str(chapter["chapterUid"]): raise RuntimeError("chapter review checkpoint UID mismatch")
             output_reviews.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
     os.replace(review_temp, review_file)
-    # 统一附录（注释和想法）：默认关闭；开关打开才在书末追加附录章节。
+    # 统一附录（注释和想法）：开关打开才在书末追加附录章节；appendix_scope 决定
+    # 收哪一类（both / notes / thoughts，对应 GUI 的「注释和想法」「注释」「想法」）。
     # 数据不一致（角标数 != 条目数）时 unified_appendix 抛错，本步不产残缺 EPUB。
     appendix_arg = None
     appendix_manifest: dict[str, Any] = {}
@@ -2264,7 +2266,9 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         appendix_files, rewritten_bodies, appendix_manifest = build_appendix(
             [(str(ch["chapterUid"]), ch.get("title") or f"Chapter {i}", p)
              for i, (ch, p) in enumerate(zip(chapters, chapter_paths), 1)],
-            review_file)
+            review_file,
+            include_notes=appendix_scope in ("both", "notes"),
+            include_thoughts=appendix_scope in ("both", "thoughts"))
         bodies_dir = workspace / "appendix-bodies"
         bodies_dir.mkdir(parents=True, exist_ok=True)
         appendix_bodies = {}
@@ -2333,10 +2337,14 @@ def main() -> int:
                              "text only -- the exported EPUB has no highlights. Implies "
                              "--no-thoughts.")
     parser.add_argument("--unified-appendix", action="store_true",
-                        help="Append a single '注释和想法' chapter at the end of the book "
-                             "collecting every thought; body badges are rewritten to jump "
-                             "to it. Notes stay at their chapter ends. Requires thoughts "
-                             "(ignored with --no-thoughts).")
+                        help="Append '注释和想法' appendix chapter(s) at the end of the book "
+                             "and rewrite the body badges to jump to them. What the appendix "
+                             "collects is --appendix-scope.")
+    parser.add_argument("--appendix-scope", choices=("both", "notes", "thoughts"),
+                        default="both",
+                        help="Which parts the unified appendix collects: both (default), "
+                             "notes only, or thoughts only. Ignored without "
+                             "--unified-appendix.")
     args = parser.parse_args()
     want_thoughts = not args.no_thoughts
     want_underlines = not args.no_annotations
@@ -2345,12 +2353,19 @@ def main() -> int:
         # note-text switch would be meaningless. Say so once rather than letting
         # --no-annotations --no-thoughts look like two separate decisions.
         want_thoughts = False
-    # 统一附录的素材是想法：没有想法就没有条目可收，角标会全部悬空。
-    # 与其产一本「角标点开是空的」的书，不如明说开关没生效。
-    unified_appendix = args.unified_appendix and want_thoughts
-    if args.unified_appendix and not unified_appendix:
-        print("[APPENDIX] --unified-appendix ignored: thoughts are disabled "
-              "(--no-thoughts/--no-annotations)", flush=True)
+    # 附录不再强制要求想法：GUI 的「注释」档就是"只要注、不要想法"。
+    # 只有"要收想法却没取想法"这种组合需要明说——否则会产出一本没有想法册的书。
+    unified_appendix = bool(args.unified_appendix)
+    appendix_scope = args.appendix_scope if unified_appendix else "both"
+    if unified_appendix and appendix_scope in ("both", "thoughts") and not want_thoughts:
+        print("[APPENDIX] --appendix-scope %s needs thoughts, but --no-thoughts/"
+              "--no-annotations disabled them; the appendix will carry notes only"
+              % appendix_scope, flush=True)
+        appendix_scope = "notes" if appendix_scope == "both" else ""
+    if unified_appendix and not appendix_scope:
+        unified_appendix = False
+        print("[APPENDIX] --unified-appendix ignored: the requested scope was "
+              "thoughts but thoughts are disabled", flush=True)
     if not args.check_auth and not args.search and not args.book_info and not args.probe_book and not args.shelf and not args.book_id:
         parser.error("book_id is required unless --check-auth, --search, or --probe-book is used")
     if args.jobs < 1 or args.jobs > 4:
@@ -2400,7 +2415,7 @@ def main() -> int:
             shelf_books(settings)
             return 0
         result = export_book(args.book_id, args.output, settings, args.jobs, want_thoughts,
-                       want_underlines, unified_appendix)
+                       want_underlines, unified_appendix, appendix_scope)
         print("DONE", result, flush=True)
         return 0
     except Exception as exc:

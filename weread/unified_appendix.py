@@ -364,11 +364,19 @@ def build_thoughts_part(sections, orphan_keys: set[str]) -> bytes:
 
 
 def build_appendix(chapter_paths: list[tuple[str, str, Path]],
-                   reviews_path: Path) -> tuple[bytes, list[tuple[str, str]], dict[str, Any]]:
+                   reviews_path: Path, *,
+                   include_notes: bool = True,
+                   include_thoughts: bool = True,
+                   ) -> tuple[bytes, list[tuple[str, str]], dict[str, Any]]:
     """统一附录入口。
 
     chapter_paths: [(chapter_uid, 章标题, .body 缓存路径)]，顺序即阅读顺序。
     返回 (附录 XHTML 字节, [(chapter_uid, 改写后正文)], manifest 追加信息)。
+
+    include_notes / include_thoughts 决定附录收哪一类：GUI 的四档里「注释」只要注、
+    「想法」只要想法，两类都关就不该走这里（调用方不传 unified_appendix）。
+    关掉的那一类**不参与正文改写**——注角标保持下载器原样、想法角标不生成，
+    否则会出现「角标指向一个不存在的附录页」。
 
     缓存是断点续传的事实源，**不被覆写**；改写后的正文只随本次打包使用，
     保证「关开关后导出物与当前版本一致」的回归要求。
@@ -414,25 +422,32 @@ def build_appendix(chapter_paths: list[tuple[str, str, Path]],
 
     for ch_idx, (uid, chapter_title, _body_path, xhtml, _nc) in enumerate(bodies, 1):
         known = reviews.get(uid, {})
-        rewritten, notes = rewrite_notes(xhtml, uid, notes_file_of[uid])
+        rewritten = xhtml
+        notes: list[tuple[str, str, str]] = []
+        if include_notes:
+            rewritten, notes = rewrite_notes(rewritten, uid, notes_file_of[uid])
         note_total += len(notes)
-        rewritten, badges, missing = rewrite_badges(
-            rewritten, uid, known, "appendix-thoughts.xhtml")
+        badges: list[str] = []
+        missing: list[str] = []
+        if include_thoughts:
+            rewritten, badges, missing = rewrite_badges(
+                rewritten, uid, known, "appendix-thoughts.xhtml")
         rewritten_bodies.append((uid, rewritten))
         badge_total += len(badges)
         unresolved.extend("%s:%s" % (uid, r) for r in missing)
-        entries = list(known.values())
+        entries = list(known.values()) if include_thoughts else []
         # 有想法但正文没有对应角标：划线注入失败（插件拒绝画错位置）。
         # 想法本身有效，保留进附录；只上报，不当成构建失败。
-        orphans.extend("%s:%s" % (uid, r) for r in set(known) - badges)
+        orphans.extend("%s:%s" % (uid, r) for r in set(known) - set(badges))
         # 章文件名与 write_epub 的命名一致（chapter-0001.xhtml…），供附录回链使用
         sections.append((chapter_title, "chapter-%04d.xhtml" % ch_idx, notes, entries))
 
     entry_total = sum(len(e) for _, _cf, _n, e in sections)
     # R6：被改写、指向附录的想法角标必须在附录里都有落点。未覆盖的 range
     # （有划线链接但 reviews 无对应想法组——只划线没写想法，WeRead 常态）
-    # 保留原样、不上附录，只如实上报。
-    if badge_total != entry_total - len(orphans):
+    # 保留原样、不上附录，只如实上报。只做想法册时才有这条断言；注的
+    # 一致性由 rewrite_notes 与 build_notes_part 同源保证。
+    if include_thoughts and badge_total != entry_total - len(orphans):
         raise AppendixError(
             "统一附录数据不一致：指向附录的想法角标 %d 个，想法条目 %d 个"
             "（其中 %d 个无正文角标，%d 个划线无想法组未入附录）"
@@ -440,15 +455,16 @@ def build_appendix(chapter_paths: list[tuple[str, str, Path]],
 
     # —— 组装分册文件 ——
     chunks: dict[int, list[tuple[str, list]]] = {}
-    for (title, ch_file, notes, _entries), (uid, _t, _p, _x, _nc) in zip(sections, bodies):
-        chunks.setdefault(part_of[uid], []).append((title, ch_file, notes))
+    if include_notes:
+        for (title, ch_file, notes, _entries), (uid, _t, _p, _x, _nc) in zip(sections, bodies):
+            chunks.setdefault(part_of[uid], []).append((title, ch_file, notes))
     files: list[tuple[str, bytes]] = []
     for pno in sorted(chunks):
         if not any(n for _t, _cf, n in chunks[pno]):
             continue
         files.append(("appendix-notes-%02d.xhtml" % pno,
                       build_notes_part(chunks[pno], pno, total_parts)))
-    if any(entries for _t, _cf, _n, entries in sections):
+    if include_thoughts and any(entries for _t, _cf, _n, entries in sections):
         files.append(("appendix-thoughts.xhtml",
                       build_thoughts_part(sections, set(orphans))))
 
@@ -461,7 +477,8 @@ def build_appendix(chapter_paths: list[tuple[str, str, Path]],
             "thought_badges": badge_total,
             "chapters": len(sections),
             "notes_parts": len([f for f in files if "notes" in f[0]]),
-            "notes_in_appendix": True,
+            "notes_in_appendix": include_notes,
+            "thoughts_in_appendix": include_thoughts,
         }
     }
     if unresolved:
