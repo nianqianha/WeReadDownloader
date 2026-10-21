@@ -47,6 +47,40 @@ except ImportError:
                            _validate_creds, _build_settings_lua,
                            write_settings, _ensure_credentials_file)
 
+
+class _AnnotationMode:
+    """One row of the 标注 dropdown: what the worker should be asked for.
+
+    The three choices are not degrees of one switch. "注释和想法" keeps the note
+    markers and the thought badges but moves their bodies into the book's end
+    appendix (that is the form the reference EPUB uses); "只要划线" keeps the
+    highlights and drops the notes; "纯正文" asks for neither.
+    """
+
+    __slots__ = ("label", "want_thoughts", "want_underlines", "unified_appendix")
+
+    def __init__(self, label: str, want_thoughts: bool, want_underlines: bool,
+                 unified_appendix: bool) -> None:
+        self.label = label
+        self.want_thoughts = want_thoughts
+        self.want_underlines = want_underlines
+        self.unified_appendix = unified_appendix
+
+
+# The single source of truth for the dropdown. The combobox values, the default
+# and the worker flags are all derived from this tuple, because they used to be
+# three separate literals that could drift apart -- that drift is exactly what
+# broke the download button (W3).
+_ANNOTATION_MODES = (
+    _AnnotationMode("注释和想法", want_thoughts=True, want_underlines=True,
+                    unified_appendix=True),
+    _AnnotationMode("只要划线", want_thoughts=False, want_underlines=True,
+                    unified_appendix=False),
+    _AnnotationMode("纯正文", want_thoughts=False, want_underlines=False,
+                    unified_appendix=False),
+)
+_DEFAULT_ANNOTATION_MODE = _ANNOTATION_MODES[0]
+
 # Every user-facing sentence about a worker line lives in weread_core so the
 # web-mode server can reuse the exact same phrasing without pulling tkinter and
 # PIL into its frozen bundle. Appending this directory is required because the
@@ -1025,7 +1059,7 @@ class DesktopApp:
         if not self._ask("askyesno", "删除想法数据",
                          "删除《%s》的想法数据（约 %.0f MB）？\n\n"
                          "EPUB 正文和划线会完整保留，只丢笔记正文与打包副本；\n"
-                         "之后选「划线 + 想法」重新下载可以再取回。\n\n继续吗？"
+                         "之后选「注释和想法」重新下载可以再取回。\n\n继续吗？"
                          % (folder.name, mb)):
             return
         removed, failed = 0, 0
@@ -1524,13 +1558,14 @@ class DesktopApp:
         self.jobs_box.grid(row=0, column=2, sticky="e", padx=(0, 6), pady=(12, 0))
         self._make_combo_keyboard_reachable(self.jobs_box)
         # 标注 has three states, not two, because the note text and the highlights
-        # are separable. A plain-text export wants neither; --no-thoughts wants
-        # highlights but no notes; the default wants both. Two switches could not
-        # say that without an invalid combination (notes without highlights, since
-        # a note hangs off a highlight).
-        self.annotations_var = ctk.StringVar(value="划线 + 想法")
+        # are separable. A plain-text export wants neither; 只要划线 wants
+        # highlights but no notes; 注释和想法 wants both, with the note bodies and
+        # the thoughts collected into the book's end appendix. Two switches could
+        # not say that without an invalid combination (notes without highlights,
+        # since a note hangs off a highlight).
+        self.annotations_var = ctk.StringVar(value=_DEFAULT_ANNOTATION_MODE.label)
         self.annotations_box = ctk.CTkComboBox(
-            export, values=("划线 + 想法", "只要划线", "纯正文"),
+            export, values=tuple(mode.label for mode in _ANNOTATION_MODES),
             variable=self.annotations_var, width=104, height=28, state="readonly",
             dropdown_font=_font(12), font=_font(12),
             # Not fg_color="transparent": that is a Frame-only colour in
@@ -1542,7 +1577,10 @@ class DesktopApp:
             button_hover_color=self.SUNKEN)
         self.annotations_box.grid(row=0, column=3, sticky="e", padx=(0, 10), pady=(12, 0))
         self._make_combo_keyboard_reachable(self.annotations_box)
-        self.annotations_box.configure(state="disabled")
+        # 这里以前是 configure(state="disabled")，而全文件只有 _handle_done() 会把它
+        # 恢复成 readonly——也就是首次下载之前用户根本改不了标注模式，只能用它硬编码
+        # 的默认值。既然默认值现在换成了「注释和想法」，这一格必须开机就可选。
+        self.annotations_box.configure(state="readonly")
         self.probe_button = ctk.CTkButton(
             export, text="先检查第一章", command=self.probe, height=36,
             corner_radius=6, fg_color=self.CARD, hover_color=self.SUNKEN,
@@ -1821,6 +1859,9 @@ class DesktopApp:
         """The off-thread Popen raised; tell the user and unstick the widgets."""
         self._spawn_pending = False
         self.current_action = ""
+        # 没有 worker 在跑，标注格不该停在 disabled——否则一次启动失败之后，
+        # 用户再也改不了模式（全文件只有 _handle_done 会恢复它）。
+        self.annotations_box.configure(state="readonly")
         self._persist_log(f"[WORKER_START_ERROR] {detail}")
         self.status.set("任务没有启动。请查看技术日志后重试。")
         if action == "shelf":
@@ -3121,6 +3162,36 @@ class DesktopApp:
             self.auth_badge.configure(text="检查失败", text_color=self.RED)
             self.status.set("登录检查没有启动。请检查程序目录后重试。")
 
+    def _annotation_mode(self) -> _AnnotationMode:
+        """The dropdown's current row; unknown labels fall back to the default.
+
+        A stale value from an older build (or a combobox whose values drifted)
+        must not raise: W3 was precisely an export that died on a label it could
+        not map. Falling back keeps the download working and is visible in the
+        status line.
+        """
+        label = self.annotations_var.get()
+        for mode in _ANNOTATION_MODES:
+            if mode.label == label:
+                return mode
+        return _DEFAULT_ANNOTATION_MODE
+
+    def _annotation_flags(self, *, appendix: bool) -> list[str]:
+        """Worker flags for the current mode. The only place they are built.
+
+        `appendix=False` is for the first-chapter probe: probing does not write a
+        book, so asking it for the appendix would only change its wording.
+        """
+        mode = self._annotation_mode()
+        flags: list[str] = []
+        if not mode.want_underlines:
+            flags.append("--no-annotations")
+        elif not mode.want_thoughts:
+            flags.append("--no-thoughts")
+        if appendix and mode.unified_appendix:
+            flags.append("--unified-appendix")
+        return flags
+
     def probe(self):
         if not self.selected_id:
             self._ask("showinfo", "先选择一本书", "先搜索并点击左侧的一本书，再进行章节检查。")
@@ -3128,17 +3199,11 @@ class DesktopApp:
         if self._is_busy():
             self.status.set("当前有任务正在运行，等它结束再检查第一章。")
             return
-        args = ["--probe-book", self.selected_id]
-        mode = self.annotations_var.get()
-        want_thoughts = mode == "划线 + 想法"
-        want_underlines = mode != "纯正文"
-        if not want_underlines:
-            args.append("--no-annotations")
-        elif not want_thoughts:
-            args.append("--no-thoughts")
+        mode = self._annotation_mode()
+        args = ["--probe-book", self.selected_id] + self._annotation_flags(appendix=False)
         self._start_worker(args, "probe",
                            "正在检查这本书的第一章、划线"
-                           + ("和想法…" if want_thoughts else "…（已跳过想法）"))
+                           + ("和想法…" if mode.want_thoughts else "…（已跳过想法）"))
 
     # ------------------------------------------------------------------
     # 排队下载（方案A）：勾选卡片 -> 加入队列 -> 开始队列下载 -> 自动续下一本
@@ -3184,16 +3249,11 @@ class DesktopApp:
 
     def _queue_args(self, book: dict) -> list[str]:
         """为一本书构造 worker 参数（与 export() 共用，保证标注语义一致）。"""
-        mode = self.annotations_var.get()
-        want_thoughts = mode == "划线 + 想法"
-        want_underlines = mode != "纯正文"
         jobs = max(1, min(4, int(self.jobs.get())))
         args = [str(book["bookId"]), "--jobs", str(jobs)]
-        if not want_underlines:
-            args.append("--no-annotations")
-        elif not want_thoughts:
-            args.append("--no-thoughts")
-        return args
+        # appendix=True: 这是唯一真正会写书的地方，"注释和想法" 档把它翻译成
+        # --unified-appendix，让书末多出注释分册和想法册（参考 EPUB 的形态）。
+        return args + self._annotation_flags(appendix=True)
 
     def _start_one(self, book: dict) -> None:
         """起一本的下载（队列与单本共用）。不弹确认框，直接跑。"""
@@ -3230,13 +3290,11 @@ class DesktopApp:
         if self._is_busy():
             self.status.set("当前有任务正在运行，等它结束再开始下载。")
             return
-        mode = self.annotations_var.get()
-        want_thoughts = mode == "划线 + 想法"
-        want_underlines = mode != "纯正文"
+        mode = self._annotation_mode()
         if not self._ask("askyesno",
                 "开始下载",
                 f"准备下载：{self.selected_title}\n作者：{self.selected_author or '暂无信息'}\n\n"
-                f"标注：{mode}\n\n"
+                f"标注：{mode.label}\n\n"
                 "已有章节会自动续传。若微信读书返回空章节或无法确认的划线，会记录问题并继续检查其它章节；"
                 "有未解决章节时不会生成不完整 EPUB。继续吗？"):
             return

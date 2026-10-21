@@ -255,7 +255,10 @@ def _html_shell(page_title: str, heading: str, intro: str | None):
     t.text = page_title
     link = etree.SubElement(head, q("link"))
     link.set("rel", "stylesheet")
-    link.set("href", "style.css")
+    # 附录文件放在 OEBPS/text/ 下，style.css 在 OEBPS/ 根；少一级 ../ 就会指向
+    # 不存在的 OEBPS/text/style.css，阅读器里 .wr-ap-* 全部失效（标题没有分隔线、
+    # 回链不是蓝色）。正文页用的就是 ../style.css，这里必须一致。
+    link.set("href", "../style.css")
     link.set("type", "text/css")
     body = etree.SubElement(root, q("body"))
     h1 = etree.SubElement(body, q("h1"))
