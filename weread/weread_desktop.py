@@ -1074,6 +1074,14 @@ def _reuse_image(data: bytes, root: Path) -> str | None:
         return _IMAGE_DIGESTS.get(key)
 
 
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _remember_image(data: bytes, root: Path, name: str) -> None:
     key = (str(root), hashlib.sha256(data).hexdigest())
     with _IMAGE_DIGESTS_LOCK:
@@ -1368,9 +1376,36 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
         metadata_entries["OEBPS/text/cover.xhtml"] = (f'<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Cover</title><link rel="stylesheet" href="../style.css"/></head><body><img src="../images/cover{ext}" alt="Cover"/></body></html>').encode()
         cover_meta = '<meta name="cover" content="cover-image"/>'
     asset_paths = sorted(p for p in assets.glob("*") if p.is_file())
+    # 按内容给图片去重：同一张图可能以两个文件名存在（图片包一份、远程 URL
+    # 一份），旧版本各写一份，汉书实测重复 94 MB。这里在打包时算哈希，重复的
+    # 只写一份，并把正文里的引用改到留下的那个名字上——已经下好的书重新打包
+    # 就能瘦下来，不必重下。
+    image_paths = [p for p in asset_paths
+                   if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}]
+    canonical: dict[str, str] = {}
+    if len(image_paths) > 1:
+        owner_by_digest: dict[str, str] = {}
+        for image in image_paths:
+            digest = _file_digest(image)
+            owner = owner_by_digest.get(digest)
+            if owner is None:
+                owner_by_digest[digest] = image.name
+            elif owner != image.name:
+                canonical[image.name] = owner
+    canonical_bytes = {name.encode("utf-8"): owner.encode("utf-8")
+                       for name, owner in canonical.items()}
+
+    def _dedupe_refs(body: bytes) -> bytes:
+        if not canonical_bytes:
+            return body
+        def replaced(match: re.Match[bytes]) -> bytes:
+            target = canonical_bytes.get(match.group(1))
+            return b"../images/" + target if target else match.group(0)
+        return re.sub(rb"\.\./images/([^\"' >]+)", replaced, body)
+
     for index, asset in enumerate(asset_paths, 1):
         mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(asset.suffix.lower())
-        if mime:
+        if mime and asset.name not in canonical:
             manifest.append(f'<item id="asset{index}" href="images/{epub_escape(asset.name)}" media-type="{mime}"/>')
     nav_items = "".join(f'<li><a href="text/chapter-{index:04d}.xhtml">{epub_escape(chapter.get("title") or index)}</a></li>' for index, chapter in enumerate(chapters, 1))
     if appendix is not None:
@@ -1396,16 +1431,21 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
         for index, chapter_path in enumerate(chapter_paths, 1):
             title = epub_escape(chapters[index - 1].get("title") or f"Chapter {index}")
             body_path = appendix_bodies.get(str(chapters[index - 1].get("chapterUid")), chapter_path)
-            with archive.open(f"OEBPS/text/chapter-{index:04d}.xhtml", "w") as target, body_path.open("rb") as source:
+            with archive.open(f"OEBPS/text/chapter-{index:04d}.xhtml", "w") as target:
                 target.write((f'<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>{title}</title><link rel="stylesheet" href="../style.css" type="text/css"/></head><body>').encode("utf-8"))
-                shutil.copyfileobj(source, target, 64 * 1024)
+                if canonical_bytes:
+                    target.write(_dedupe_refs(body_path.read_bytes()))
+                else:
+                    with body_path.open("rb") as source:
+                        shutil.copyfileobj(source, target, 64 * 1024)
                 target.write(b"</body></html>")
         if appendix is not None:
             for fname, data in appendix[0]:
                 with archive.open("OEBPS/text/" + fname, "w") as target:
                     target.write(data)
         for asset in asset_paths:
-            if asset.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+            if (asset.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+                    and asset.name not in canonical):
                 archive.write(asset, "OEBPS/images/" + asset.name, compress_type=zipfile.ZIP_STORED)
         if cover_info and cover_path:
             archive.write(cover_path, "OEBPS/images/cover" + cover_info[0], compress_type=zipfile.ZIP_STORED)

@@ -66,3 +66,34 @@ def test_the_cover_helper_reuses_a_picture_already_written():
         assert first == second, (first, second)
     finally:
         tmp.cleanup()
+
+
+def test_packaging_writes_one_copy_and_rewrites_the_reference():
+    """重新打包旧书时也要去重：正文引用改到留下的那一份。"""
+    import zipfile
+    tmp, root = _workspace()
+    try:
+        images = root / "images"
+        (images / "10-CB_a.jpg").write_bytes(JPEG)
+        (images / "20-remote_a.jpg").write_bytes(JPEG)   # same bytes, other name
+        first = root / "c1.body"
+        second = root / "c2.body"
+        first.write_bytes(b'<p><img src="../images/10-CB_a.jpg" alt="x"/></p>')
+        second.write_bytes(b'<p><img src="../images/20-remote_a.jpg" alt="x"/></p>')
+        epub = root / "out.epub"
+        engine.write_epub(
+            epub,
+            {"bookId": "1", "title": "T", "author": "A"},
+            [{"chapterUid": "1", "title": "一"}, {"chapterUid": "2", "title": "二"}],
+            [first, second], "body{}", images, None)
+        with zipfile.ZipFile(epub) as archive:
+            names = archive.namelist()
+            images_written = [n for n in names if n.startswith("OEBPS/images/")]
+            assert len(images_written) == 1, images_written
+            kept = images_written[0].split("/")[-1]
+            one = archive.read("OEBPS/text/chapter-0001.xhtml")
+            two = archive.read("OEBPS/text/chapter-0002.xhtml")
+        assert ("../images/" + kept).encode() in one
+        assert ("../images/" + kept).encode() in two, "第二处引用没有改到留下的文件"
+    finally:
+        tmp.cleanup()
