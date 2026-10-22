@@ -219,9 +219,16 @@ class _ServiceClient:
             return None
         # First line is the readiness record: the Lua runtime is already up, so
         # the first real request does not pay for it.
+        stream = getattr(process, "stdout", None)
+        if stream is None:
+            try:
+                process.kill()
+            except Exception:
+                pass
+            return None
         try:
-            ready = json.loads(process.stdout.readline() or "{}")
-        except ValueError:
+            ready = json.loads(stream.readline() or "{}")
+        except (OSError, ValueError, AttributeError):
             ready = {}
         if ready.get("event") != "ready":
             try:
