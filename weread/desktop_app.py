@@ -379,36 +379,63 @@ def describe_omissions(report, compact: bool = False) -> str:
     """
     if not isinstance(report, dict):
         return ""
-    lines = []
+    paragraphs, shorts = [], []
     images = int(report.get("images_dropped") or 0)
-    if images:
-        chapters = int(report.get("chapters_with_dropped_images") or 0)
-        lines.append("插图：%d 张（分布在 %d 章）已被微信读书删除，无法再取回。"
-                     % (images, chapters))
+    markers = report.get("images_dropped_note_markers")
+    if markers is None:
+        # 旧 manifest 没有这个字段：从示例反推。示例全是 note.png 时说明丢的
+        # 只是每章一个的「注」角标，不是插图。
+        samples = [str(item) for item in (report.get("dropped_image_examples") or [])]
+        markers = images if (images and samples
+                             and all("note.png" in item.lower() for item in samples)) else 0
+    markers = min(int(markers or 0), images)
+    real_images = images - markers
+    chapters = int(report.get("chapters_with_dropped_images") or 0)
+    if real_images:
+        paragraphs.append("插图 %d 张未能取回（分布在 %d 章，微信读书已删除原图）。"
+                          % (real_images, chapters))
+        shorts.append("%d 张插图无法取回" % real_images)
+    if markers:
+        paragraphs.append("注角标图标 %d 处无法取回（每章一个 note.png）；"
+                          "注文本身已保留，收在书末附录。" % markers)
+        shorts.append("%d 处注角标图标无法取回（注文已保留）" % markers)
     dropped = int(report.get("underline_ranges_dropped") or 0)
     if dropped:
         # The worker emits chapters_with_unplaced_underlines and keeps
         # chapters_with_dropped_underlines only for older builds. Read the new
         # name first and fall back, so the window agrees with the log instead of
         # reporting the underlines as missing from 0 chapters.
-        chapters = int(
+        unplaced = int(
             report.get("chapters_with_unplaced_underlines")
             or report.get("chapters_with_dropped_underlines") or 0)
-        lines.append("划线：%d 条（分布在 %d 章）在原文里没有位置标记，为避免标错句子已略去。"
-                     % (dropped, chapters))
-    if not lines:
+        paragraphs.append("%d 条划线在原文里没有可用的位置标记，为避免标错句子已略去"
+                          "（涉及 %d 章）。" % (dropped, unplaced))
+        shorts.append("%d 条划线无法定位（%d 章）" % (dropped, unplaced))
+    if not paragraphs:
         return ""
     if compact:
         # One line, no embedded newlines, so the status label cannot grow the
         # packed column and push the buttons out of the window.
-        summary = "；".join(line.split("：", 1)[-1].rstrip("。") for line in lines)
-        return "书已下载成功（正文完整）：%s。成品位置见「打开下载目录」。" % summary
-    return ("书已下载成功，EPUB 可直接阅读。\n\n"
-            "· " + "\n· ".join(lines)
-            + "\n\n以上缺失无法补全：微信读书那边已无数据，或原文没有可用的位置标记，"
-              "硬填会把划线标到错误的句子上。正文没有受影响。"
-            + "\n\n成品位置：点下方「打开下载目录」查看 EPUB 文件。"
-            + "\n\n要下载下一本：直接在左侧搜索另一本书并点击它，无需任何收尾操作。")
+        return "书已下载成功（正文完整）：%s。成品见「打开下载目录」。" % "；".join(shorts)
+    break_line = chr(10)
+    return ("书已下载成功，EPUB 可直接阅读。" + break_line * 2
+            + break_line.join(paragraphs)
+            + break_line * 2
+            + "正文没有受影响。成品位置：点下方「打开下载目录」。")
+
+
+def _tidy_reason(reason) -> str:
+    """A short failure reason for a dialog line.
+
+    The stored status already reads like a sentence ("本次操作未完成：操作没有完成。
+    已有进度已保留…"); wrapping it in （…） produced a doubled phrase and a doubled
+    bracket in the queue summary.
+    """
+    text = str(reason or "").strip()
+    for prefix in ("本次操作未完成：", "操作没有完成。"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    return text.rstrip("。") or "未完成"
 
 
 class DesktopApp:
@@ -1463,6 +1490,41 @@ class DesktopApp:
         finally:
             self._modal_depth -= 1
 
+    def _show_notice(self, title: str, message: str) -> None:
+        """正文式说明框：左对齐、按窗口宽度换行。
+
+        messagebox 的正文宽度固定，中文按字符折行，「·」列表换行后第二行会
+        顶回最左边，几段话挤在一起就像排版歪了。说明类消息统一走这里。
+        """
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        self._persist_log("[NOTICE] %s | %s" % (title, message.splitlines()[0]))
+        self._modal_depth += 1
+        try:
+            label = ctk.CTkLabel(dialog, text=message, text_color=self.INK,
+                                 justify="left", anchor="w", font=_font(12),
+                                 wraplength=520)
+            label.pack(anchor="w", padx=24, pady=(20, 16))
+            row = ctk.CTkFrame(dialog, fg_color="transparent")
+            row.pack(fill="x", padx=24, pady=(0, 16))
+            ctk.CTkButton(row, text="确定", width=88, height=32, corner_radius=6,
+                          fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+                          text_color="#FFFFFF", font=_font(12),
+                          command=dialog.destroy).pack(side="right")
+            dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+            dialog.update_idletasks()
+            dialog.geometry("+%d+%d" % (
+                self.root.winfo_rootx()
+                + (self.root.winfo_width() - dialog.winfo_width()) // 2,
+                self.root.winfo_rooty()
+                + (self.root.winfo_height() - dialog.winfo_height()) // 2))
+            dialog.wait_window()
+        finally:
+            self._modal_depth -= 1
+
     def _quiet_button(self, parent, text: str, width: int, command, **kwargs):
         """Secondary action: outlined on the card surface, never a filled slab."""
         return ctk.CTkButton(
@@ -1683,7 +1745,8 @@ class DesktopApp:
                 status = getattr(self, "status_label", None)
                 if status is not None:
                     status.configure(
-                        wraplength=max(320, self.page_host.winfo_width() - 64))
+                        wraplength=int(max(280,
+                                           (self.page_host.winfo_width() / scale) - 56)))
             finally:
                 self._fitting = False
 
@@ -1781,7 +1844,13 @@ class DesktopApp:
         # 实际列宽约 555），「分类 · 出版社」那行于是被右边缘截断——实测显示成
         # 「出版社: 中信出版集团 · 出」。按实际列宽重新设，窗口拉宽拉窄都跟着变。
         def _fit_meta_wrap(event):
-            width = max(200, event.width - 8)
+            # CTkLabel multiplies wraplength by the window scaling, so a physical
+            # pixel width would come out 25% too wide and clip again.
+            try:
+                scale = ctk.ScalingTracker.get_window_dpi_scaling(self.root) or 1.0
+            except Exception:
+                scale = 1.0
+            width = int(max(200, (event.width - 8) / scale))
             for label in (self.book_title_label, self.author_label, self.category_label):
                 label.configure(wraplength=width)
         meta.bind("<Configure>", _fit_meta_wrap)
@@ -2638,7 +2707,7 @@ class DesktopApp:
                             self._persist_log("[OMISSIONS] %s | %s"
                                               % (self.selected_title, notice))
                         else:
-                            self._ask("showinfo", "下载成功（附说明）", notice)
+                            self._show_notice("下载成功（附说明）", notice)
                     else:
                         self.status.set("下载完成，这本已收工。换下一本：在左侧搜索另一本书并点击即可。")
                 elif self.last_unresolved:
@@ -2684,14 +2753,16 @@ class DesktopApp:
                         failed = [r for r in self.queue_results if not r[1]]
                         self._refresh_queue_button()
                         if failed:
-                            lines = "；".join("%s（%s）" % (t, why or "未完成")
-                                             for t, _ok, why in failed)
+                            lines = "；".join(
+                                "%s：%s" % (title, _tidy_reason(why))
+                                for title, _ok, why in failed)
                             self.status.set("队列结束：%d 本成功，%d 本未完成。"
                                             % (len(self.queue_results) - len(failed),
                                                len(failed)))
-                            self._ask("showinfo", "队列结束，有书没完成",
-                                      "未完成的书：" + lines +
-                                      "。已下载的章节都保留，可在书架里点那本书继续下载。")
+                            self._show_notice(
+                                "队列结束，有书没完成",
+                                "未完成的书：" + lines + chr(10) * 2 +
+                                "已下载的章节都保留，可在书架里点那本书继续下载。")
                         else:
                             self.status.set("队列已全部完成（%d 本）。"
                                             % len(self.queue_results))

@@ -2055,6 +2055,11 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         # so. Degrading is only better than failing if the loss is visible.
         dropped_image_urls = list(archive_dropped) + list(remote_dropped)
         dropped_image_count = len(dropped_image_urls)
+        # 其中有多少是「注」角标（note.png）。它不是插图：每章一个，删掉了只是
+        # 少个小图标，注文本身还在 alt 里并被统一附录收走。混在一起计数会让
+        # 完成提示说成「152 张插图」，读者以为正文少了图。
+        dropped_note_markers = sum(
+            1 for item in dropped_image_urls if "note.png" in str(item).lower())
         body = rewrite_images(body_fragment(processed), image_map)
         temp_body = body_path.with_suffix(".body.part")
         temp_review = review_path.with_suffix(".json.part")
@@ -2074,6 +2079,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             # Counted here so the manifest can state exactly what the book is
             # missing, instead of the loss being invisible to the reader.
             "dropped_images": dropped_image_count,
+            "dropped_note_marker_images": dropped_note_markers,
             "dropped_image_urls": dropped_image_urls[:5]}, ensure_ascii=False), encoding="utf-8")
         temp_css.write_text(chapter_css, encoding="utf-8")
         os.replace(temp_body, body_path)
@@ -2159,6 +2165,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     annotation_coverage = {"underline_ranges": 0, "embedded_markers": 0, "chapters_with_underlines": 0,
                           "dropped_underline_ranges": 0, "chapters_with_dropped_underlines": 0}
     dropped_images = 0
+    dropped_note_markers = 0
     chapters_with_dropped_images = 0
     dropped_image_samples: list[str] = []
     missing_underline_samples: list[str] = []
@@ -2201,6 +2208,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
                 })
         gone = int(row.get("dropped_images", 0) or 0)
         dropped_images += gone
+        dropped_note_markers += int(row.get("dropped_note_marker_images") or 0)
         if gone:
             chapters_with_dropped_images += 1
             for name in (row.get("dropped_image_urls") or [])[:3]:
@@ -2297,6 +2305,8 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         "underlines_refused_by_reason": audit["refused_underline_reasons"] if audit["measured_chapters"] else None,
         "underline_mismatch_examples": quote_mismatch_samples if audit["measured_chapters"] else None,
         "images_dropped": dropped_images,
+        # 其中「注」角标（note.png）的条数；旧断点没有这个字段，为 0。
+        "images_dropped_note_markers": dropped_note_markers,
         "chapters_with_dropped_images": chapters_with_dropped_images,
         "dropped_image_examples": dropped_image_samples,
         "reason_underlines": "WeRead reported these highlights but would not supply an "

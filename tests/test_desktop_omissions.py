@@ -43,6 +43,9 @@ def _make_gui():
     instance.asked = []
     instance._ask = lambda kind, title, message, **kw: (
         instance.asked.append((kind, title, message)) or "ok")
+    # 说明类消息现在走正文式对话框，不再经过 messagebox。
+    instance._show_notice = lambda title, message: instance.asked.append(
+        ("showinfo", title, message))
     root.update()
     return root, instance
 
@@ -76,6 +79,25 @@ def test_dropped_images_are_stated_with_their_count():
     assert "100" in notice, notice
     assert "66" in notice, notice
     assert "插图" in notice, notice
+
+
+@test
+def test_note_marker_refusals_are_not_called_illustrations():
+    """152 张全是每章一个的 note.png：说成「插图」会让读者以为正文少了图。"""
+    notice = app.describe_omissions(_report(
+        images_dropped=152, chapters_with_dropped_images=152,
+        dropped_image_examples=["404 https://weread.qq.com/Images/note.png"]))
+    assert "注角标" in notice, notice
+    assert "插图" not in notice, notice
+
+
+@test
+def test_the_explicit_marker_count_splits_the_two_kinds():
+    notice = app.describe_omissions(_report(
+        images_dropped=10, images_dropped_note_markers=2,
+        chapters_with_dropped_images=6))
+    assert "插图 8 张" in notice, notice
+    assert "注角标图标 2 处" in notice, notice
 
 
 @test

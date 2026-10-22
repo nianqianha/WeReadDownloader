@@ -55,10 +55,15 @@ class _BusyProcess:
 
 
 def _mock_dialogs(instance, yes=True):
-    """把 _ask 的 modal 弹窗替换成自动回答，避免测试卡在对话框。"""
+    """把 modal 弹窗替换成自动回答，避免测试卡在对话框。
+
+    说明类消息现在走 _show_notice（自绘对话框），它也会 wait_window；
+    只替换 messagebox 会让队列结束提示把测试永久挂住。
+    """
     original = app.messagebox.askyesno, app.messagebox.showinfo
     app.messagebox.askyesno = lambda *a, **k: yes
     app.messagebox.showinfo = lambda *a, **k: True
+    instance._show_notice = lambda title, message: True
     return original
 
 
@@ -357,6 +362,7 @@ def test_a_queue_does_not_stall_on_the_omission_dialog():
     original = _mock_dialogs(instance)
     real_ask = instance._ask
     instance._ask = lambda *a, **k: asked.append(a[1] if len(a) > 1 else "") or "yes"
+    instance._show_notice = lambda title, message: asked.append(title)
     old_notice = app.describe_omissions
     app.describe_omissions = lambda om, compact=False: "1 条划线没有定位，已略去。"
     try:
