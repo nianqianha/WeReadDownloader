@@ -438,6 +438,86 @@ def _tidy_reason(reason) -> str:
     return text.rstrip("。") or "未完成"
 
 
+class _Scroller(ctk.CTkFrame):
+    """A scrolling area that moves its content with place(), not a canvas.
+
+    CTkScrollableFrame puts the content inside a canvas window item; Tk scrolls
+    by BitBlt-ing the canvas and moving that item afterwards, so a fast
+    scrollbar drag briefly shows text where it used to be. Moving one child
+    frame with place() has no two-phase step: Windows moves the frame and every
+    widget inside it in one operation.
+
+    `content` is the frame callers add rows to.
+    """
+
+    def __init__(self, parent, scrollbar_button_color=None,
+                 scrollbar_button_hover_color=None, **kwargs):
+        kwargs.setdefault("fg_color", "transparent")
+        kwargs.pop("corner_radius", None)
+        super().__init__(parent, corner_radius=0, **kwargs)
+        self._clip = ctk.CTkFrame(self, fg_color=kwargs.get("fg_color", "transparent"),
+                                  corner_radius=0)
+        self._clip.pack(side="left", fill="both", expand=True)
+        bar_kwargs = {"orientation": "vertical", "width": 12,
+                      "command": self._on_scroll, "fg_color": "transparent"}
+        if scrollbar_button_color is not None:
+            bar_kwargs["button_color"] = scrollbar_button_color
+        if scrollbar_button_hover_color is not None:
+            bar_kwargs["button_hover_color"] = scrollbar_button_hover_color
+        self._bar = ctk.CTkScrollbar(self, **bar_kwargs)
+        self._bar.pack(side="right", fill="y", padx=(2, 0))
+        self.content = ctk.CTkFrame(self._clip, fg_color=kwargs.get("fg_color", "transparent"),
+                                    corner_radius=0)
+        self.content.place(x=0, y=0, relwidth=1.0)
+        self._offset = 0
+        self.content.bind("<Configure>", lambda _e: self._refresh())
+        self._clip.bind("<Configure>", lambda _e: self._refresh())
+        # CTk widgets override bind_all() to raise; go through tkinter itself.
+        tk.Misc.bind_all(self, "<MouseWheel>", self._on_wheel, add="+")
+
+    def _metrics(self):
+        total = max(1, self.content.winfo_reqheight())
+        view = max(1, self._clip.winfo_height())
+        return total, view
+
+    def _refresh(self):
+        total, view = self._metrics()
+        max_offset = max(0, total - view)
+        self._offset = max(0, min(int(self._offset), max_offset))
+        try:
+            self.content.place_configure(y=-self._offset)
+            first = self._offset / total
+            last = min(1.0, (self._offset + view) / total)
+            self._bar.set(first, last)
+        except Exception:
+            pass
+
+    def _on_scroll(self, *args):
+        total, view = self._metrics()
+        if not args:
+            return
+        if args[0] == "moveto":
+            self._offset = int(float(args[1]) * total)
+        elif args[0] == "scroll":
+            amount = int(args[1])
+            step = view if len(args) > 2 and args[2] == "pages" else 24
+            self._offset += amount * step
+        self._refresh()
+
+    def _on_wheel(self, event):
+        try:
+            x, y = self.winfo_pointerxy()
+            inside = (self.winfo_rootx() <= x <= self.winfo_rootx() + self.winfo_width()
+                      and self.winfo_rooty() <= y <= self.winfo_rooty() + self.winfo_height())
+        except Exception:
+            return
+        if not inside:
+            return
+        self._offset -= int(event.delta / 120) * 60
+        self._refresh()
+        return "break"
+
+
 class DesktopApp:
     """Enterprise console layout: dark rail, white top bar, carded content.
 
@@ -1022,11 +1102,10 @@ class DesktopApp:
                      text_color=self.FAINT, font=_font(11)).pack(side="left", padx=(10, 0))
         self._quiet_button(head, "刷新书架", 84, self.load_shelf).pack(side="right")
 
-        self.shelf_frame = self._scrollable(card, fg_color=self.SUNKEN,
-                                                  corner_radius=8)
+        self.shelf_frame = _Scroller(card, fg_color=self.SUNKEN)
         self.shelf_frame.pack(fill="x", padx=14, pady=(10, 0))
         self.shelf_frame.configure(height=210)
-        ctk.CTkLabel(self.shelf_frame, text="正在读取微信书架…",
+        ctk.CTkLabel(self.shelf_frame.content, text="正在读取微信书架…",
                      text_color=self.FAINT, font=_font(12)).pack(expand=True, pady=40)
         self.load_shelf()
 
@@ -1143,9 +1222,9 @@ class DesktopApp:
     def _show_shelf_error(self):
         if not hasattr(self, "shelf_frame") or not self.shelf_frame.winfo_exists():
             return
-        for widget in self.shelf_frame.winfo_children():
+        for widget in self.shelf_frame.content.winfo_children():
             widget.destroy()
-        ctk.CTkLabel(self.shelf_frame,
+        ctk.CTkLabel(self.shelf_frame.content,
                      text="书架读取失败。请检查登录状态，再点「刷新书架」重试。",
                      text_color=self.FAINT, font=_font(12), justify="center"
                      ).pack(expand=True, pady=40)
@@ -1154,10 +1233,10 @@ class DesktopApp:
         """Render the account's shelf into the shelf frame."""
         if not hasattr(self, "shelf_frame") or not self.shelf_frame.winfo_exists():
             return
-        for widget in self.shelf_frame.winfo_children():
+        for widget in self.shelf_frame.content.winfo_children():
             widget.destroy()
         if not rows:
-            ctk.CTkLabel(self.shelf_frame,
+            ctk.CTkLabel(self.shelf_frame.content,
                          text="书架是空的，或登录状态已过期。\n\n点「刷新书架」重试，或先「检查登录」。",
                          text_color=self.FAINT, font=_font(12), justify="center"
                          ).pack(expand=True, pady=40)
@@ -1175,7 +1254,7 @@ class DesktopApp:
         author = str(book.get("author") or "").strip() or "作者未知"
         category = str(book.get("category") or "").strip()
 
-        row = ctk.CTkFrame(self.shelf_frame, fg_color=self.CARD, corner_radius=6,
+        row = ctk.CTkFrame(self.shelf_frame.content, fg_color=self.CARD, corner_radius=6,
                            border_width=1, border_color=self.HAIRLINE, height=56)
         row.pack(fill="x", pady=2, padx=2)
         row.pack_propagate(False)
@@ -1686,6 +1765,7 @@ class DesktopApp:
             scrollbar_button_color=self.HAIRLINE,
             scrollbar_button_hover_color=self.ACCENT_TINT)
         page_scroll.pack(fill="both", expand=True)
+        self.page_scroll = page_scroll
         page = ctk.CTkFrame(page_scroll, fg_color=self.BG, corner_radius=0)
         page.pack(fill="x", expand=True)
         self.pages["下载工坊"] = page_scroll
@@ -1734,6 +1814,14 @@ class DesktopApp:
             if head is None or panel is None or getattr(self, "_fitting", False):
                 return
             viewport = self.page_host.winfo_height()
+            # page_host 在窗口刚建立时可能还没收到最终的几何，报出比可视区更大的
+            # 高度；外层滚动视口（canvas）才是真正的可用高度，两者取小。
+            canvas = getattr(self.page_scroll, "_parent_canvas", None)
+            if canvas is not None:
+                try:
+                    viewport = min(viewport, canvas.winfo_height())
+                except Exception:
+                    pass
             if viewport <= 1:
                 return
             self._fitting = True
@@ -1769,6 +1857,10 @@ class DesktopApp:
             if event.widget is self.root:
                 _fit_body_to_window()
         self.root.bind("<Configure>", _on_root_configure)
+        # 可视区大小变化（窗口缩放、滚动条出现/消失）也重算一次。
+        canvas = getattr(self.page_scroll, "_parent_canvas", None)
+        if canvas is not None:
+            canvas.bind("<Configure>", _fit_body_to_window, add="+")
 
         left = ctk.CTkFrame(self.body, fg_color=self.CARD, corner_radius=self.RADIUS,
                             border_width=1, border_color=self.HAIRLINE, width=380)
@@ -1790,8 +1882,8 @@ class DesktopApp:
         # 默认 200 会在矮窗口里把底部的翻页条挤出可视区：pack 先满足先入队的
         # 控件，列表请求太高，后打包的 page_bar 只剩 1x1（测试里实测 4 页结果
         # 时翻页条消失）。
-        self.results = self._scrollable(
-            left, fg_color=self.CARD, corner_radius=0, height=120,
+        self.results = _Scroller(
+            left, fg_color=self.CARD, height=120,
             scrollbar_button_color=self.HAIRLINE, scrollbar_button_hover_color=self.ACCENT_TINT)
         self.results.pack(fill="both", expand=True, padx=(10, 6), pady=(0, 4))
 
@@ -2921,7 +3013,7 @@ class DesktopApp:
         Building the widgets and letting Tk repaint them is the expensive part,
         so this only ever touches one page's worth of children.
         """
-        for widget in self.results.winfo_children():
+        for widget in self.results.content.winfo_children():
             widget.destroy()
         self.card_widgets.clear()
         for item in self._page_slice():
@@ -2964,7 +3056,7 @@ class DesktopApp:
         # separated by hairlines, cover left, text middle, rating right, and a
         # 3px green bar plus green wash marking the selected row.
         selected = bid == self.selected_id
-        card = ctk.CTkFrame(self.results, fg_color=self.GREEN_TINT if selected else self.CARD,
+        card = ctk.CTkFrame(self.results.content, fg_color=self.GREEN_TINT if selected else self.CARD,
                             corner_radius=0, border_width=0)
         card.pack(fill="x", padx=2, pady=0)
         bar = ctk.CTkFrame(card, width=3, corner_radius=0,
@@ -3071,7 +3163,7 @@ class DesktopApp:
         if self._is_busy():
             self.status.set("当前有任务正在运行，等它结束再搜索。")
             return
-        for widget in self.results.winfo_children():
+        for widget in self.results.content.winfo_children():
             widget.destroy()
         self.book_rows.clear()
         self.card_widgets.clear()

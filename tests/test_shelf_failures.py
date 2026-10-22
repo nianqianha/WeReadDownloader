@@ -53,8 +53,10 @@ class ShelfFailuresTests(unittest.TestCase):
 
     def test_error_renderer_removes_the_placeholder_and_shows_recovery(self):
         placeholder = Mock()
+        # 书架区现在是 _Scroller：行放在 .content 里（滚动靠 place 移动它）。
+        content = SimpleNamespace(winfo_children=lambda: [placeholder])
         self.app.shelf_frame = SimpleNamespace(winfo_exists=lambda: True,
-                                               winfo_children=lambda: [placeholder])
+                                               content=content)
         self.app.FAINT = "gray"
         self.namespace["_show_shelf_error"](self.app)
         placeholder.destroy.assert_called_once_with()

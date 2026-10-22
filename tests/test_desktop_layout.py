@@ -216,7 +216,7 @@ def test_the_queue_checkbox_is_not_clipped_by_a_long_title():
         instance.result_rows = [item]
         instance._build_book_card(item)
         root.update_idletasks()
-        card = instance.results.winfo_children()[-1]
+        card = instance.results.content.winfo_children()[-1]
         boxes = _find_checkboxes(card)
         assert boxes, "卡片上没有加入队列勾选框"
         box = boxes[0]
