@@ -416,6 +416,31 @@ WeReadWorker.exe (CLI 引擎)
 - **在别的页面搜索自动切回下载工坊**：结果只在工作区出现，留在原页会以为没反应。
 - **队列面板按书数收缩**：1 本时不再拉出一个大白框。
 
+### 2026-10-22 常驻 worker：一次启动，多次复用（**Changed / 架构**）
+
+用户反馈"为什么获取这么慢"。实测把原因拆开了：
+
+| 场景 | 耗时 |
+| --- | --- |
+| 命令行直接跑 `WeReadWorker.exe --book-info` | 0.8–0.9 s（引擎 + 一次 HTTP） |
+| 冷启动 worker（LuaJIT + 3000+ 插件文件） | 约 0.6–1 s |
+| 每次覆盖安装后第一次启动 | 20–28 s（Defender 扫描新 exe；日志里的 `[SPAWN] … took 23–28 s`） |
+
+改动：
+
+- 引擎新增 `--serve`：从 stdin 一次读一行 JSON 请求，复用**同一个** LuaJIT
+  （`lua_runtime()` 加缓存），凭据每个请求重新读取，登录后立刻生效。
+  输出统一分帧成 `{"id": n, "line": "..."}`，书名的引号/制表符不会和协议混淆。
+- GUI 新增 `_ServiceClient`：常驻一份 worker，负责 auth / shelf / search /
+  book-info / probe；导出和扫码登录仍各自起独立进程（要能暂停、要交互）。
+  服务不可用或中途退出时自动退回原来的"按需起进程"，功能不受影响。
+- 常驻请求没有 `process` 可判活，新增 `_service_job` 记当前 job，避免
+  同一个窗口叠两个任务。
+- stdin/stdout 强制 UTF-8（`PYTHONIOENCODING` + `sys.stdin.reconfigure`），
+  否则子进程按 cp936 读请求，中文关键词和书名会变乱码。
+- 实测（warm）：3 次 book-info 1.41 s vs 3 个进程 2.21 s；单次点击从约 1 s
+  降到约 0.3–0.5 s（主要剩网络）。
+
 **真机验证（Windows，安装包 1.0.5）**
 
 - 全程用 GUI 点击：搜索「汉书」→ 选中 → 勾选「加入队列」→ 搜「三字经」→ 勾选 →
