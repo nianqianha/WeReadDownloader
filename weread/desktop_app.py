@@ -139,6 +139,158 @@ APP_TITLE = "WeReadDownloader"
 PRODUCT_NAME = "WeReadDownloader"
 SINGLE_INSTANCE_KEY = "WeReadDownloader-Graphics"
 
+# 这些动作只读、几秒内结束，走常驻的 --serve 进程；导出和扫码登录各自需要
+# 独立的进程（要能暂停/终止、要交互），继续按需起。
+SERVICE_ACTIONS = frozenset({"auth", "shelf", "search", "book-info", "probe"})
+
+
+def service_request_for(action: str, args: list[str]):
+    """argv -> (cmd, args) for the service protocol; None when not serviceable."""
+    if action not in SERVICE_ACTIONS:
+        return None
+    if "--check-auth" in args:
+        return ("auth", {})
+    if "--shelf" in args:
+        return ("shelf", {})
+    for flag, name in (("--search", "search"), ("--book-info", "book-info"),
+                       ("--probe-book", "probe")):
+        if flag in args:
+            index = args.index(flag)
+            value = args[index + 1] if index + 1 < len(args) else ""
+            if name == "search":
+                return ("search", {"keyword": value})
+            payload = {"bookId": value}
+            if "--probe-chapter" in args:
+                chapter_at = args.index("--probe-chapter")
+                if chapter_at + 1 < len(args):
+                    payload["chapter"] = args[chapter_at + 1]
+            return (name, payload)
+    return None
+
+
+class _ServiceClient:
+    """One long-lived worker process, spoken to with framed JSON lines.
+
+    Measured on this machine: every cold worker start costs ~1 s (LuaJIT boot
+    plus the 3k-file plugin tree), and the GUI paid it for each search, detail
+    lookup and auth check. This keeps one process warm and reuses it.
+
+    Every failure path returns None so the caller can fall back to the old
+    spawn-per-request behaviour; a broken service must never make the app
+    unusable.
+    """
+
+    def __init__(self, log=print):
+        self._process = None
+        self._lock = threading.Lock()
+        self._log = log
+
+    def _kill_locked(self):
+        process, self._process = self._process, None
+        if process is None:
+            return
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+    def _ensure_locked(self):
+        process = self._process
+        if process is not None and process.poll() is None:
+            return process
+        self._process = None
+        command = worker_command(["--serve"])
+        if command is None:
+            return None
+        env = os.environ.copy()
+        # stdin AND stdout are UTF-8 in the protocol; without this the child
+        # falls back to the console codepage (cp936 here) and a Chinese search
+        # keyword arrives as mojibake.
+        env["PYTHONIOENCODING"] = "utf-8"
+        try:
+            process = subprocess.Popen(
+                command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+                errors="replace", bufsize=1, cwd=str(Path(command[0]).parent),
+                env=env,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except OSError as exc:
+            self._log("[SERVICE] start failed: %s: %s" % (type(exc).__name__, exc))
+            return None
+        # First line is the readiness record: the Lua runtime is already up, so
+        # the first real request does not pay for it.
+        try:
+            ready = json.loads(process.stdout.readline() or "{}")
+        except ValueError:
+            ready = {}
+        if ready.get("event") != "ready":
+            try:
+                process.kill()
+            except Exception:
+                pass
+            return None
+        self._process = process
+        return process
+
+    def warm(self):
+        """Start the worker before the first click; safe to call on a thread."""
+        with self._lock:
+            return self._ensure_locked() is not None
+
+    def request(self, request_id, command, arguments, on_line):
+        """Send one request; returns the exit code, None when no service is available."""
+        with self._lock:
+            process = self._ensure_locked()
+            if process is None:
+                return None
+            payload = json.dumps({"id": request_id, "cmd": command, "args": arguments},
+                                 ensure_ascii=False)
+            try:
+                process.stdin.write(payload + "\n")
+                process.stdin.flush()
+            except (OSError, ValueError):
+                self._kill_locked()
+                return None
+            while True:
+                try:
+                    raw = process.stdout.readline()
+                except (OSError, ValueError):
+                    raw = ""
+                if not raw:
+                    self._kill_locked()
+                    on_line("FAILED WorkerUnavailable 常驻下载组件意外退出")
+                    return -1
+                try:
+                    message = json.loads(raw)
+                except ValueError:
+                    continue
+                if message.get("id") != request_id:
+                    continue
+                if "line" in message:
+                    on_line(str(message["line"]))
+                    continue
+                if message.get("event") == "end":
+                    return int(message.get("code", 1))
+
+    def shutdown(self):
+        with self._lock:
+            process = self._process
+            self._process = None
+            if process is None:
+                return
+            try:
+                process.stdin.write('{"cmd": "quit"}\n')
+                process.stdin.flush()
+            except Exception:
+                pass
+            try:
+                process.wait(timeout=1.5)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
 # Type scale. The console voice is the OS UI sans at every size -- the old
 # serif display face was part of the editorial look and is gone with it.
 SANS = "Microsoft YaHei UI"
@@ -328,6 +480,12 @@ class DesktopApp:
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
         self.events: queue.Queue[tuple] = queue.Queue()
+        # 常驻 worker：只承担 auth/shelf/search/book-info/probe，导出与登录
+        # 仍各自起进程。首次请求时启动（约 1 s），之后复用同一个 LuaJIT。
+        self._service = _ServiceClient(self._persist_log)
+        # 常驻请求没有 process 可用来判断"还在跑"，用 job 号记着；
+        # 不记的话 _is_busy() 会立刻返回 False，用户可以叠第二个任务。
+        self._service_job: int | None = None
         self.process: subprocess.Popen | None = None
         # True between "the user clicked" and "the off-thread Popen returned";
         # see _start_worker for why the spawn no longer runs on the Tk thread.
@@ -1917,12 +2075,60 @@ class DesktopApp:
         # worker while the first is still being created off-thread.
         if self._spawn_pending:
             return True
+        if self._service_job is not None:
+            return True
         return self.process is not None and self.process.poll() is None
 
     def _start_worker(self, args: list[str], action: str, status: str) -> bool:
         if self._is_busy():
             self.status.set("当前还有一个任务在运行，请等它结束再操作。")
             return False
+        request = service_request_for(action, args)
+        if request is not None:
+            return self._start_service_job(request, args, action, status)
+        return self._spawn_worker(args, action, status)
+
+    def _start_service_job(self, request, args: list[str], action: str, status: str) -> bool:
+        """Fast path: one warm worker answers read-only commands.
+
+        A cold worker costs ~1 s (LuaJIT + plugin tree); keeping one alive makes
+        search / details / auth feel instant. If the service cannot serve the
+        request we fall back to the old spawn-on-demand path.
+        """
+        self._spawn_pending = True
+        self.current_action = action
+        self.status.set(status)
+        self._spawn_started = time.perf_counter()
+        job = self._begin_job(action)
+        self._service_job = job
+        command, arguments = request
+
+        def run():
+            started = time.perf_counter()
+            code = self._service.request(job, command, arguments, self._service_line)
+            if code is None:
+                self.events.put(("service-miss", (args, action, status)))
+                return
+            if code >= 0:
+                elapsed = (time.perf_counter() - started) * 1000.0
+                if elapsed > 800:
+                    self._persist_log("[SERVICE] %s took %.0f ms" % (action, elapsed))
+            self.events.put(("done", (job, code)))
+
+        threading.Thread(target=run, daemon=True).start()
+        return True
+
+    def _service_line(self, line: str) -> None:
+        self.events.put(("line", line))
+
+    def _on_service_miss(self, args, action: str, status: str) -> None:
+        self._spawn_pending = False
+        self._service_job = None
+        self._persist_log("[SERVICE] unavailable for %s; falling back to a fresh worker"
+                          % action)
+        self._spawn_worker(args, action, status)
+
+    def _spawn_worker(self, args: list[str], action: str, status: str) -> bool:
         command = worker_command(args)
         if command is None:
             self._log(f"下载组件未找到：{WORKER_NAME}")
@@ -1974,17 +2180,14 @@ class DesktopApp:
         threading.Thread(target=spawn, daemon=True).start()
         return True
 
-    def _handle_spawned(self, action: str, process) -> None:
-        """Adopt a worker started off the Tk thread; runs on the Tk thread."""
-        if not self._spawn_pending:
-            # A newer action superseded this spawn; kill the orphan.
-            try:
-                process.kill()
-            except Exception:
-                pass
-            return
+    def _begin_job(self, action: str) -> int:
+        """Enter the busy state for one job and return its sequence number.
+
+        Shared by the spawn path and the warm-service path so both reset exactly
+        the same widgets: a service request must look like any other job to the
+        rest of the window.
+        """
         self._spawn_pending = False
-        self.process = process
         self.last_failure_status = None
         try:
             self.retry_button.pack_forget()
@@ -2000,6 +2203,19 @@ class DesktopApp:
         self.last_unresolved = False
         self.omissions = None
         self.pause_button.configure(state="normal" if action == "export" else "disabled")
+        return job
+
+    def _handle_spawned(self, action: str, process) -> None:
+        """Adopt a worker started off the Tk thread; runs on the Tk thread."""
+        if not self._spawn_pending:
+            # A newer action superseded this spawn; kill the orphan.
+            try:
+                process.kill()
+            except Exception:
+                pass
+            return
+        self.process = process
+        job = self._begin_job(action)
         self.reader = threading.Thread(target=self._read_output, args=(self.process, job), daemon=True)
         self.reader.start()
 
@@ -2209,6 +2425,8 @@ class DesktopApp:
                     self._handle_spawned(*value)
                 elif kind == "spawn-failed":
                     self._handle_spawn_failed(*value)
+                elif kind == "service-miss":
+                    self._on_service_miss(*value)
                 elif kind == "done":
                     self._handle_done(*value)
                 elif kind == "update-failed":
@@ -2374,6 +2592,8 @@ class DesktopApp:
             return  # a finished, superseded worker must not reset live state
         action = self.current_action
         self.process = None
+        if self._service_job == job:
+            self._service_job = None
         self.current_action = ""
         self._set_busy_controls(False)
         self.pause_button.configure(state="disabled")
@@ -3770,6 +3990,19 @@ class DesktopApp:
         self.status.set(message)
         self._ask("showerror", "更新失败", message)
 
+    def shutdown(self) -> None:
+        """Window is closing: stop the warm worker and any export still running."""
+        try:
+            self._service.shutdown()
+        except Exception:
+            pass
+        process = self.process
+        if process is not None:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+
     def stop(self):
         if not self._is_busy():
             return
@@ -3951,6 +4184,13 @@ def main() -> int:
         # carried on: the panel's own state tells the user what to do next.
         print("[FIRST_RUN] credential check failed: %s: %s"
               % (type(exc).__name__, exc), file=sys.stderr)
+    # 启动后后台把常驻 worker 拉起来：第一次搜索/点书就不用再等它启动。
+    # 覆盖安装后的第一次启动会被 Defender 扫描十几秒，放在后台线程里不挡窗口。
+    try:
+        threading.Thread(target=app._service.warm, daemon=True).start()
+    except Exception as exc:
+        print("[SERVICE] warm-up failed: %s: %s" % (type(exc).__name__, exc),
+              file=sys.stderr)
     # 启动后静默查一次更新：无网络/无新版本一律不打扰；发现新版本且非忙才弹提示。
     try:
         threading.Thread(target=lambda: app._check_for_update(silent=True),
@@ -3959,6 +4199,7 @@ def main() -> int:
         print("[SELF_UPDATE] startup check failed: %s: %s"
               % (type(exc).__name__, exc), file=sys.stderr)
     root.mainloop()
+    app.shutdown()
     return 0
 
 

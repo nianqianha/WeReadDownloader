@@ -147,7 +147,16 @@ def _load_lua_module(lua: LuaRuntime, module: str, path: Path) -> None:
     lua.execute(b'package.loaded[_module_name] = (function()\n' + source + b'\nend)()')
 
 
+# --serve 模式一个进程要连续处理多条命令；LuaJIT 启动 + 加载 3 千个插件文件
+# 是每次请求的大头（约 0.5-0.8 s），所以运行时只建一次。普通 CLI 一次只跑
+# 一条命令，缓存对它没有影响。
+_LUA_CACHE: LuaRuntime | None = None
+
+
 def lua_runtime() -> LuaRuntime:
+    global _LUA_CACHE
+    if _LUA_CACHE is not None:
+        return _LUA_CACHE
     # 插件只在真正需要 Lua 时才必须存在（见文件上方 PLUGIN 的说明）。
     if PLUGIN is None:
         raise RuntimeError(PLUGIN_MISSING)
@@ -191,6 +200,7 @@ _EXPORT = {
   reader_url=function(b,c) return W.reader_url(b,c) end,
 }
 ''')
+    _LUA_CACHE = lua
     return lua
 
 
@@ -2330,6 +2340,137 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     return bundle_path
 
 
+SERVICE_COMMANDS = {
+    "auth": lambda a: ["--check-auth"],
+    "shelf": lambda a: ["--shelf"],
+    "search": lambda a: ["--search", str(a.get("keyword") or "")],
+    "book-info": lambda a: ["--book-info", str(a.get("bookId") or "")],
+    "probe": lambda a: (["--probe-book", str(a.get("bookId") or "")]
+                        + (["--probe-chapter", str(a["chapter"])] if a.get("chapter") else [])),
+}
+
+
+def service_argv(command: str, arguments: dict) -> list[str] | None:
+    """Translate one service request into the CLI arguments main() already knows."""
+    builder = SERVICE_COMMANDS.get(command)
+    return None if builder is None else builder(arguments)
+
+
+class _FrameWriter:
+    """Engine stdout/stderr -> one JSON record per line, tagged with the request.
+
+    Engine output is ordinary text (TSV rows, a JSON blob, human sentences), so
+    it cannot be told apart from control records by shape. Framing every line
+    as {"id": n, "line": "..."} keeps the stream unambiguous no matter what the
+    book titles or error messages contain.
+    """
+
+    def __init__(self, emit, request_id):
+        self._emit = emit
+        self._id = request_id
+        self._buffer = ""
+
+    def write(self, text):
+        if not text:
+            return 0
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._emit({"id": self._id, "line": line})
+        return len(text)
+
+    def flush(self):
+        if self._buffer:
+            self._emit({"id": self._id, "line": self._buffer})
+            self._buffer = ""
+
+    # force_utf8_stdio() probes these on whatever sys.stdout happens to be.
+    def reconfigure(self, **_kwargs):
+        return None
+
+    def isatty(self):
+        return False
+
+    def writable(self):
+        return True
+
+
+def serve_forever() -> int:
+    """Answer JSON requests from stdin until EOF (the GUI keeps one alive).
+
+    Starting a worker costs ~1 s -- LuaJIT boot plus loading the plugin tree --
+    and the GUI was paying it for every search, detail lookup and auth check.
+    Here the runtime is built once and each request reuses it; credentials are
+    re-read per request so a login takes effect immediately.
+
+    Wire format, one JSON object per line:
+        -> {"id": 7, "cmd": "search", "args": {"keyword": "三字经"}}
+        <- {"id": 7, "event": "begin"}
+        <- {"id": 7, "line": "<engine output line>"}
+        <- {"id": 7, "event": "end", "code": 0}
+    """
+    force_utf8_stdio()
+    try:
+        # 请求里带中文关键词；不钉住编码时子进程会按控制台代码页（cp936）读，
+        # 书名的 JSON 就会被解成乱码。
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
+    real_out = sys.stdout
+
+    def emit(record: dict) -> None:
+        real_out.write(json.dumps(record, ensure_ascii=False) + "\n")
+        real_out.flush()
+
+    try:
+        lua_runtime()
+    except Exception as exc:
+        emit({"event": "fatal", "detail": "%s: %s" % (type(exc).__name__, exc)})
+        return 1
+    emit({"event": "ready"})
+    for raw in sys.stdin:
+        text = raw.strip()
+        if not text:
+            continue
+        try:
+            request = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(request, dict):
+            continue
+        request_id = request.get("id")
+        command = str(request.get("cmd") or "")
+        if command == "quit":
+            emit({"id": request_id, "event": "end", "code": 0})
+            break
+        argv = service_argv(command, request.get("args") or {})
+        if argv is None:
+            emit({"id": request_id, "event": "end", "code": 2,
+                  "detail": "unknown command %r" % command})
+            continue
+        emit({"id": request_id, "event": "begin"})
+        capture = _FrameWriter(emit, request_id)
+        saved_argv = sys.argv
+        saved_out, saved_err = sys.stdout, sys.stderr
+        sys.argv = ["weread_worker", *argv]
+        sys.stdout = capture
+        sys.stderr = capture
+        code = 0
+        try:
+            code = main()
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+        except Exception as exc:
+            capture.write("FAILED %s %s\n" % (type(exc).__name__, exc))
+            code = 1
+        finally:
+            sys.stdout, sys.stderr = saved_out, saved_err
+            sys.argv = saved_argv
+            capture.flush()
+        emit({"id": request_id, "event": "end", "code": code})
+    return 0
+
+
 def main() -> int:
     force_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -2341,6 +2482,9 @@ def main() -> int:
     parser.add_argument("--probe-chapter", help="Chapter UID for --probe-book (default: first readable chapter)")
     parser.add_argument("--shelf", action="store_true",
                         help="List the signed-in account's shelf as JSON (for 我的书架)")
+    parser.add_argument("--serve", action="store_true",
+                        help="Persistent mode for the GUI: read JSON requests from "
+                             "stdin and answer them one at a time on one warm Lua runtime")
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--jobs", type=int, default=1, help="Concurrent chapter workers (1-4; default 1 for LuaJIT stability)")
     parser.add_argument("--no-thoughts", action="store_true",
@@ -2363,6 +2507,8 @@ def main() -> int:
                              "notes only, or thoughts only. Ignored without "
                              "--unified-appendix.")
     args = parser.parse_args()
+    if args.serve:
+        return serve_forever()
     want_thoughts = not args.no_thoughts
     want_underlines = not args.no_annotations
     if not want_underlines:
