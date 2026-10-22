@@ -97,3 +97,50 @@ def test_packaging_writes_one_copy_and_rewrites_the_reference():
         assert ("../images/" + kept).encode() in two, "第二处引用没有改到留下的文件"
     finally:
         tmp.cleanup()
+
+
+def test_an_oversized_image_is_skipped_not_written_and_not_a_chapter_failure(monkeypatch):
+    """>IMAGE_LIMIT：抛专用异常，让章节把它当"缺一张图"，而不是整章失败。"""
+    tmp, root = _workspace()
+    try:
+        engine._IMAGE_DIGESTS.clear()
+        monkeypatch.setattr(engine, "IMAGE_LIMIT", 8)
+        stream = io.BytesIO(JPEG[12:])
+        try:
+            engine._save_image_stream(stream, JPEG[:12], root, set(), "big.jpg", "10")
+        except engine._OversizeImage as exc:
+            assert "MiB" in str(exc) or "KiB" in str(exc)
+        else:
+            raise AssertionError("oversized image did not raise _OversizeImage")
+        assert not list((root / "images").iterdir()), "oversized image was left on disk"
+    finally:
+        tmp.cleanup()
+
+
+def test_a_dropped_image_tag_is_removed_but_a_note_marker_survives():
+    html = ('<p>甲<img src="" alt="图"/></p>'
+            '<p><img class="qqreader-footnote" src="" alt="注文"/></p>')
+    out = engine._strip_blank_images(html)
+    assert '<img src="" alt="图"/>' not in out, out
+    assert "qqreader-footnote" in out, out
+
+
+def test_unlink_quietly_survives_a_file_held_by_another_process(monkeypatch):
+    tmp, root = _workspace()
+    try:
+        target = root / "held.part"
+        target.write_bytes(b"x")
+        calls = {"n": 0}
+        real_unlink = Path.unlink
+
+        def flaky(self, *a, **k):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError(32, "in use")
+            return real_unlink(self, *a, **k)
+
+        monkeypatch.setattr(Path, "unlink", flaky)
+        engine._unlink_quietly(target)          # must not raise
+        assert not target.exists()
+    finally:
+        tmp.cleanup()

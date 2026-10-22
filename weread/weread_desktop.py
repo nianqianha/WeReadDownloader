@@ -73,9 +73,13 @@ API = "https://i.weread.qq.com/api/agent/gateway"
 WEB = "https://weread.qq.com"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0"
 CHAPTER_HTML_LIMIT = 16 * 1024 * 1024
-ARCHIVE_LIMIT = 128 * 1024 * 1024
+ARCHIVE_LIMIT = 512 * 1024 * 1024
 COOKIE_STATE_LOCK = threading.Lock()
-IMAGE_LIMIT = 16 * 1024 * 1024
+# 单张图片上限。表格式扫描/高清插图常见 16-40 MiB；超过上限不再让整章失败，
+# 而是按「缺失一张图」处理并在完成提示里说明（见 _OversizeImage）。
+IMAGE_LIMIT = 64 * 1024 * 1024
+# 图片包里单个条目的声明大小上限；超过直接跳过、不读入内存。
+ARCHIVE_ENTRY_LIMIT = 128 * 1024 * 1024
 # Machine-readable stdout contract shared with desktop_app.py.
 SEARCH_FIELDS = ("bookId", "title", "author", "cover", "newRating", "newRatingCount", "category")
 # An underline's API range is a "<start>-<end>" character span, and the plugin
@@ -1052,6 +1056,10 @@ def safe_name(value: str) -> str:
     return value[:120] or "WeRead"
 
 
+class _OversizeImage(Exception):
+    """A single image exceeded IMAGE_LIMIT; drop it, keep the chapter."""
+
+
 def _image_extension(data: bytes) -> str | None:
     if data.startswith(b"\xff\xd8\xff"): return ".jpg"
     if data.startswith(b"\x89PNG\r\n\x1a\n"): return ".png"
@@ -1064,6 +1072,35 @@ def _image_extension(data: bytes) -> str | None:
 # 字节完全相同。以前按"章节号-文件名"各存一份，结果汉书 1569 个图片条目里只有
 # 686 张唯一图片，重复占 94 MB（EPUB 199 MB 里几乎一半是重复图）。
 # 这里按内容哈希去重：第二份直接复用第一次的文件名，不再落盘。
+def _unlink_quietly(path: Path) -> None:
+    """Delete a temp file; a scanner holding it for a moment is not an error.
+
+    WinError 32 means another process (usually antivirus or the search indexer)
+    has the file open. Retrying briefly gets past it; giving up silently is
+    still better than failing the chapter over a temp file.
+    """
+    for _ in range(5):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+        except OSError:
+            return
+
+
+def _replace_retry(source: Path, target: Path) -> None:
+    """os.replace with a few retries: Windows refuses while the target is open."""
+    for attempt in range(5):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05)
+
+
 _IMAGE_DIGESTS: dict[tuple[str, str], str] = {}
 _IMAGE_DIGESTS_LOCK = threading.Lock()
 
@@ -1134,7 +1171,7 @@ def extract_images(chapter: dict[str, Any], http: requests.Session, referer: str
                 total += len(chunk)
                 if total > ARCHIVE_LIMIT:
                     output.close()
-                    archive_path.unlink(missing_ok=True)
+                    _unlink_quietly(archive_path)
                     raise RuntimeError("chapter image archive exceeds 128 MiB")
                 output.write(chunk)
     archive_path.rename(archive_path.with_suffix(""))
@@ -1145,37 +1182,54 @@ def extract_images(chapter: dict[str, Any], http: requests.Session, referer: str
             with zipfile.ZipFile(archive_path) as archive:
                 for info in archive.infolist():
                     if info.is_dir(): continue
-                    if info.file_size > 32 * 1024 * 1024:
-                        raise RuntimeError("chapter archive entry exceeds 32 MiB")
+                    entry_name = Path(info.filename).name
+                    if info.file_size > ARCHIVE_ENTRY_LIMIT:
+                        dropped_archive_images.append("oversize %s" % entry_name)
+                        mapped[entry_name] = ""     # src="" -> 该 <img> 会被删掉
+                        continue
                     with archive.open(info) as source:
                         head = source.read(12)
-                        ext = _image_extension(head)
-                        if not ext: continue
-                        target_name = _save_image_stream(source, head, root, used,
-                                                         Path(info.filename).name,
-                                                         str(chapter["chapterUid"]))
+                        if not _image_extension(head): continue
+                        try:
+                            target_name = _save_image_stream(source, head, root, used,
+                                                             entry_name,
+                                                             str(chapter["chapterUid"]))
+                        except _OversizeImage as exc:
+                            dropped_archive_images.append(
+                                "oversize %s (%s)" % (entry_name, exc))
+                            mapped[entry_name] = ""
+                            continue
                         if target_name:
-                            mapped[Path(info.filename).name] = "../images/" + target_name
+                            mapped[entry_name] = "../images/" + target_name
                             mapped[target_name] = "../images/" + target_name
         except zipfile.BadZipFile:
             with tarfile.open(archive_path, mode="r:*") as archive:
                 for member in archive.getmembers():
                     if not member.isfile(): continue
-                    if member.size > 32 * 1024 * 1024:
-                        raise RuntimeError("chapter archive entry exceeds 32 MiB")
+                    entry_name = Path(member.name).name
+                    if member.size > ARCHIVE_ENTRY_LIMIT:
+                        dropped_archive_images.append("oversize %s" % entry_name)
+                        mapped[entry_name] = ""
+                        continue
                     source = archive.extractfile(member)
                     if not source: continue
                     with source:
                         head = source.read(12)
                         if not _image_extension(head): continue
-                        target_name = _save_image_stream(source, head, root, used,
-                                                         Path(member.name).name,
-                                                         str(chapter["chapterUid"]))
+                        try:
+                            target_name = _save_image_stream(source, head, root, used,
+                                                             entry_name,
+                                                             str(chapter["chapterUid"]))
+                        except _OversizeImage as exc:
+                            dropped_archive_images.append(
+                                "oversize %s (%s)" % (entry_name, exc))
+                            mapped[entry_name] = ""
+                            continue
                         if target_name:
-                            mapped[Path(member.name).name] = "../images/" + target_name
+                            mapped[entry_name] = "../images/" + target_name
                             mapped[target_name] = "../images/" + target_name
     finally:
-        archive_path.unlink(missing_ok=True)
+        _unlink_quietly(archive_path)
     return mapped, dropped_archive_images
 
 
@@ -1187,7 +1241,7 @@ def _save_image_stream(source: Any, head: bytes, root: Path,
     # 同一张图换个章节号就会再存一份。
     data = head + source.read(IMAGE_LIMIT)
     if len(data) > IMAGE_LIMIT:
-        raise RuntimeError("chapter image exceeds 16 MiB")
+        raise _OversizeImage("%.1f MiB" % (len(data) / 1048576.0))
     reused = _reuse_image(data, root)
     if reused:
         return reused
@@ -1268,12 +1322,22 @@ def download_remote_images(xhtml: str, http: requests.Session,
         image_path = root / "incoming" / (filename + ".part")
         image_path.parent.mkdir(parents=True, exist_ok=True)
         total = 0
+        exceeded = False
         with response, image_path.open("wb") as output:
             for chunk in response.iter_content(64 * 1024):
                 if not chunk: continue
                 total += len(chunk)
-                if total > IMAGE_LIMIT: raise RuntimeError("remote image exceeds 16 MiB")
+                if total > IMAGE_LIMIT:
+                    exceeded = True
+                    break
                 output.write(chunk)
+        if exceeded:
+            # 单张图超过上限：按「缺一张图」处理，不让整章失败（同死链处理）。
+            _unlink_quietly(image_path)
+            dropped.append("oversize %s" % url)
+            print(f"[IMAGE] image exceeds the size cap and was skipped: {url}",
+                  file=sys.stderr, flush=True)
+            return 'src=""' if _is_note_img(match) else ""
         data = image_path.read_bytes()
         ext = _image_extension(data[:12])
         if not ext:
@@ -1287,7 +1351,7 @@ def download_remote_images(xhtml: str, http: requests.Session,
         # 正文 URL 和图片包里常常是同一张图：按内容复用已经落盘的那份。
         reused = _reuse_image(data, root)
         if reused:
-            image_path.unlink(missing_ok=True)
+            _unlink_quietly(image_path)
             href = "../images/" + reused
             url_to_href[url] = href
             mapping[Path(url.split("?", 1)[0]).name] = href
@@ -1300,7 +1364,7 @@ def download_remote_images(xhtml: str, http: requests.Session,
         used.add(base.lower())
         final_path = root / "images" / base
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(image_path, final_path)
+        _replace_retry(image_path, final_path)
         _remember_image(data, root, base)
         href = "../images/" + base
         url_to_href[url] = href
@@ -1316,10 +1380,21 @@ def download_remote_images(xhtml: str, http: requests.Session,
         # deleted real illustrations whenever a single note.png was dropped.
         # 注角标（qqreader-footnote）例外：它的注文在 alt 里，图丢了注不能丢
         # （W13 根因——后汉书 35 章、数千条注曾被这条正则整章删除）。
-        result = re.sub(
-            r'(?is)<img\b(?![^>]*qqreader-footnote)[^>]*\bsrc\s*=\s*(?:""|\'\')[^>]*>',
-            "", result)
+        result = _strip_blank_images(result)
     return result, mapping, dropped
+
+
+_BLANK_IMG = re.compile(
+    r'(?is)<img\b(?![^>]*qqreader-footnote)[^>]*\bsrc\s*=\s*(?:""|\'\')[^>]*>')
+
+
+def _strip_blank_images(xhtml: str) -> str:
+    """Remove <img src=""> left behind by a dropped picture.
+
+    An empty src makes readers re-request the document. 注角标 is exempt: its
+    note text lives in alt, so the tag must survive even without the image.
+    """
+    return _BLANK_IMG.sub("", xhtml)
 
 
 def rewrite_images(xhtml: str, mapping: dict[str, str]) -> str:
@@ -2060,7 +2135,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         # 完成提示说成「152 张插图」，读者以为正文少了图。
         dropped_note_markers = sum(
             1 for item in dropped_image_urls if "note.png" in str(item).lower())
-        body = rewrite_images(body_fragment(processed), image_map)
+        body = _strip_blank_images(rewrite_images(body_fragment(processed), image_map))
         temp_body = body_path.with_suffix(".body.part")
         temp_review = review_path.with_suffix(".json.part")
         temp_css = css_path.with_suffix(".css.part")
@@ -2313,7 +2388,8 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
                             "anchor this chapter's text could verify, so they were not "
                             "placed. An unverified anchor would highlight the wrong words. "
                             "This is deliberate, not a download failure.",
-        "reason_images": "WeRead no longer serves these images (HTTP 403/404/410).",
+        "reason_images": "WeRead no longer serves these images (HTTP 403/404/410), "
+                            "or a single image exceeded the size cap and was skipped.",
         "reason_placement_audit": "underlines_verified_by_text counts highlights "
                                   "whose marked text equals the quote WeRead holds, "
                                   "proved by the plugin's own placement pass; "
