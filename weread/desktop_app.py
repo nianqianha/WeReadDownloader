@@ -1961,6 +1961,10 @@ class DesktopApp:
                 self.events.put(("spawn-failed", (action, f"{type(exc).__name__}: {exc}")))
                 return
             spawn_ms = (time.perf_counter() - spawn_started) * 1000.0
+            # 记下进程刚建好的时刻：子进程真正开始输出还要多久，决定了用户
+            # 感知到的"点了没反应"到底出在 CreateProcess 还是引擎启动上。
+            self._spawn_at = time.perf_counter()
+            self._spawn_action = action
             if spawn_ms > 500:
                 self._persist_log(
                     "[SPAWN] worker %s took %.0f ms to start (spawned off the Tk "
@@ -2015,7 +2019,16 @@ class DesktopApp:
     def _read_output(self, process, job: int):
         try:
             if process.stdout is not None:
+                first = True
                 for line in process.stdout:
+                    if first:
+                        first = False
+                        at = getattr(self, "_spawn_at", None)
+                        if at is not None:
+                            self._persist_log(
+                                "[SPAWN] worker %s first output after %.0f ms"
+                                % (getattr(self, "_spawn_action", "?"),
+                                   (time.perf_counter() - at) * 1000.0))
                     self.events.put(("line", line.rstrip("\r\n")))
         finally:
             try:
