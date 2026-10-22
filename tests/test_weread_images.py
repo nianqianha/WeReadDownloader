@@ -101,7 +101,8 @@ def test_a_403_or_410_image_is_also_tolerated():
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "incoming").mkdir(parents=True, exist_ok=True)
-            xhtml = '<html><body><p>正文</p><img src="https://x/y.png"/></body></html>'
+            xhtml = ('<html><body><p>正文</p>'
+                     '<img src="https://x/gone-%d.png"/></body></html>' % status)
             out, _, _dropped = wd.download_remote_images(
                 xhtml, _Session(status), "https://weread.qq.com/reader/x",
                 root, set(), "7")
@@ -115,7 +116,7 @@ def test_a_server_error_is_still_raised_not_swallowed():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / "incoming").mkdir(parents=True, exist_ok=True)
-        xhtml = '<html><body><img src="https://x/y.png"/></body></html>'
+        xhtml = '<html><body><img src="https://x/boom.png"/></body></html>'
         try:
             wd.download_remote_images(
                 xhtml, _Session(500), "https://weread.qq.com/reader/x",
@@ -198,6 +199,97 @@ def test_the_user_facing_message_does_not_blame_the_network_for_a_missing_image(
     message = friendly_error("[IMAGE] dropping an unavailable image (HTTP 404): x")
     assert "图片" in message, message
     assert "网络" not in message, message
+
+
+@test
+def test_a_dead_image_is_requested_once_across_chapters():
+    """跨章节复用同一个 URL 时，只应该为它发一次请求。
+
+    这是后汉书那 6930 次 404 的直接来源：缓存原来是 download_remote_images()
+    的局部变量，每换一章就重新问一遍。同时每一章的 manifest 仍要能看到这张图
+    缺失，否则"少了一张图"会变成静默的损失。
+    """
+    import tempfile
+    wd.reset_dead_image_cache()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "incoming").mkdir(parents=True, exist_ok=True)
+            session = _Session(404)
+            xhtml = ('<html><body><p>正文</p>'
+                     '<img src="https://weread.qq.com/Images/note.png"/></body></html>')
+            for chapter_uid in ("7", "8", "9"):
+                out, _mapping, dropped = wd.download_remote_images(
+                    xhtml, session, "https://weread.qq.com/reader/x",
+                    root, set(), chapter_uid)
+                assert "正文" in out, out
+                assert "note.png" not in out, out
+                assert dropped, "第 %s 章的 manifest 仍要报告这张图缺失" % chapter_uid
+            assert len(session.requested) == 1, session.requested
+    finally:
+        wd.reset_dead_image_cache()
+
+
+@test
+def test_a_dead_note_marker_keeps_its_alt_through_the_cache():
+    """注角标走缓存时仍然只清空 src，不删标签——注文在 alt 里（W13）。"""
+    import tempfile
+    wd.reset_dead_image_cache()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "incoming").mkdir(parents=True, exist_ok=True)
+            session = _Session(404)
+            xhtml = ('<html><body><p>正文</p>'
+                     '<img class="qqreader-footnote" alt="注文" '
+                     'src="https://weread.qq.com/Images/note.png"/></body></html>')
+            for chapter_uid in ("7", "8"):
+                out, _mapping, _dropped = wd.download_remote_images(
+                    xhtml, session, "https://weread.qq.com/reader/x",
+                    root, set(), chapter_uid)
+                assert "qqreader-footnote" in out, out
+                assert 'src=""' in out, out
+                assert "注文" in out, out
+            assert len(session.requested) == 1, session.requested
+    finally:
+        wd.reset_dead_image_cache()
+
+
+@test
+def test_dead_image_cache_survives_a_restart():
+    """缓存要落在工作目录里：重启进程后不该重新问一遍同一张死图。"""
+    import tempfile
+    wd.reset_dead_image_cache()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dead-images.json"
+            url = "https://weread.qq.com/Images/note.png"
+            wd.mark_dead_image(url)
+            assert wd.save_dead_image_cache(path) == 1
+            assert path.is_file()
+
+            wd.reset_dead_image_cache()
+            assert not wd.is_dead_image(url)
+
+            assert wd.load_dead_image_cache(path) == 1
+            assert wd.is_dead_image(url)
+    finally:
+        wd.reset_dead_image_cache()
+
+
+@test
+def test_a_corrupt_dead_image_cache_is_ignored_not_fatal():
+    import tempfile
+    wd.reset_dead_image_cache()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dead-images.json"
+            path.write_text("{ 不是 JSON", encoding="utf-8")
+            assert wd.load_dead_image_cache(path) == 0
+            assert not wd.is_dead_image("https://weread.qq.com/Images/note.png")
+    finally:
+        wd.reset_dead_image_cache()
+
 
 
 if __name__ == "__main__":

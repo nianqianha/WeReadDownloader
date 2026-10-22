@@ -11,7 +11,8 @@ class ShelfFailuresTests(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / "weread/desktop_app.py"
         app = next(n for n in ast.parse(path.read_text(encoding="utf-8")).body
                    if isinstance(n, ast.ClassDef) and n.name == "DesktopApp")
-        wanted = ("_finish_failed_action", "_handle_spawn_failed", "_show_shelf_error", "_handle_done", "load_shelf")
+        wanted = ("_finish_failed_action", "_handle_spawn_failed", "_show_shelf_error",
+                  "_handle_done", "load_shelf", "_set_busy_controls")
         methods = [n for n in app.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
         namespace = {"ctk": SimpleNamespace(CTkLabel=Mock()),
                      "_font": lambda *args: None}
@@ -19,10 +20,15 @@ class ShelfFailuresTests(unittest.TestCase):
                      str(path), "exec"), namespace)
         self.app = SimpleNamespace(status=Mock(), _persist_log=Mock(), _spawn_pending=True,
                                    current_action="shelf", job_seq=1, process=object(), last_failure=False,
+                                   _service_job=None,
                                    pause_button=Mock(), annotations_box=Mock(), _flush_pending_book=Mock())
         self.error = Mock()
         self.app._show_shelf_error = self.error
         self.app._finish_failed_action = lambda action: namespace["_finish_failed_action"](self.app, action)
+        self.app._set_busy_controls = lambda busy: namespace["_set_busy_controls"](self.app, busy)
+        # _set_busy_controls 解除忙碌时会刷新结果卡片上的「加入队列 N 本」；
+        # 本用例测的是书架失败路径，队列那一栏不参与。
+        self.app._refresh_queue_add = Mock()
         self.namespace = namespace
 
     def test_worker_failure_replaces_the_loading_state(self):
@@ -46,17 +52,15 @@ class ShelfFailuresTests(unittest.TestCase):
         self.error.assert_called_once_with()
 
     def test_error_renderer_removes_the_placeholder_and_shows_recovery(self):
-        placeholder = Mock()
+        # 书架区现在画在 canvas 上，空/错误状态统一走 show_empty(text)。
         self.app.shelf_frame = SimpleNamespace(winfo_exists=lambda: True,
-                                               winfo_children=lambda: [placeholder])
+                                               show_empty=Mock())
         self.app.FAINT = "gray"
         self.namespace["_show_shelf_error"](self.app)
-        placeholder.destroy.assert_called_once_with()
-        label = self.namespace["ctk"].CTkLabel
-        text = label.call_args.kwargs["text"]
+        self.app.shelf_frame.show_empty.assert_called_once()
+        text = self.app.shelf_frame.show_empty.call_args.args[0]
         self.assertIn("登录", text)
         self.assertIn("重试", text)
-        label.return_value.pack.assert_called_once()
 
 
 if __name__ == "__main__":
