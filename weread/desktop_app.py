@@ -522,12 +522,7 @@ class _Scroller(ctk.CTkFrame):
         if not args:
             return
         if args[0] == "moveto":
-            # 拖动时按整页吸附：连续几十次重绘在 Tk 下总会残留几帧旧内容，
-            # 一次拖动只跳几页、每页完整重画，就看不到叠影了。
-            raw = int(float(args[1]) * total)
-            step = max(1, view)
-            self._offset = int(round(raw / step)) * step
-            self._offset = max(0, min(self._offset, max(0, total - view)))
+            self._offset = int(float(args[1]) * total)
         elif args[0] == "scroll":
             amount = int(args[1])
             step = view if len(args) > 2 and args[2] == "pages" else 24
