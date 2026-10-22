@@ -307,8 +307,11 @@ MAX_EVENTS_PER_TICK = 200
 
 # Log a stall marker when the main thread is blocked this long, so a real
 # session produces the evidence instead of a reconstruction. Windows shows
-# "(未响应)" at roughly five seconds, so 1200 ms catches the tail end of it.
-STALL_LOG_MS = 1200.0
+# "(未响应)" at roughly five seconds, so 2000 ms still catches the run-up to it
+# while tolerating a loaded machine: with the 1200 ms bar, ordinary ticks on a
+# busy desktop measured 1.2-1.3 s and the marker fired on healthy sessions --
+# exactly the noise that made the 02:27 suspend unreadable.
+STALL_LOG_MS = 2000.0
 
 # Wall time this process was not on the CPU before we call the gap a sleep. The
 # machine suspending itself is not a defect and shows up in the log as gaps of
@@ -570,6 +573,10 @@ class DesktopApp:
         # and charging that to the first tick logged a 1.3 s [STALL] on every
         # single launch. The loop starts here.
         self._last_tick_end = time.perf_counter()
+        # 头两次 tick 不计卡顿：_build() 只是创建控件，真正的布局/绘制发生在
+        # 第一次 update() 里，慢机器上这一步能超过 1.2 s（实测 1.3 s）。把它
+        # 记成"卡死"正是那个测试要防的噪声——标记天天响，真卡死就没人看了。
+        self._poll_ticks = 0
         self._stall_stop = threading.Event()
         self._stall_watcher = threading.Thread(
             target=self._watch_for_stalls, name="stall-watch", daemon=True)
@@ -2272,6 +2279,8 @@ class DesktopApp:
         now = time.perf_counter()
         gap_ms = (now - self._last_tick_end) * 1000.0
         self._last_tick_end = now
+        self._poll_ticks += 1
+        startup_ticks = self._poll_ticks <= 2
         started = now
         try:
             self._drain_events()
@@ -2288,13 +2297,13 @@ class DesktopApp:
                 # answered, so that time is the user's, not a defect. Logging it
                 # as a stall buried the real ones: a dialog left open for 87 s
                 # produced an entry indistinguishable from a frozen thread.
-                if gap_ms > STALL_LOG_MS or blocked_ms > STALL_LOG_MS:
+                if not startup_ticks and (gap_ms > STALL_LOG_MS or blocked_ms > STALL_LOG_MS):
                     self._persist_log(
                         "[STALL-MODAL] %s gap=%.0fms blocked=%.0fms action=%s "
                         "(a dialog is waiting for an answer)"
                         % (time.strftime("%H:%M:%S"), gap_ms, blocked_ms,
                            self.current_action or "-"))
-            elif gap_ms > STALL_LOG_MS or blocked_ms > STALL_LOG_MS:
+            elif not startup_ticks and (gap_ms > STALL_LOG_MS or blocked_ms > STALL_LOG_MS):
                 # Timestamped, because a stall has to be correlated with the
                 # sampler's own output to be worth anything.
                 self._persist_log(

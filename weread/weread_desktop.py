@@ -1060,9 +1060,32 @@ def _image_extension(data: bytes) -> str | None:
     return None
 
 
+# 同一张插图常常出现两份来源：章节图片包（tar）里一份，正文的远程 URL 再一份，
+# 字节完全相同。以前按"章节号-文件名"各存一份，结果汉书 1569 个图片条目里只有
+# 686 张唯一图片，重复占 94 MB（EPUB 199 MB 里几乎一半是重复图）。
+# 这里按内容哈希去重：第二份直接复用第一次的文件名，不再落盘。
+_IMAGE_DIGESTS: dict[tuple[str, str], str] = {}
+_IMAGE_DIGESTS_LOCK = threading.Lock()
+
+
+def _reuse_image(data: bytes, root: Path) -> str | None:
+    key = (str(root), hashlib.sha256(data).hexdigest())
+    with _IMAGE_DIGESTS_LOCK:
+        return _IMAGE_DIGESTS.get(key)
+
+
+def _remember_image(data: bytes, root: Path, name: str) -> None:
+    key = (str(root), hashlib.sha256(data).hexdigest())
+    with _IMAGE_DIGESTS_LOCK:
+        _IMAGE_DIGESTS.setdefault(key, name)
+
+
 def _save_image(data: bytes, root: Path, used: set[str], stem: str) -> str | None:
     ext = _image_extension(data)
     if not ext: return None
+    reused = _reuse_image(data, root)
+    if reused:
+        return reused
     candidate = safe_name(Path(stem).stem) + ext
     index = 1
     while candidate.lower() in used or candidate.lower() in {"cover.jpg", "cover.jpeg", "cover.png", "cover.gif", "cover.webp"}:
@@ -1072,6 +1095,7 @@ def _save_image(data: bytes, root: Path, used: set[str], stem: str) -> str | Non
     target = root / "images" / candidate
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
+    _remember_image(data, root, candidate)
     return candidate
 
 
@@ -1151,6 +1175,14 @@ def _save_image_stream(source: Any, head: bytes, root: Path,
                        used: set[str], stem: str, namespace: str) -> str | None:
     ext = _image_extension(head)
     if not ext: return None
+    # 整张读进内存（上限 16 MiB）才能按内容去重；之前是流式写盘，
+    # 同一张图换个章节号就会再存一份。
+    data = head + source.read(IMAGE_LIMIT)
+    if len(data) > IMAGE_LIMIT:
+        raise RuntimeError("chapter image exceeds 16 MiB")
+    reused = _reuse_image(data, root)
+    if reused:
+        return reused
     candidate = safe_name(namespace + "-" + Path(stem).stem) + ext
     suffix = 1
     reserved = {"cover.jpg", "cover.jpeg", "cover.png", "cover.gif", "cover.webp"}
@@ -1160,12 +1192,8 @@ def _save_image_stream(source: Any, head: bytes, root: Path,
     used.add(candidate.lower())
     target = root / "images" / candidate
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("wb") as output:
-        output.write(head)
-        shutil.copyfileobj(source, output, 64 * 1024)
-        if output.tell() > IMAGE_LIMIT:
-            target.unlink(missing_ok=True)
-            raise RuntimeError("chapter image exceeds 16 MiB")
+    target.write_bytes(data)
+    _remember_image(data, root, candidate)
     return candidate
 
 
@@ -1238,7 +1266,8 @@ def download_remote_images(xhtml: str, http: requests.Session,
                 total += len(chunk)
                 if total > IMAGE_LIMIT: raise RuntimeError("remote image exceeds 16 MiB")
                 output.write(chunk)
-        ext = _image_extension(image_path.read_bytes()[:12])
+        data = image_path.read_bytes()
+        ext = _image_extension(data[:12])
         if not ext:
             # Not an image at all (an HTML error page, say). Same reasoning:
             # keep the chapter, drop the picture.
@@ -1247,6 +1276,14 @@ def download_remote_images(xhtml: str, http: requests.Session,
             print(f"[IMAGE] dropping a response that is not an image: {url}",
                   file=sys.stderr, flush=True)
             return ""
+        # 正文 URL 和图片包里常常是同一张图：按内容复用已经落盘的那份。
+        reused = _reuse_image(data, root)
+        if reused:
+            image_path.unlink(missing_ok=True)
+            href = "../images/" + reused
+            url_to_href[url] = href
+            mapping[Path(url.split("?", 1)[0]).name] = href
+            return match.group(1) + match.group(2) + href + match.group(4)
         base = filename + ext
         suffix = 1
         while base.lower() in used:
@@ -1256,6 +1293,7 @@ def download_remote_images(xhtml: str, http: requests.Session,
         final_path = root / "images" / base
         final_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(image_path, final_path)
+        _remember_image(data, root, base)
         href = "../images/" + base
         url_to_href[url] = href
         mapping[Path(url.split("?", 1)[0]).name] = href
