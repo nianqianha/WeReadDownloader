@@ -1249,8 +1249,10 @@ class DesktopApp:
         most readers never open. Deleting that single file gives back almost
         the whole folder while the readable book stays.
 
-        The bundle zip embeds its own copy of the notes, so it goes too; the
-        reader can still re-download them later with the notes mode on.
+        The legacy `.weread.zip` import bundle (no longer produced as of
+        2026-10-22) embedded its own copy of the notes, so old folders may still
+        hold one; it goes too. The reader can re-download notes later with the
+        notes mode on.
         """
         folder = Path(path)
         targets = [folder / "reviews.jsonl", folder / "*.weread.zip"]

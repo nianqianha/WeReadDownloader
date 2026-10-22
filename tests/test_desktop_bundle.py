@@ -93,14 +93,19 @@ def test_desktop_exporter_offline_end_to_end():
         assert in_flight["maximum"] == 2
         assert elapsed < 1.5, elapsed
         import zipfile, json
-        bundle = zipfile.ZipFile(result)
-        assert set(bundle.namelist()) == {"bundle.json", "manifest.json", "reviews.jsonl", "Test Book - full.epub"}
-        manifest = json.loads(bundle.read("manifest.json"))
-        rows = [json.loads(x) for x in bundle.read("reviews.jsonl").decode().splitlines()]
+        # 成品就是 EPUB 本身；导入包（.weread.zip）已停用，不要再把同一本
+        # 书压第二份。manifest/reviews 作为旁挂文件留在同一目录。
+        epub_path = Path(result)
+        assert epub_path.suffix.lower() == ".epub", result
+        assert epub_path.is_file()
+        manifest = json.loads((epub_path.parent / "manifest.json").read_text(encoding="utf-8"))
+        rows = [json.loads(x) for x in
+                (epub_path.parent / "reviews.jsonl").read_text(encoding="utf-8").splitlines()]
         assert manifest["embedded"] is True and [c["chapterUid"] for c in manifest["chapters"]] == ["7", "8"]
         assert [row["chapter_uid"] for row in rows] == ["7", "8"]
         assert all(row["reviews"] == [] for row in rows)
-        epub = zipfile.ZipFile(__import__("io").BytesIO(bundle.read(manifest["epub"])))
+        assert not list(epub_path.parent.glob("*.weread.zip")), "导入包又被生成了"
+        epub = zipfile.ZipFile(result)
         try:
             chapter1 = epub.read("OEBPS/text/chapter-0001.xhtml")
             chapter2 = epub.read("OEBPS/text/chapter-0002.xhtml")
@@ -108,7 +113,6 @@ def test_desktop_exporter_offline_end_to_end():
             assert b"8</p>" in chapter2
         finally:
             epub.close()
-        bundle.close()
 
 
 if __name__ == "__main__":

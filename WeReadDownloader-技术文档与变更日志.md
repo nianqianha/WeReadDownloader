@@ -132,8 +132,8 @@ GUI 的下拉框四档对应下面的 worker 参数（2026-10-21 起「注释和
 `--unified-appendix` 与 `--appendix-scope` 是档位附带的开关，不是独立的第 N 种模式；
 CLI 上两者都是显式参数（默认不带）。
 
-成品目录：`exports\书名-书籍ID\`：`书名 - full.epub`、`书名 - full.weread.zip`
-（KOReader 导入包）、`manifest.json`（含 omissions 缺失说明）、`reviews.jsonl`。
+成品目录：`exports\书名-书籍ID\`：`书名 - full.epub`（唯一的成品）、`manifest.json`
+（含 omissions 缺失说明）、`reviews.jsonl`。2026-10-22 起不再生成 `.weread.zip` 导入包。
 断点目录：同名 `.work\`（`state.json` 记 `completed/total`，`chapter-uid-*.body/css/json`
 逐章缓存，`export.lock` 运行锁）。
 
@@ -459,7 +459,9 @@ EPUB 里的图片再拆：**1569 个条目、686 张唯一图片**，按 CRC 统
 - 现在按 sha256 复用：第二个来源命中同一内容时直接引用已有文件名，不再落盘
   （`_save_image` / `_save_image_stream` / 远程下载三条路径都走同一张表）。
 - **已经导出的书不会自动变小**，要重新导出才会应用；现有目录里的重复文件保持原样。
-- `weread.zip` 与 EPUB 的重复是设计如此（导入包 = EPUB + 想法数据），未改动。
+- **导入包已停用**（用户 2026-10-22 明确：不需要导入 Kindle，只要一个 EPUB）。
+  同一本 EPUB 再打包一份成 `.weread.zip`，大书白白多占 114 MB。旧文件保留在磁盘上，
+  由「存储占用」页清理。
 
 **真机验证（Windows，安装包 1.0.5）**
 
@@ -820,7 +822,7 @@ Get-ChildItem "$env:LOCALAPPDATA\WeReadDesktop\exports" -Recurse -Filter export.
 | 位置 | 内容 |
 |---|---|
 | `logs\desktop-general.log` | GUI 生命周期：搜索元数据、登录事件、`FAILED …` 汇总、`[STALL]` UI 卡顿栈 |
-| `logs\desktop-<书籍ID>.log` | 单书：`OMISSIONS`（缺失明细 JSON）、`EPUB/IMPORT_BUNDLE/DONE`（出版路径） |
+| `logs\desktop-<书籍ID>.log` | 单书：`OMISSIONS`（缺失明细 JSON）、`EPUB`（成品路径） |
 | CLI stdout/stderr | `[N/M] Fetching chapter UID x`、`[RESUME] Reusing N complete`、`[RETRY]`、`[THROTTLE]`、`[UNRESOLVED]`、`[IMAGE] dropping` |
 
 ### 6.5 排障速查表

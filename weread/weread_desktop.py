@@ -2360,22 +2360,16 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     atomic_text(package_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
     descriptor = {"version": 1, "manifest": "manifest.json", "reviews": "reviews.jsonl", "epub": epub_path.name}
     atomic_text(package_dir / "bundle.json", json.dumps(descriptor, ensure_ascii=False, indent=2))
-    bundle_path = package_dir / (stem + ".weread.zip")
-    bundle_temp = bundle_path.with_suffix(".zip.part")
-    with zipfile.ZipFile(bundle_temp, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.write(epub_path, epub_path.name)
-        archive.write(package_dir / "manifest.json", "manifest.json")
-        archive.write(review_file, "reviews.jsonl")
-        archive.write(package_dir / "bundle.json", "bundle.json")
-    os.replace(bundle_temp, bundle_path)
+    # 不再产导入包（.weread.zip）：用户只要 EPUB，导入包只是把同一本 EPUB 再
+    # 存一份（+ 想法数据），大书白白多占一百多兆。设备端导入若还需要，自己压
+    # 这个目录即可。已经在盘上的旧导入包不删，可由「存储占用」页清理。
     export_lock.unlink(missing_ok=True)
     # The GUI reads this to tell the user exactly what the finished book is
     # missing. Degrading instead of failing is only honest if the loss is
     # reported, so it goes over the same channel as the result itself.
     print("OMISSIONS", json.dumps(omission_report, ensure_ascii=False, separators=(",", ":")), flush=True)
     print("EPUB", epub_path)
-    print("IMPORT_BUNDLE", bundle_path)
-    return bundle_path
+    return epub_path
 
 
 SERVICE_COMMANDS = {
