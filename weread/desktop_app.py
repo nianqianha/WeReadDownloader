@@ -508,6 +508,9 @@ class _Scroller(ctk.CTkFrame):
             width = max(1, self._clip.winfo_width())
             self._clip.itemconfigure(self._item, width=width)
             self._clip.coords(self._item, 0, -self._offset)
+            # coords() 只挪窗口项，canvas 不一定会重画它离开的区域；快速拖动时
+            # 旧位置会一层层叠成"多张卡片"。把空闲任务跑完，让 canvas 立刻重画。
+            self._clip.update_idletasks()
             first = self._offset / total
             last = min(1.0, (self._offset + view) / total)
             self._bar.set(first, last)
