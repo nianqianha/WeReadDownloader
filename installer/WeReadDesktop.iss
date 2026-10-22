@@ -5,8 +5,8 @@
 ;   * 1.0.4 起只有「主程序 + 下载组件」两件，且都不给用户选。装一个工具不该被问
 ;     "你要装哪些组件"——这两件是一起才跑得起来的整体，问出来只会让人以为能只装
 ;     一半。用户明确要求去掉组件选择界面，所以 [Types]/[Components] 整段删除。
-;   * 网页版（weread_web.py / packaging/WeReadWeb.spec）1.0.4 起不再进安装包。
-;     它仍会构建到 release-fresh/，真要它的人单独分发，不走这条安装路径。
+;   * 网页版 1.0.5 起已从仓库删除（代码/构建/测试一并移除）：它长期带病（脚本
+;     语法错误导致整页无响应），维护成本高于价值。安装包里只保留主程序与下载组件。
 ;   * 安装后的目录结构让 exe 找到 worker。worker_command() 的查找顺序里第二条
 ;     是「exe 同级目录/../WeReadWorker/」，所以 worker 放在 exe 的父级：
 ;         {app}\WeReadDesktop\WeReadDesktop.exe   ->  {app}\WeReadWorker\
@@ -22,7 +22,7 @@
 ; 而且因为 weread/ 不是包、相对导入被 except 吞掉，first_run 模块根本没被打进
 ; 包。结果是全新安装后程序只报 "Credential file not found" 而没有出路。
 ; 1.0.4 删掉组件选择界面与网页版：见文件头设计要点。
-#define MyAppVersion "1.0.4"
+#define MyAppVersion "1.0.5"
 #define MyAppPublisher "Kindle 桌面端项目"
 
 [Setup]
@@ -58,11 +58,12 @@ WizardStyle=modern
 SetupIconFile=..\assets\weread-project.ico
 ; 声明本安装包会创建的互斥体，安装/卸载时据此识别正在运行的实例并提示关闭，
 ; 与程序内的单实例守卫（weread_core.claim_single_instance）用同一组名字。
-; 这两个名字必须和 desktop_app.py 的 SINGLE_INSTANCE_KEY、weread_web.py 的
-; is_first_instance(...) 逐字一致：改名时漏了这里，CloseApplications 就再也认不出
-; 正在运行的实例，安装会直接去覆盖被占用的 exe，报 "拒绝访问" 而不是提示关闭。
-; test_multi_account_isolation.test_installer_closes_the_running_apps 会守住这三处。
-AppMutex=WeReadDownloader-Graphics,WeReadDownloader-Web
+; 这个名字必须和 desktop_app.py 的 SINGLE_INSTANCE_KEY 逐字一致：改名时漏了这里，
+; CloseApplications 就再也认不出正在运行的实例，安装会直接去覆盖被占用的 exe，
+; 报 "拒绝访问" 而不是提示关闭。
+; test_multi_account_isolation.test_installer_closes_the_running_apps 会守住这两处。
+; 1.0.5 起只有图形版：Web 的互斥体名随网页版一起删了，留着没有任何东西会去创建它。
+AppMutex=WeReadDownloader-Graphics
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
@@ -79,8 +80,7 @@ Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 ; 用户装一个工具不该被问"你要装哪些组件"——主程序和下载组件是一起才跑得起来的
 ; 整体，问出来只会让人以为能只装一半。原先 1.0.2 把三个组件做成可勾选是过度设计，
 ; 用户明确要求去掉这个界面，所以回到"装就是一个完整可用的程序"。
-; 网页版（WeReadWeb）本身仍构建、仍在 release-fresh/ 里，只是不再进安装包；
-; 真要它的人单独分发，不走这条安装路径。
+; 1.0.5：网页版源码与构建脚本一并删除，release-fresh/ 里也不再有 WeReadWeb。
 
 ; 桌面图标任务：默认勾上（checkedonce 是 [Tasks] 里唯一能表达"默认勾选"的 flag，
 ; checked 不是合法值）。

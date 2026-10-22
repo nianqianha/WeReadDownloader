@@ -189,6 +189,45 @@ def test_the_task_buttons_are_inside_the_window_not_merely_sized():
             root.destroy()
 
 
+def _find_checkboxes(widget):
+    import customtkinter as ctk
+    found = []
+    for child in widget.winfo_children():
+        if isinstance(child, ctk.CTkCheckBox):
+            found.append(child)
+        found.extend(_find_checkboxes(child))
+    return found
+
+
+@test
+def test_the_queue_checkbox_is_not_clipped_by_a_long_title():
+    """勾选框要完整落在行内。
+
+    这张卡片曾经把勾选框 pack 到右侧剩余空隙，长标题时被卡片边缘裁掉，只剩
+    半个圆圈。现在行画在 canvas 上，直接量勾选框与「加入队列」文字的坐标。
+    """
+    root, instance = _make_gui()
+    try:
+        item = {"bookId": "111",
+                "title": "三字经·百家姓·千字文·弟子规（中华经典藏书·升级版）",
+                "author": "李逸安译注", "category": "文学-古典文学",
+                "newRating": "8.75", "newRatingCount": "22"}
+        instance.result_rows = [item]
+        instance._render_page()
+        root.update()
+        canvas = instance.results.canvas
+        entry = instance.results.items["111"]
+        x0, y0, x1, y1 = canvas.coords(entry["check"])
+        width = max(1, canvas.winfo_width())
+        assert x1 < width * 0.6, (
+            "勾选框贴在行右侧（x1 %d / width %d），会被滚动条盖住" % (x1, width))
+        texts = [canvas.itemcget(i, "text") for i in canvas.find_all()
+                 if canvas.type(i) == "text"]
+        assert "加入队列" in texts, texts
+    finally:
+        root.destroy()
+
+
 if __name__ == "__main__":
     for test_case in ALL_TESTS:
         test_case()

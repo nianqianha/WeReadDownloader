@@ -68,7 +68,7 @@ def test_invoking_the_nav_item_switches_the_page():
     """The row's command must run -- this is what a real click does."""
     root, inst = _make_instance()
     try:
-        for name in ("我的书架", "下载记录", "统计分析", "划线清单", "设置", "下载工坊"):
+        for name in ("我的书架", "下载记录", "存储占用", "设置", "下载工坊"):
             inst.nav_items[name].invoke()   # exactly what a click triggers
             root.update()
             assert inst._current_page == name, (
@@ -85,7 +85,7 @@ def test_a_click_reaching_the_row_switches_the_page():
     try:
         root.focus_force()
         root.update()
-        for name in ("我的书架", "统计分析", "设置", "下载工坊"):
+        for name in ("我的书架", "存储占用", "设置", "下载工坊"):
             target = _click_target(inst.nav_items[name])
             assert target.winfo_viewable(), "navigation click target is not mapped"
             assert target.bind("<Button-1>") or target.bind("<ButtonRelease-1>"), \
@@ -106,11 +106,11 @@ def test_a_click_reaching_the_row_switches_the_page():
 
 @test
 def test_every_nav_row_is_a_single_clickable_button():
-    """All six rows must be one CTkButton each: nothing stacked over a child."""
+    """Every row must be one CTkButton each: nothing stacked over a child."""
     root, inst = _make_instance()
     try:
         expected = ("下载工坊", "我的书架", "下载记录",
-                    "统计分析", "划线清单", "设置")
+                    "存储占用", "设置")
         assert set(inst.nav_items) == set(expected), sorted(inst.nav_items)
         for name, item in inst.nav_items.items():
             assert isinstance(item, app.ctk.CTkButton), (
@@ -132,9 +132,9 @@ def test_the_selected_row_shows_the_active_look():
     """Selection must be visible: filled, bright, bold, with the accent bar."""
     root, inst = _make_instance()
     try:
-        inst._switch_page("划线清单")
+        inst._switch_page("存储占用")
         root.update()
-        active_item = inst.nav_items["划线清单"]
+        active_item = inst.nav_items["存储占用"]
         assert active_item._nav_active is True
         assert active_item.cget("border_width") == 3, active_item.cget("border_width")
         assert active_item.cget("text_color") == inst.SIDE_TXT_HI
@@ -143,6 +143,33 @@ def test_the_selected_row_shows_the_active_look():
         assert workshop._nav_active is False
         assert workshop.cget("border_width") == 0
         assert workshop.cget("text_color") == inst.SIDE_TXT
+    finally:
+        root.destroy()
+
+
+@test
+def test_no_row_is_packed_after_the_expanding_nav_frame():
+    """Nothing may be added to the rail after the expanding nav frame.
+
+    Packing the divider into `side` after `nav` (which is expand=True) resizes
+    the nav frame once the rows already exist. Tk slides the rows up on the next
+    idle pass, but each CTkButton's internal canvas keeps painting where it was:
+    on 1.0.5 the 设置 row drew ~30 px below its own hitbox, so clicking the
+    words did nothing and clicking the empty space above them worked. Keeping
+    every row and the divider inside `nav` makes the frame's height final before
+    any row exists, so paint position and hit region cannot diverge.
+    """
+    root, inst = _make_instance()
+    try:
+        nav = inst.nav_items["设置"].master
+        side = nav.master
+        children = side.winfo_children()
+        after = children[children.index(nav) + 1:]
+        assert not after, (
+            "%d widget(s) packed into the sidebar after the nav rows; the row "
+            "geometry will shift after painting" % len(after))
+        for name, item in inst.nav_items.items():
+            assert item.master is nav, "%s is not a direct child of the nav frame" % name
     finally:
         root.destroy()
 

@@ -94,6 +94,10 @@ def test_a_dialog_wait_is_not_reported_as_a_freeze():
     log says STALL-MODAL rather than STALL."""
     root, instance = _make_gui()
     try:
+        # The first two ticks are the startup grace (the initial paint is not a
+        # freeze); consume them before measuring.
+        for _ in range(2):
+            instance._poll()
         # Simulate the main loop being held inside a dialog, exactly as
         # messagebox does: the tick never completes and no work is drained.
         instance._modal_depth += 1
@@ -117,6 +121,8 @@ def test_a_real_freeze_is_still_reported_as_a_stall():
     """The other half: with no dialog up, a wedged thread must still be caught."""
     root, instance = _make_gui()
     try:
+        for _ in range(2):
+            instance._poll()   # consume the startup grace
         instance._modal_depth = 0
         instance._last_tick_end = time.perf_counter() - 3.0
         instance._poll()

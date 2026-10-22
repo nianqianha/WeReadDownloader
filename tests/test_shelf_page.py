@@ -68,28 +68,16 @@ def test_the_shelf_page_shows_the_accounts_books():
         assert isinstance(rows, list) and len(rows) == 2, rows
         inst._show_shelf(rows)
         root.update()
-        texts = []
-
-        def collect(w):
-            for c in w.winfo_children():
-                try:
-                    t = c.cget("text")
-                    if isinstance(t, str) and t:
-                        texts.append(t)
-                except Exception:
-                    pass
-                collect(c)
-        collect(inst.shelf_frame)
-        joined = "\n".join(texts)
+        canvas = inst.shelf_frame.canvas
+        texts = [canvas.itemcget(i, "text") for i in canvas.find_all()
+                 if canvas.type(i) == "text"]
+        joined = chr(10).join(texts)
         assert "逆流纯真年代" in joined, joined[:300]
         assert "人间武库" in joined, joined[:300]
         assert "男生小说-年代幻想" in joined, joined[:300]
         assert "北派盗墓笔记" in joined, joined[:300]
         # each row must offer the download action
-        buttons = [b for b in _walk(inst.shelf_frame)
-                   if type(b).__name__ == "CTkButton"]
-        labels = [b.cget("text") for b in buttons]
-        assert labels.count("下载") == 2, labels
+        assert texts.count("下载") == 2, texts
         assert "已读取微信书架，共 2 本。" in inst.status.get(), inst.status.get()
     finally:
         root.destroy()
@@ -146,18 +134,9 @@ def test_an_empty_shelf_says_so_instead_of_rendering_nothing():
         root.update()
         inst._show_shelf([])
         root.update()
-        texts = []
-
-        def collect(w):
-            for c in w.winfo_children():
-                try:
-                    t = c.cget("text")
-                    if isinstance(t, str) and t:
-                        texts.append(t)
-                except Exception:
-                    pass
-                collect(c)
-        collect(inst.shelf_frame)
+        canvas = inst.shelf_frame.canvas
+        texts = [canvas.itemcget(i, "text") for i in canvas.find_all()
+                 if canvas.type(i) == "text"]
         assert any("书架是空的" in t for t in texts), texts
     finally:
         root.destroy()

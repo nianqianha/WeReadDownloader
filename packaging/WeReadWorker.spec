@@ -54,6 +54,12 @@ hiddenimports = [
     # --login mode: weread_login drives the QR protocol, qrcode renders the code
     # and PIL turns it into a PNG the web front end only streams through.
     "weread_login", "qrcode.image.pil", "PIL.Image", "PIL.ImageDraw",
+    # export_book does `from unified_appendix import ...` inside the
+    # `if unified_appendix:` branch, so the static pass cannot see it. Missing
+    # from the bundle, every 注释和想法 export died at packaging with
+    # "No module named 'unified_appendix'" AFTER downloading all 171 chapters
+    # (found by driving the installed 1.0.5 GUI on 汉书).
+    "unified_appendix",
 ]
 tmp_ret = collect_all("lupa")
 datas += tmp_ret[0]

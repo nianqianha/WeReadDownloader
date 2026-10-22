@@ -73,9 +73,13 @@ API = "https://i.weread.qq.com/api/agent/gateway"
 WEB = "https://weread.qq.com"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0"
 CHAPTER_HTML_LIMIT = 16 * 1024 * 1024
-ARCHIVE_LIMIT = 128 * 1024 * 1024
+ARCHIVE_LIMIT = 512 * 1024 * 1024
 COOKIE_STATE_LOCK = threading.Lock()
-IMAGE_LIMIT = 16 * 1024 * 1024
+# 单张图片上限。表格式扫描/高清插图常见 16-40 MiB；超过上限不再让整章失败，
+# 而是按「缺失一张图」处理并在完成提示里说明（见 _OversizeImage）。
+IMAGE_LIMIT = 64 * 1024 * 1024
+# 图片包里单个条目的声明大小上限；超过直接跳过、不读入内存。
+ARCHIVE_ENTRY_LIMIT = 128 * 1024 * 1024
 # Machine-readable stdout contract shared with desktop_app.py.
 SEARCH_FIELDS = ("bookId", "title", "author", "cover", "newRating", "newRatingCount", "category")
 # An underline's API range is a "<start>-<end>" character span, and the plugin
@@ -147,7 +151,16 @@ def _load_lua_module(lua: LuaRuntime, module: str, path: Path) -> None:
     lua.execute(b'package.loaded[_module_name] = (function()\n' + source + b'\nend)()')
 
 
+# --serve 模式一个进程要连续处理多条命令；LuaJIT 启动 + 加载 3 千个插件文件
+# 是每次请求的大头（约 0.5-0.8 s），所以运行时只建一次。普通 CLI 一次只跑
+# 一条命令，缓存对它没有影响。
+_LUA_CACHE: LuaRuntime | None = None
+
+
 def lua_runtime() -> LuaRuntime:
+    global _LUA_CACHE
+    if _LUA_CACHE is not None:
+        return _LUA_CACHE
     # 插件只在真正需要 Lua 时才必须存在（见文件上方 PLUGIN 的说明）。
     if PLUGIN is None:
         raise RuntimeError(PLUGIN_MISSING)
@@ -191,6 +204,7 @@ _EXPORT = {
   reader_url=function(b,c) return W.reader_url(b,c) end,
 }
 ''')
+    _LUA_CACHE = lua
     return lua
 
 
@@ -520,6 +534,60 @@ def atomic_text(path: Path, text: str) -> None:
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(text, encoding="utf-8")
     os.replace(temp, path)
+
+
+# 死链缓存：403/404/410 的图片 URL 在整本书里只请求一次。
+#
+# 以前这张表是 download_remote_images() 的局部变量，于是每换一个章节、同一个
+# note.png 就再发一次 404 —— 后汉书实测 6930 次，把 155 章的下载拖成两小时以上。
+# 更糟的是进程一退出缓存就没了，第二天续传又从零开始问一遍。
+#
+# 现在它分两层：进程内的 set 负责同一本书内跨章节、跨 worker 线程去重；
+# 工作目录里的 dead-images.json 负责跨进程（续传、重跑）去重。缓存只记 URL，
+# 不记状态码——排查时想知道的只是"这张图取过没有"。
+_DEAD_IMAGE_URLS: set[str] = set()
+_DEAD_IMAGE_LOCK = threading.Lock()
+
+
+def load_dead_image_cache(path: Path) -> int:
+    """把上一轮记下的死链读进进程缓存；返回条数。坏文件按空处理。"""
+    global _DEAD_IMAGE_URLS
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(rows, list):
+        return 0
+    cleaned = {str(url) for url in rows if url}
+    with _DEAD_IMAGE_LOCK:
+        _DEAD_IMAGE_URLS = cleaned
+    return len(cleaned)
+
+
+def save_dead_image_cache(path: Path) -> int:
+    """把进程缓存写回工作目录；返回条数。没有内容时不建文件。"""
+    with _DEAD_IMAGE_LOCK:
+        urls = sorted(_DEAD_IMAGE_URLS)
+    if not urls:
+        return 0
+    atomic_text(path, json.dumps(urls, ensure_ascii=False, indent=0))
+    return len(urls)
+
+
+def is_dead_image(url: str) -> bool:
+    with _DEAD_IMAGE_LOCK:
+        return url in _DEAD_IMAGE_URLS
+
+
+def mark_dead_image(url: str) -> None:
+    with _DEAD_IMAGE_LOCK:
+        _DEAD_IMAGE_URLS.add(url)
+
+
+def reset_dead_image_cache() -> None:
+    """只给测试用：清空进程缓存，避免用例之间互相影响。"""
+    with _DEAD_IMAGE_LOCK:
+        _DEAD_IMAGE_URLS.clear()
 
 
 # 上传书（用户自己推进微信读书的文件）的目录会把原文夹注拆成独立章节。实测
@@ -988,6 +1056,10 @@ def safe_name(value: str) -> str:
     return value[:120] or "WeRead"
 
 
+class _OversizeImage(Exception):
+    """A single image exceeded IMAGE_LIMIT; drop it, keep the chapter."""
+
+
 def _image_extension(data: bytes) -> str | None:
     if data.startswith(b"\xff\xd8\xff"): return ".jpg"
     if data.startswith(b"\x89PNG\r\n\x1a\n"): return ".png"
@@ -996,9 +1068,69 @@ def _image_extension(data: bytes) -> str | None:
     return None
 
 
+# 同一张插图常常出现两份来源：章节图片包（tar）里一份，正文的远程 URL 再一份，
+# 字节完全相同。以前按"章节号-文件名"各存一份，结果汉书 1569 个图片条目里只有
+# 686 张唯一图片，重复占 94 MB（EPUB 199 MB 里几乎一半是重复图）。
+# 这里按内容哈希去重：第二份直接复用第一次的文件名，不再落盘。
+def _unlink_quietly(path: Path) -> None:
+    """Delete a temp file; a scanner holding it for a moment is not an error.
+
+    WinError 32 means another process (usually antivirus or the search indexer)
+    has the file open. Retrying briefly gets past it; giving up silently is
+    still better than failing the chapter over a temp file.
+    """
+    for _ in range(5):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+        except OSError:
+            return
+
+
+def _replace_retry(source: Path, target: Path) -> None:
+    """os.replace with a few retries: Windows refuses while the target is open."""
+    for attempt in range(5):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05)
+
+
+_IMAGE_DIGESTS: dict[tuple[str, str], str] = {}
+_IMAGE_DIGESTS_LOCK = threading.Lock()
+
+
+def _reuse_image(data: bytes, root: Path) -> str | None:
+    key = (str(root), hashlib.sha256(data).hexdigest())
+    with _IMAGE_DIGESTS_LOCK:
+        return _IMAGE_DIGESTS.get(key)
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _remember_image(data: bytes, root: Path, name: str) -> None:
+    key = (str(root), hashlib.sha256(data).hexdigest())
+    with _IMAGE_DIGESTS_LOCK:
+        _IMAGE_DIGESTS.setdefault(key, name)
+
+
 def _save_image(data: bytes, root: Path, used: set[str], stem: str) -> str | None:
     ext = _image_extension(data)
     if not ext: return None
+    reused = _reuse_image(data, root)
+    if reused:
+        return reused
     candidate = safe_name(Path(stem).stem) + ext
     index = 1
     while candidate.lower() in used or candidate.lower() in {"cover.jpg", "cover.jpeg", "cover.png", "cover.gif", "cover.webp"}:
@@ -1008,6 +1140,7 @@ def _save_image(data: bytes, root: Path, used: set[str], stem: str) -> str | Non
     target = root / "images" / candidate
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
+    _remember_image(data, root, candidate)
     return candidate
 
 
@@ -1038,7 +1171,7 @@ def extract_images(chapter: dict[str, Any], http: requests.Session, referer: str
                 total += len(chunk)
                 if total > ARCHIVE_LIMIT:
                     output.close()
-                    archive_path.unlink(missing_ok=True)
+                    _unlink_quietly(archive_path)
                     raise RuntimeError("chapter image archive exceeds 128 MiB")
                 output.write(chunk)
     archive_path.rename(archive_path.with_suffix(""))
@@ -1049,37 +1182,54 @@ def extract_images(chapter: dict[str, Any], http: requests.Session, referer: str
             with zipfile.ZipFile(archive_path) as archive:
                 for info in archive.infolist():
                     if info.is_dir(): continue
-                    if info.file_size > 32 * 1024 * 1024:
-                        raise RuntimeError("chapter archive entry exceeds 32 MiB")
+                    entry_name = Path(info.filename).name
+                    if info.file_size > ARCHIVE_ENTRY_LIMIT:
+                        dropped_archive_images.append("oversize %s" % entry_name)
+                        mapped[entry_name] = ""     # src="" -> 该 <img> 会被删掉
+                        continue
                     with archive.open(info) as source:
                         head = source.read(12)
-                        ext = _image_extension(head)
-                        if not ext: continue
-                        target_name = _save_image_stream(source, head, root, used,
-                                                         Path(info.filename).name,
-                                                         str(chapter["chapterUid"]))
+                        if not _image_extension(head): continue
+                        try:
+                            target_name = _save_image_stream(source, head, root, used,
+                                                             entry_name,
+                                                             str(chapter["chapterUid"]))
+                        except _OversizeImage as exc:
+                            dropped_archive_images.append(
+                                "oversize %s (%s)" % (entry_name, exc))
+                            mapped[entry_name] = ""
+                            continue
                         if target_name:
-                            mapped[Path(info.filename).name] = "../images/" + target_name
+                            mapped[entry_name] = "../images/" + target_name
                             mapped[target_name] = "../images/" + target_name
         except zipfile.BadZipFile:
             with tarfile.open(archive_path, mode="r:*") as archive:
                 for member in archive.getmembers():
                     if not member.isfile(): continue
-                    if member.size > 32 * 1024 * 1024:
-                        raise RuntimeError("chapter archive entry exceeds 32 MiB")
+                    entry_name = Path(member.name).name
+                    if member.size > ARCHIVE_ENTRY_LIMIT:
+                        dropped_archive_images.append("oversize %s" % entry_name)
+                        mapped[entry_name] = ""
+                        continue
                     source = archive.extractfile(member)
                     if not source: continue
                     with source:
                         head = source.read(12)
                         if not _image_extension(head): continue
-                        target_name = _save_image_stream(source, head, root, used,
-                                                         Path(member.name).name,
-                                                         str(chapter["chapterUid"]))
+                        try:
+                            target_name = _save_image_stream(source, head, root, used,
+                                                             entry_name,
+                                                             str(chapter["chapterUid"]))
+                        except _OversizeImage as exc:
+                            dropped_archive_images.append(
+                                "oversize %s (%s)" % (entry_name, exc))
+                            mapped[entry_name] = ""
+                            continue
                         if target_name:
-                            mapped[Path(member.name).name] = "../images/" + target_name
+                            mapped[entry_name] = "../images/" + target_name
                             mapped[target_name] = "../images/" + target_name
     finally:
-        archive_path.unlink(missing_ok=True)
+        _unlink_quietly(archive_path)
     return mapped, dropped_archive_images
 
 
@@ -1087,6 +1237,14 @@ def _save_image_stream(source: Any, head: bytes, root: Path,
                        used: set[str], stem: str, namespace: str) -> str | None:
     ext = _image_extension(head)
     if not ext: return None
+    # 整张读进内存（上限 16 MiB）才能按内容去重；之前是流式写盘，
+    # 同一张图换个章节号就会再存一份。
+    data = head + source.read(IMAGE_LIMIT)
+    if len(data) > IMAGE_LIMIT:
+        raise _OversizeImage("%.1f MiB" % (len(data) / 1048576.0))
+    reused = _reuse_image(data, root)
+    if reused:
+        return reused
     candidate = safe_name(namespace + "-" + Path(stem).stem) + ext
     suffix = 1
     reserved = {"cover.jpg", "cover.jpeg", "cover.png", "cover.gif", "cover.webp"}
@@ -1096,12 +1254,8 @@ def _save_image_stream(source: Any, head: bytes, root: Path,
     used.add(candidate.lower())
     target = root / "images" / candidate
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("wb") as output:
-        output.write(head)
-        shutil.copyfileobj(source, output, 64 * 1024)
-        if output.tell() > IMAGE_LIMIT:
-            target.unlink(missing_ok=True)
-            raise RuntimeError("chapter image exceeds 16 MiB")
+    target.write_bytes(data)
+    _remember_image(data, root, candidate)
     return candidate
 
 
@@ -1112,6 +1266,18 @@ def download_remote_images(xhtml: str, http: requests.Session,
     url_to_href: dict[str, str] = {}
     image_re = re.compile(r'(?i)(\bsrc\s*=\s*)(["\'])(.*?)(\2)')
     dropped: list[str] = []
+    # 本章已经记进 dropped 的死链，避免同一 URL 在本章重复计数；同时让
+    # "上一章就判死、这一章直接跳过请求"的那条路径在 manifest 里仍然可见。
+    reported_dead: set[str] = set()
+
+    def _is_note_img(match: re.Match[str]) -> bool:
+        """当前 src 所在的 <img> 是否为注角标（qqreader-footnote）。"""
+        start = match.string.rfind("<img", 0, match.start())
+        if start < 0:
+            return False
+        end = match.string.find(">", match.end())
+        tag = match.string[start:end + 1] if end > 0 else ""
+        return "qqreader-footnote" in tag
 
     def replace(match: re.Match[str]) -> str:
         raw_url = match.group(3).replace("&amp;", "&")
@@ -1119,10 +1285,20 @@ def download_remote_images(xhtml: str, http: requests.Session,
         if not url.startswith(("http://", "https://")): return match.group(0)
         if url in url_to_href:
             href = url_to_href[url]
-            # 空串 = 该 URL 已知不可用，直接删掉这个 <img>，不再请求
+            # 空串 = 该 URL 已知不可用，不再请求。
+            # 注角标的注文在 alt 里，图 404 但注必须保留——只清空 src，
+            # 让后续统一附录把 alt 转成「注」；其余死图直接删掉。
             if not href:
-                return ""
+                return 'src=""' if _is_note_img(match) else ""
             return match.group(1) + match.group(2) + href + match.group(4)
+        # 上一章（或上一次运行）已经确认这张图是死链：直接按死链处理，不再发请求。
+        # 这是 note.png 类资源的主要加速点——它们每章都会出现，但只需要被问一次。
+        if is_dead_image(url):
+            url_to_href[url] = ""
+            if url not in reported_dead:
+                reported_dead.add(url)
+                dropped.append(f"cached-dead {url}")
+            return 'src=""' if _is_note_img(match) else ""
         response = http.get(url, headers={"Referer": referer}, timeout=(10, 45), stream=True)
         # A missing or unreadable image must not cost the reader the chapter.
         # Some catalogue entries reference artwork that no longer exists
@@ -1131,25 +1307,39 @@ def download_remote_images(xhtml: str, http: requests.Session,
         # <img> and say so; the prose is the point.
         if response.status_code in (403, 404, 410):
             dropped.append(f"{response.status_code} {url}")
+            reported_dead.add(url)
+            mark_dead_image(url)
             print(f"[IMAGE] dropping an unavailable image "
                   f"(HTTP {response.status_code}): {url}", file=sys.stderr, flush=True)
             # 记住这个 URL 不可用（空串），否则同一章里几十个相同的
             # note.png 角标会各发一次请求——后汉书实测 6930 次 404，
             # 把 155 章的下载拖成两小时以上。
             url_to_href[url] = ""
-            return ""
+            # 注角标的注文在 alt 里：图可以丢，注不能丢（W13 根因）。
+            return 'src=""' if _is_note_img(match) else ""
         response.raise_for_status()
         filename = safe_name(namespace) + "-remote-" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
         image_path = root / "incoming" / (filename + ".part")
         image_path.parent.mkdir(parents=True, exist_ok=True)
         total = 0
+        exceeded = False
         with response, image_path.open("wb") as output:
             for chunk in response.iter_content(64 * 1024):
                 if not chunk: continue
                 total += len(chunk)
-                if total > IMAGE_LIMIT: raise RuntimeError("remote image exceeds 16 MiB")
+                if total > IMAGE_LIMIT:
+                    exceeded = True
+                    break
                 output.write(chunk)
-        ext = _image_extension(image_path.read_bytes()[:12])
+        if exceeded:
+            # 单张图超过上限：按「缺一张图」处理，不让整章失败（同死链处理）。
+            _unlink_quietly(image_path)
+            dropped.append("oversize %s" % url)
+            print(f"[IMAGE] image exceeds the size cap and was skipped: {url}",
+                  file=sys.stderr, flush=True)
+            return 'src=""' if _is_note_img(match) else ""
+        data = image_path.read_bytes()
+        ext = _image_extension(data[:12])
         if not ext:
             # Not an image at all (an HTML error page, say). Same reasoning:
             # keep the chapter, drop the picture.
@@ -1158,6 +1348,14 @@ def download_remote_images(xhtml: str, http: requests.Session,
             print(f"[IMAGE] dropping a response that is not an image: {url}",
                   file=sys.stderr, flush=True)
             return ""
+        # 正文 URL 和图片包里常常是同一张图：按内容复用已经落盘的那份。
+        reused = _reuse_image(data, root)
+        if reused:
+            _unlink_quietly(image_path)
+            href = "../images/" + reused
+            url_to_href[url] = href
+            mapping[Path(url.split("?", 1)[0]).name] = href
+            return match.group(1) + match.group(2) + href + match.group(4)
         base = filename + ext
         suffix = 1
         while base.lower() in used:
@@ -1166,7 +1364,8 @@ def download_remote_images(xhtml: str, http: requests.Session,
         used.add(base.lower())
         final_path = root / "images" / base
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(image_path, final_path)
+        _replace_retry(image_path, final_path)
+        _remember_image(data, root, base)
         href = "../images/" + base
         url_to_href[url] = href
         mapping[Path(url.split("?", 1)[0]).name] = href
@@ -1179,8 +1378,23 @@ def download_remote_images(xhtml: str, http: requests.Session,
         # Only remove <img> tags whose src we actually blanked. The second
         # pattern used to match every self-closing <img> in the chapter, which
         # deleted real illustrations whenever a single note.png was dropped.
-        result = re.sub(r'(?is)<img\b[^>]*\bsrc\s*=\s*(?:""|\'\')[^>]*>', "", result)
+        # 注角标（qqreader-footnote）例外：它的注文在 alt 里，图丢了注不能丢
+        # （W13 根因——后汉书 35 章、数千条注曾被这条正则整章删除）。
+        result = _strip_blank_images(result)
     return result, mapping, dropped
+
+
+_BLANK_IMG = re.compile(
+    r'(?is)<img\b(?![^>]*qqreader-footnote)[^>]*\bsrc\s*=\s*(?:""|\'\')[^>]*>')
+
+
+def _strip_blank_images(xhtml: str) -> str:
+    """Remove <img src=""> left behind by a dropped picture.
+
+    An empty src makes readers re-request the document. 注角标 is exempt: its
+    note text lives in alt, so the tag must survive even without the image.
+    """
+    return _BLANK_IMG.sub("", xhtml)
 
 
 def rewrite_images(xhtml: str, mapping: dict[str, str]) -> str:
@@ -1203,7 +1417,13 @@ def _cover_extension(data: bytes) -> tuple[str, str] | None:
 
 def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
                chapter_paths: list[Path], css: str, assets: Path,
-               cover_path: Path | None) -> None:
+               cover_path: Path | None,
+               appendix: tuple[list[tuple[str, bytes]], dict[str, Path]] | None = None) -> None:
+    """打包 EPUB。
+
+    appendix = ([(文件名, XHTML 字节)], {chapter_uid: 改写后 .body 路径}) 时，在书末追加
+    「注释和想法」章节、正文用角标改写后的版本；None 时输出与引入本功能前逐字节
+    一致（spec R5：默认关闭，回归要求）。"""
     if len(chapters) != len(chapter_paths): raise RuntimeError("chapter staging list mismatch")
     manifest = ['<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
                 '<item id="style" href="style.css" media-type="text/css"/>']
@@ -1217,6 +1437,10 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
         title = epub_escape(chapter.get("title") or f"Chapter {index}")
         manifest.append(f'<item id="{chapter_id}" href="{filename}" media-type="application/xhtml+xml"/>')
         spine.append(f'<itemref idref="{chapter_id}"/>')
+    if appendix is not None:
+        for idx, (fname, _data) in enumerate(appendix[0], 1):
+            manifest.append('<item id="appendix%d" href="text/%s" media-type="application/xhtml+xml"/>' % (idx, fname))
+            spine.append('<itemref idref="appendix%d"/>' % idx)
     cover_meta = ""
     cover_info = _cover_extension(cover_path.read_bytes()[:12]) if cover_path and cover_path.is_file() else None
     if cover_info:
@@ -1227,28 +1451,76 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
         metadata_entries["OEBPS/text/cover.xhtml"] = (f'<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Cover</title><link rel="stylesheet" href="../style.css"/></head><body><img src="../images/cover{ext}" alt="Cover"/></body></html>').encode()
         cover_meta = '<meta name="cover" content="cover-image"/>'
     asset_paths = sorted(p for p in assets.glob("*") if p.is_file())
+    # 按内容给图片去重：同一张图可能以两个文件名存在（图片包一份、远程 URL
+    # 一份），旧版本各写一份，汉书实测重复 94 MB。这里在打包时算哈希，重复的
+    # 只写一份，并把正文里的引用改到留下的那个名字上——已经下好的书重新打包
+    # 就能瘦下来，不必重下。
+    image_paths = [p for p in asset_paths
+                   if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}]
+    canonical: dict[str, str] = {}
+    if len(image_paths) > 1:
+        owner_by_digest: dict[str, str] = {}
+        for image in image_paths:
+            digest = _file_digest(image)
+            owner = owner_by_digest.get(digest)
+            if owner is None:
+                owner_by_digest[digest] = image.name
+            elif owner != image.name:
+                canonical[image.name] = owner
+    canonical_bytes = {name.encode("utf-8"): owner.encode("utf-8")
+                       for name, owner in canonical.items()}
+
+    def _dedupe_refs(body: bytes) -> bytes:
+        if not canonical_bytes:
+            return body
+        def replaced(match: re.Match[bytes]) -> bytes:
+            target = canonical_bytes.get(match.group(1))
+            return b"../images/" + target if target else match.group(0)
+        return re.sub(rb"\.\./images/([^\"' >]+)", replaced, body)
+
     for index, asset in enumerate(asset_paths, 1):
         mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(asset.suffix.lower())
-        if mime:
+        if mime and asset.name not in canonical:
             manifest.append(f'<item id="asset{index}" href="images/{epub_escape(asset.name)}" media-type="{mime}"/>')
-    nav = '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Contents</title></head><body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><ol>' + "".join(f'<li><a href="text/chapter-{index:04d}.xhtml">{epub_escape(chapter.get("title") or index)}</a></li>' for index, chapter in enumerate(chapters, 1)) + "</ol></nav></body></html>"
+    nav_items = "".join(f'<li><a href="text/chapter-{index:04d}.xhtml">{epub_escape(chapter.get("title") or index)}</a></li>' for index, chapter in enumerate(chapters, 1))
+    if appendix is not None:
+        for fname, _data in appendix[0]:
+            label = "注释和想法"
+            if "notes" in fname:
+                label += " · 注释" + ("" if fname == "appendix-notes-01.xhtml" else "（续）")
+            elif "thoughts" in fname:
+                label += " · 想法"
+            nav_items += '<li><a href="text/%s">%s</a></li>' % (fname, label)
+    nav = '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Contents</title></head><body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><ol>' + nav_items + "</ol></nav></body></html>"
     metadata_entries["OEBPS/nav.xhtml"] = nav.encode("utf-8")
     metadata_entries["OEBPS/style.css"] = css.encode("utf-8")
     modified = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     opf = f'<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="bookid">weread-{epub_escape(book["bookId"])}</dc:identifier><dc:title>{epub_escape(book.get("title"))}</dc:title><dc:creator>{epub_escape(book.get("author"))}</dc:creator><dc:publisher>WeRead</dc:publisher><dc:language>zh-CN</dc:language><meta property="dcterms:modified">{modified}</meta>{cover_meta}</metadata><manifest>{"".join(manifest)}</manifest><spine>{"".join(spine)}</spine></package>'
     metadata_entries["OEBPS/content.opf"] = opf.encode("utf-8")
     temp_path = path.with_suffix(path.suffix + ".part")
+    # 附录模式下正文用角标改写后的缓存副本；无附录时仍读原 .body 缓存
+    appendix_bodies = appendix[1] if appendix is not None else {}
     with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
         archive.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_STORED)
         for name, data in metadata_entries.items(): archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
         for index, chapter_path in enumerate(chapter_paths, 1):
             title = epub_escape(chapters[index - 1].get("title") or f"Chapter {index}")
-            with archive.open(f"OEBPS/text/chapter-{index:04d}.xhtml", "w") as target, chapter_path.open("rb") as source:
+            body_path = appendix_bodies.get(str(chapters[index - 1].get("chapterUid")), chapter_path)
+            with archive.open(f"OEBPS/text/chapter-{index:04d}.xhtml", "w") as target:
                 target.write((f'<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>{title}</title><link rel="stylesheet" href="../style.css" type="text/css"/></head><body>').encode("utf-8"))
-                shutil.copyfileobj(source, target, 64 * 1024)
+                if canonical_bytes:
+                    target.write(_dedupe_refs(body_path.read_bytes()))
+                else:
+                    with body_path.open("rb") as source:
+                        shutil.copyfileobj(source, target, 64 * 1024)
                 target.write(b"</body></html>")
+        if appendix is not None:
+            for fname, data in appendix[0]:
+                with archive.open("OEBPS/text/" + fname, "w") as target:
+                    target.write(data)
         for asset in asset_paths:
-            if asset.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+            if (asset.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+                    and asset.name not in canonical):
                 archive.write(asset, "OEBPS/images/" + asset.name, compress_type=zipfile.ZIP_STORED)
         if cover_info and cover_path:
             archive.write(cover_path, "OEBPS/images/cover" + cover_info[0], compress_type=zipfile.ZIP_STORED)
@@ -1695,7 +1967,9 @@ def resolve_export_workspace(output: Path, book_id: str, package_name: str) -> P
 
 def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int = 1,
                 want_thoughts: bool = True,
-                want_underlines: bool = True) -> Path:
+                want_underlines: bool = True,
+                unified_appendix: bool = False,
+                appendix_scope: str = "both") -> Path:
     secure_output_directory(output)
     # 每次导出从零开始计数：同一进程内连跑两本书时，上一本丢弃的注数不能带到
     # 这一本的 manifest 里。
@@ -1714,6 +1988,13 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     export_lock = acquire_export_lock(workspace, book_id)
     atexit.register(lambda lock=export_lock: lock.unlink(missing_ok=True))
     state_path = workspace / "state.json"
+    # 死链缓存落在工作目录里：同一本书续传或重跑时，"这张图已经取过 404"这件事
+    # 不该重新问一遍。清空断点不会清它——那是资源属性，不是章节状态。
+    dead_image_path = workspace / "dead-images.json"
+    reused_dead = load_dead_image_cache(dead_image_path)
+    if reused_dead:
+        print(f"[IMAGE] reusing {reused_dead} known-dead image URL(s) from the "
+              f"previous run; they will not be requested again", flush=True)
     chapter_uids = [str(chapter["chapterUid"]) for chapter in chapters]
     state = {"version": 1, "book_id": book_id, "title": book.get("title"),
              "total": len(chapters), "chapter_uids": chapter_uids, "completed": 0,
@@ -1849,7 +2130,12 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         # so. Degrading is only better than failing if the loss is visible.
         dropped_image_urls = list(archive_dropped) + list(remote_dropped)
         dropped_image_count = len(dropped_image_urls)
-        body = rewrite_images(body_fragment(processed), image_map)
+        # 其中有多少是「注」角标（note.png）。它不是插图：每章一个，删掉了只是
+        # 少个小图标，注文本身还在 alt 里并被统一附录收走。混在一起计数会让
+        # 完成提示说成「152 张插图」，读者以为正文少了图。
+        dropped_note_markers = sum(
+            1 for item in dropped_image_urls if "note.png" in str(item).lower())
+        body = _strip_blank_images(rewrite_images(body_fragment(processed), image_map))
         temp_body = body_path.with_suffix(".body.part")
         temp_review = review_path.with_suffix(".json.part")
         temp_css = css_path.with_suffix(".css.part")
@@ -1868,6 +2154,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             # Counted here so the manifest can state exactly what the book is
             # missing, instead of the loss being invisible to the reader.
             "dropped_images": dropped_image_count,
+            "dropped_note_marker_images": dropped_note_markers,
             "dropped_image_urls": dropped_image_urls[:5]}, ensure_ascii=False), encoding="utf-8")
         temp_css.write_text(chapter_css, encoding="utf-8")
         os.replace(temp_body, body_path)
@@ -1914,16 +2201,24 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
                                                           want_underlines),
                                  throttle, unresolved)
 
-    if jobs == 1:
-        for index, chapter in pending:
-            fetch_with_retries(index, chapter)
-    else:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="weread-chapter") as pool:
-            futures = [pool.submit(fetch_with_retries, index, chapter)
-                       for index, chapter in pending]
-            for future in as_completed(futures):
-                future.result()
+    try:
+        if jobs == 1:
+            for index, chapter in pending:
+                fetch_with_retries(index, chapter)
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="weread-chapter") as pool:
+                futures = [pool.submit(fetch_with_retries, index, chapter)
+                           for index, chapter in pending]
+                for future in as_completed(futures):
+                    future.result()
+    finally:
+        # 无论这一轮是正常跑完还是中途抛错（限流、断网、Ctrl+C），把已确认的死链
+        # 落盘。否则下一次续传又要为同一个 note.png 发 6930 次 404。
+        saved_dead = save_dead_image_cache(dead_image_path)
+        if saved_dead:
+            print(f"[IMAGE] remembered {saved_dead} dead image URL(s) for the "
+                  f"next run", flush=True)
     failed_path = workspace / "failed_chapters.json"
     if unresolved:
         atomic_text(failed_path, json.dumps(unresolved, ensure_ascii=False, indent=2))
@@ -1945,6 +2240,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     annotation_coverage = {"underline_ranges": 0, "embedded_markers": 0, "chapters_with_underlines": 0,
                           "dropped_underline_ranges": 0, "chapters_with_dropped_underlines": 0}
     dropped_images = 0
+    dropped_note_markers = 0
     chapters_with_dropped_images = 0
     dropped_image_samples: list[str] = []
     missing_underline_samples: list[str] = []
@@ -1958,6 +2254,11 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
              "refused_underlines": 0, "chapters_with_unverified_underlines": 0,
              "chapters_with_refused_underlines": 0, "refused_underline_reasons": {}}
     quote_mismatch_samples: list[dict[str, str]] = []
+    # 未落点的划线按"哪一章、哪一段"记进 manifest；下载完成提示与技术日志读它。
+    # 以前那页只会解析 desktop-general.log，而这类决定写在各书自己的日志里，
+    # 所以页面永远是空的。
+    unplaced_details: list[dict[str, str]] = []
+    unplaced_total = 0
     for index in range(1, len(chapters) + 1):
         chapter_css = css_paths[index - 1].read_text(encoding="utf-8")
         if chapter_css and chapter_css not in style_set:
@@ -1968,11 +2269,21 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         dropped = int(row.get("dropped_underline_ranges", 0) or 0)
         annotation_coverage["dropped_underline_ranges"] += dropped
         if dropped: annotation_coverage["chapters_with_dropped_underlines"] += 1
-        for ident in (row.get("missing_underline_ids") or [])[:2]:
+        missing_ids = row.get("missing_underline_ids") or []
+        unplaced_total += len(missing_ids)
+        chapter = chapters[index - 1]
+        for ident in missing_ids:
             if ident not in missing_underline_samples:
                 missing_underline_samples.append(ident)
+            if len(unplaced_details) < 200:
+                unplaced_details.append({
+                    "chapter": str(chapter.get("chapterUid")),
+                    "title": str(chapter.get("title") or ""),
+                    "range": str(ident),
+                })
         gone = int(row.get("dropped_images", 0) or 0)
         dropped_images += gone
+        dropped_note_markers += int(row.get("dropped_note_marker_images") or 0)
         if gone:
             chapters_with_dropped_images += 1
             for name in (row.get("dropped_image_urls") or [])[:3]:
@@ -2069,13 +2380,16 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         "underlines_refused_by_reason": audit["refused_underline_reasons"] if audit["measured_chapters"] else None,
         "underline_mismatch_examples": quote_mismatch_samples if audit["measured_chapters"] else None,
         "images_dropped": dropped_images,
+        # 其中「注」角标（note.png）的条数；旧断点没有这个字段，为 0。
+        "images_dropped_note_markers": dropped_note_markers,
         "chapters_with_dropped_images": chapters_with_dropped_images,
         "dropped_image_examples": dropped_image_samples,
         "reason_underlines": "WeRead reported these highlights but would not supply an "
                             "anchor this chapter's text could verify, so they were not "
                             "placed. An unverified anchor would highlight the wrong words. "
                             "This is deliberate, not a download failure.",
-        "reason_images": "WeRead no longer serves these images (HTTP 403/404/410).",
+        "reason_images": "WeRead no longer serves these images (HTTP 403/404/410), "
+                            "or a single image exceeded the size cap and was skipped.",
         "reason_placement_audit": "underlines_verified_by_text counts highlights "
                                   "whose marked text equals the quote WeRead holds, "
                                   "proved by the plugin's own placement pass; "
@@ -2090,6 +2404,9 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     # 上传书的目录把「注」拆成独立章节，那些碎片在 fetch_book 里被剔掉了。剔掉是
     # 对的（否则会产出上万页重复文件），但必须让读者知道注没进来——这本书的正文
     # 完整、注缺失，和"书是完整的"是两回事。
+    omission_report["unplaced_underline_total"] = unplaced_total
+    if unplaced_details:
+        omission_report["unplaced_underline_details"] = unplaced_details
     dropped_annotations = _dropped_annotations()
     if dropped_annotations:
         omission_report["annotation_fragments_dropped"] = dropped_annotations
@@ -2115,7 +2432,43 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         except requests.RequestException:
             cover_path = None
     epub_path = package_dir / (stem + ".epub")
-    write_epub(epub_path, book, chapters, chapter_paths, css, workspace_images, cover_path)
+    # reviews.jsonl 先汇总落盘：统一附录（下面）与 KOReader bundle（后面）都以它
+    # 为想法数据源。它只是把各章 review 缓存拼起来，提前写无副作用。
+    review_file = package_dir / "reviews.jsonl"
+    review_temp = review_file.with_suffix(".jsonl.part")
+    with review_temp.open("w", encoding="utf-8", newline="\n") as output_reviews:
+        for local_index, chapter in enumerate(chapters, 1):
+            row_path = review_paths[local_index - 1]
+            if row_path is None or not row_path.is_file(): raise RuntimeError("chapter review checkpoint is missing")
+            row = json.loads(row_path.read_text(encoding="utf-8"))
+            if str(row.get("chapter_uid")) != str(chapter["chapterUid"]): raise RuntimeError("chapter review checkpoint UID mismatch")
+            output_reviews.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    os.replace(review_temp, review_file)
+    # 统一附录（注释和想法）：开关打开才在书末追加附录章节；appendix_scope 决定
+    # 收哪一类（both / notes / thoughts，对应 GUI 的「注释和想法」「注释」「想法」）。
+    # 数据不一致（角标数 != 条目数）时 unified_appendix 抛错，本步不产残缺 EPUB。
+    appendix_arg = None
+    appendix_manifest: dict[str, Any] = {}
+    if unified_appendix:
+        from unified_appendix import APPENDIX_CSS, build_appendix
+        # 附录与正文共用 style.css：注角标 [注n] 的样式必须并进主 CSS，
+        # 否则正文里的角标在阅读器里会退化成普通正文。
+        css = css + "\n" + APPENDIX_CSS
+        appendix_files, rewritten_bodies, appendix_manifest = build_appendix(
+            [(str(ch["chapterUid"]), ch.get("title") or f"Chapter {i}", p)
+             for i, (ch, p) in enumerate(zip(chapters, chapter_paths), 1)],
+            review_file,
+            include_notes=appendix_scope in ("both", "notes"),
+            include_thoughts=appendix_scope in ("both", "thoughts"))
+        bodies_dir = workspace / "appendix-bodies"
+        bodies_dir.mkdir(parents=True, exist_ok=True)
+        appendix_bodies = {}
+        for uid, rewritten in rewritten_bodies:
+            body_copy = bodies_dir / ("chapter-%s.body" % uid)
+            atomic_text(body_copy, rewritten)
+            appendix_bodies[uid] = body_copy
+        appendix_arg = (appendix_files, appendix_bodies)
+    write_epub(epub_path, book, chapters, chapter_paths, css, workspace_images, cover_path, appendix_arg)
     manifest = {"version": 1, "book_id": book_id, "title": book.get("title"),
         "author": book.get("author", ""), "epub": epub_path.name,
         "epub_size": epub_path.stat().st_size,
@@ -2128,35 +2481,152 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         # failing means the text is kept, but a reader who is not told that
         # images or highlights went missing will assume the book is whole.
         "omissions": omission_report}
+    if appendix_manifest:
+        manifest.update(appendix_manifest)
     atomic_text(package_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-    review_file = package_dir / "reviews.jsonl"
-    review_temp = review_file.with_suffix(".jsonl.part")
-    with review_temp.open("w", encoding="utf-8", newline="\n") as output_reviews:
-        for local_index, chapter in enumerate(chapters, 1):
-            row_path = review_paths[local_index - 1]
-            if row_path is None or not row_path.is_file(): raise RuntimeError("chapter review checkpoint is missing")
-            row = json.loads(row_path.read_text(encoding="utf-8"))
-            if str(row.get("chapter_uid")) != str(chapter["chapterUid"]): raise RuntimeError("chapter review checkpoint UID mismatch")
-            output_reviews.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
-    os.replace(review_temp, review_file)
     descriptor = {"version": 1, "manifest": "manifest.json", "reviews": "reviews.jsonl", "epub": epub_path.name}
     atomic_text(package_dir / "bundle.json", json.dumps(descriptor, ensure_ascii=False, indent=2))
-    bundle_path = package_dir / (stem + ".weread.zip")
-    bundle_temp = bundle_path.with_suffix(".zip.part")
-    with zipfile.ZipFile(bundle_temp, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.write(epub_path, epub_path.name)
-        archive.write(package_dir / "manifest.json", "manifest.json")
-        archive.write(review_file, "reviews.jsonl")
-        archive.write(package_dir / "bundle.json", "bundle.json")
-    os.replace(bundle_temp, bundle_path)
+    # 不再产导入包（.weread.zip）：用户只要 EPUB，导入包只是把同一本 EPUB 再
+    # 存一份（+ 想法数据），大书白白多占一百多兆。设备端导入若还需要，自己压
+    # 这个目录即可。已经在盘上的旧导入包不删，可由「存储占用」页清理。
     export_lock.unlink(missing_ok=True)
     # The GUI reads this to tell the user exactly what the finished book is
     # missing. Degrading instead of failing is only honest if the loss is
     # reported, so it goes over the same channel as the result itself.
     print("OMISSIONS", json.dumps(omission_report, ensure_ascii=False, separators=(",", ":")), flush=True)
     print("EPUB", epub_path)
-    print("IMPORT_BUNDLE", bundle_path)
-    return bundle_path
+    return epub_path
+
+
+SERVICE_COMMANDS = {
+    "auth": lambda a: ["--check-auth"],
+    "shelf": lambda a: ["--shelf"],
+    "search": lambda a: ["--search", str(a.get("keyword") or "")],
+    "book-info": lambda a: ["--book-info", str(a.get("bookId") or "")],
+    "probe": lambda a: (["--probe-book", str(a.get("bookId") or "")]
+                        + (["--probe-chapter", str(a["chapter"])] if a.get("chapter") else [])),
+}
+
+
+def service_argv(command: str, arguments: dict) -> list[str] | None:
+    """Translate one service request into the CLI arguments main() already knows."""
+    builder = SERVICE_COMMANDS.get(command)
+    return None if builder is None else builder(arguments)
+
+
+class _FrameWriter:
+    """Engine stdout/stderr -> one JSON record per line, tagged with the request.
+
+    Engine output is ordinary text (TSV rows, a JSON blob, human sentences), so
+    it cannot be told apart from control records by shape. Framing every line
+    as {"id": n, "line": "..."} keeps the stream unambiguous no matter what the
+    book titles or error messages contain.
+    """
+
+    def __init__(self, emit, request_id):
+        self._emit = emit
+        self._id = request_id
+        self._buffer = ""
+
+    def write(self, text):
+        if not text:
+            return 0
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._emit({"id": self._id, "line": line})
+        return len(text)
+
+    def flush(self):
+        if self._buffer:
+            self._emit({"id": self._id, "line": self._buffer})
+            self._buffer = ""
+
+    # force_utf8_stdio() probes these on whatever sys.stdout happens to be.
+    def reconfigure(self, **_kwargs):
+        return None
+
+    def isatty(self):
+        return False
+
+    def writable(self):
+        return True
+
+
+def serve_forever() -> int:
+    """Answer JSON requests from stdin until EOF (the GUI keeps one alive).
+
+    Starting a worker costs ~1 s -- LuaJIT boot plus loading the plugin tree --
+    and the GUI was paying it for every search, detail lookup and auth check.
+    Here the runtime is built once and each request reuses it; credentials are
+    re-read per request so a login takes effect immediately.
+
+    Wire format, one JSON object per line:
+        -> {"id": 7, "cmd": "search", "args": {"keyword": "三字经"}}
+        <- {"id": 7, "event": "begin"}
+        <- {"id": 7, "line": "<engine output line>"}
+        <- {"id": 7, "event": "end", "code": 0}
+    """
+    force_utf8_stdio()
+    try:
+        # 请求里带中文关键词；不钉住编码时子进程会按控制台代码页（cp936）读，
+        # 书名的 JSON 就会被解成乱码。
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
+    real_out = sys.stdout
+
+    def emit(record: dict) -> None:
+        real_out.write(json.dumps(record, ensure_ascii=False) + "\n")
+        real_out.flush()
+
+    try:
+        lua_runtime()
+    except Exception as exc:
+        emit({"event": "fatal", "detail": "%s: %s" % (type(exc).__name__, exc)})
+        return 1
+    emit({"event": "ready"})
+    for raw in sys.stdin:
+        text = raw.strip()
+        if not text:
+            continue
+        try:
+            request = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(request, dict):
+            continue
+        request_id = request.get("id")
+        command = str(request.get("cmd") or "")
+        if command == "quit":
+            emit({"id": request_id, "event": "end", "code": 0})
+            break
+        argv = service_argv(command, request.get("args") or {})
+        if argv is None:
+            emit({"id": request_id, "event": "end", "code": 2,
+                  "detail": "unknown command %r" % command})
+            continue
+        emit({"id": request_id, "event": "begin"})
+        capture = _FrameWriter(emit, request_id)
+        saved_argv = sys.argv
+        saved_out, saved_err = sys.stdout, sys.stderr
+        sys.argv = ["weread_worker", *argv]
+        sys.stdout = capture
+        sys.stderr = capture
+        code = 0
+        try:
+            code = main()
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+        except Exception as exc:
+            capture.write("FAILED %s %s\n" % (type(exc).__name__, exc))
+            code = 1
+        finally:
+            sys.stdout, sys.stderr = saved_out, saved_err
+            sys.argv = saved_argv
+            capture.flush()
+        emit({"id": request_id, "event": "end", "code": code})
+    return 0
 
 
 def main() -> int:
@@ -2170,6 +2640,9 @@ def main() -> int:
     parser.add_argument("--probe-chapter", help="Chapter UID for --probe-book (default: first readable chapter)")
     parser.add_argument("--shelf", action="store_true",
                         help="List the signed-in account's shelf as JSON (for 我的书架)")
+    parser.add_argument("--serve", action="store_true",
+                        help="Persistent mode for the GUI: read JSON requests from "
+                             "stdin and answer them one at a time on one warm Lua runtime")
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--jobs", type=int, default=1, help="Concurrent chapter workers (1-4; default 1 for LuaJIT stability)")
     parser.add_argument("--no-thoughts", action="store_true",
@@ -2182,7 +2655,18 @@ def main() -> int:
                              "it is the fastest and smallest of the three modes. Plain "
                              "text only -- the exported EPUB has no highlights. Implies "
                              "--no-thoughts.")
+    parser.add_argument("--unified-appendix", action="store_true",
+                        help="Append '注释和想法' appendix chapter(s) at the end of the book "
+                             "and rewrite the body badges to jump to them. What the appendix "
+                             "collects is --appendix-scope.")
+    parser.add_argument("--appendix-scope", choices=("both", "notes", "thoughts"),
+                        default="both",
+                        help="Which parts the unified appendix collects: both (default), "
+                             "notes only, or thoughts only. Ignored without "
+                             "--unified-appendix.")
     args = parser.parse_args()
+    if args.serve:
+        return serve_forever()
     want_thoughts = not args.no_thoughts
     want_underlines = not args.no_annotations
     if not want_underlines:
@@ -2190,6 +2674,19 @@ def main() -> int:
         # note-text switch would be meaningless. Say so once rather than letting
         # --no-annotations --no-thoughts look like two separate decisions.
         want_thoughts = False
+    # 附录不再强制要求想法：GUI 的「注释」档就是"只要注、不要想法"。
+    # 只有"要收想法却没取想法"这种组合需要明说——否则会产出一本没有想法册的书。
+    unified_appendix = bool(args.unified_appendix)
+    appendix_scope = args.appendix_scope if unified_appendix else "both"
+    if unified_appendix and appendix_scope in ("both", "thoughts") and not want_thoughts:
+        print("[APPENDIX] --appendix-scope %s needs thoughts, but --no-thoughts/"
+              "--no-annotations disabled them; the appendix will carry notes only"
+              % appendix_scope, flush=True)
+        appendix_scope = "notes" if appendix_scope == "both" else ""
+    if unified_appendix and not appendix_scope:
+        unified_appendix = False
+        print("[APPENDIX] --unified-appendix ignored: the requested scope was "
+              "thoughts but thoughts are disabled", flush=True)
     if not args.check_auth and not args.search and not args.book_info and not args.probe_book and not args.shelf and not args.book_id:
         parser.error("book_id is required unless --check-auth, --search, or --probe-book is used")
     if args.jobs < 1 or args.jobs > 4:
@@ -2239,7 +2736,7 @@ def main() -> int:
             shelf_books(settings)
             return 0
         result = export_book(args.book_id, args.output, settings, args.jobs, want_thoughts,
-                       want_underlines)
+                       want_underlines, unified_appendix, appendix_scope)
         print("DONE", result, flush=True)
         return 0
     except Exception as exc:
