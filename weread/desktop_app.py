@@ -1535,17 +1535,32 @@ class DesktopApp:
             font=_font(13), **kwargs)
 
     def _scrollable(self, parent, **kwargs):
-        """CTkScrollableFrame 的滚动步长固定为整像素。
+        """CTkScrollableFrame：整像素步进，并在每次滚动后立刻把子窗口摆到位。
 
-        Tk 的 Canvas 滚动是「按像素搬动可见区域、再补画露出的边」；偏移落在
-        半像素上时，字形行被搬到错位的位置，快速拖动滚动条会看到文字糊成
-        一团。yscrollincrement 让每一步都落在整像素上。
+        Tk 的 Canvas 滚动分两步：先把画布可见区域按像素搬过去（BitBlt），再在
+        idle 阶段移动里面的子窗口。快速拖动滚动条时，文字所在的子窗口还没搬，
+        画布已经把新背景贴上了——看到的就是文字糊在旧位置。整像素步进只能减少
+        半像素错位；真正要补的是第二步：在 yscrollcommand 里同步执行
+        update_idletasks()，让子窗口每次滚动后立即移动。
         """
         frame = ctk.CTkScrollableFrame(parent, **kwargs)
         canvas = getattr(frame, "_parent_canvas", None)
-        if canvas is not None:
+        bar = getattr(frame, "_scrollbar", None)
+        if canvas is None:
+            return frame
+        try:
+            canvas.configure(yscrollincrement=24)
+        except Exception:
+            pass
+        if bar is not None:
+            def _sync_scroll(first, last):
+                bar.set(first, last)
+                try:
+                    canvas.update_idletasks()
+                except Exception:
+                    pass
             try:
-                canvas.configure(yscrollincrement=24)
+                canvas.configure(yscrollcommand=_sync_scroll)
             except Exception:
                 pass
         return frame
