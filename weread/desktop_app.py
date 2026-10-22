@@ -522,7 +522,12 @@ class _Scroller(ctk.CTkFrame):
         if not args:
             return
         if args[0] == "moveto":
-            self._offset = int(float(args[1]) * total)
+            # 拖动时按整页吸附：连续几十次重绘在 Tk 下总会残留几帧旧内容，
+            # 一次拖动只跳几页、每页完整重画，就看不到叠影了。
+            raw = int(float(args[1]) * total)
+            step = max(1, view)
+            self._offset = int(round(raw / step)) * step
+            self._offset = max(0, min(self._offset, max(0, total - view)))
         elif args[0] == "scroll":
             amount = int(args[1])
             step = view if len(args) > 2 and args[2] == "pages" else 24
@@ -4365,6 +4370,21 @@ def main() -> int:
         # and two processes fighting over the same session file.
         return 0
     root = ctk.CTk()
+    # 窗口按屏幕可用高度收一收：窗口高 897 时，在 1080p 屏幕上如果被系统摆到
+    # 偏下的位置，底边会压到任务栏下面——「退出登录 / 查看技术日志 / 打开下载
+    # 目录」那排按钮就看不见了（用户的照片就是这样）。这里按屏幕尺寸取一个
+    # 不会越界的高度，并居中。
+    try:
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        width = min(1418, max(1000, int(screen_w * 0.92)))
+        height = min(897, max(640, screen_h - 160))
+        root.geometry("%dx%d+%d+%d" % (
+            width, height,
+            max(0, (screen_w - width) // 2),
+            max(0, (screen_h - height) // 3)))
+    except Exception:
+        pass
     # The main window opens immediately -- always. The earlier design hid the
     # window and ran a credential wizard first, so a new user's first experience
     # was a small dialog appearing, then nothing until it was dismissed, and on
