@@ -207,7 +207,7 @@ def test_a_failed_delete_is_reported_not_silently_ignored():
 def test_all_sidebar_pages_keep_content_on_revisit():
     root, inst = _make_instance()
     try:
-        PAGES = ["我的书架", "下载记录", "存储占用", "划线清单", "设置", "下载工坊"]
+        PAGES = ["我的书架", "下载记录", "存储占用", "设置", "下载工坊"]
         ok = True
         for name in PAGES:
             inst._switch_page(name)

@@ -2172,7 +2172,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
              "refused_underlines": 0, "chapters_with_unverified_underlines": 0,
              "chapters_with_refused_underlines": 0, "refused_underline_reasons": {}}
     quote_mismatch_samples: list[dict[str, str]] = []
-    # 未落点的划线按"哪一章、哪一段"记进 manifest，GUI 的「划线清单」直接读它。
+    # 未落点的划线按"哪一章、哪一段"记进 manifest；下载完成提示与技术日志读它。
     # 以前那页只会解析 desktop-general.log，而这类决定写在各书自己的日志里，
     # 所以页面永远是空的。
     unplaced_details: list[dict[str, str]] = []

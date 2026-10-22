@@ -902,36 +902,6 @@ class DesktopApp:
         # newest first by the file they came from; within one file, last line wins
         return list(reversed(rows))[:200]
 
-    def _read_annotation_notes(self):
-        """每本书 manifest 里「没能在原文定位的划线」，按书名分组。
-
-        这一页以前解析 desktop-general.log，而引擎按书把这类决定写进
-        desktop-<书ID>.log，两者几乎不会重合——页面常态是空的，空状态却承诺
-        "这类决定会记录在这里"。manifest 是打包时写死的成品事实，读它才可靠。
-        """
-        rows = []
-        try:
-            manifests = sorted(Path(OUTPUT).glob("*/manifest.json"))
-        except OSError:
-            return rows
-        for path in manifests:
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            title = str(data.get("title") or path.parent.name)
-            omissions = data.get("omissions") or {}
-            details = omissions.get("unplaced_underline_details") or []
-            total = int(omissions.get("unplaced_underline_total") or 0)
-            for item in details:
-                chapter = str(item.get("title") or "")
-                if not chapter:
-                    chapter = "第 %s 章" % item.get("chapter")
-                rows.append((chapter[:14], "%s · 区间 %s" % (title, item.get("range"))))
-            if total > len(details):
-                rows.append(("其余", "%s · 另有 %d 条未逐条列出" % (title, total - len(details))))
-        return rows[:300]
-
     def _open_export(self, name: str):
         """Open one export folder; the name comes from our own scan."""
         safe = Path(name).name  # never trust more than the basename
@@ -945,7 +915,7 @@ class DesktopApp:
         All pages live under the same content area (self.page_host, the frame
         below the top bar). The download workshop is built eagerly in _build.
 
-        The four data pages (bookshelf / history / statistics / highlights)
+        The three data pages (bookshelf / history / statistics)
         rebuild EVERY visit: their content is a snapshot of disk and log state,
         and a first-visit cache showed the user yesterday's emptiness after a
         fresh download had landed -- exports dir had the EPUB, the page said
@@ -956,7 +926,6 @@ class DesktopApp:
             "我的书架": self._create_bookshelf_page,
             "下载记录": self._create_download_history_page,
             "存储占用": self._create_statistics_page,
-            "划线清单": self._create_highlights_page,
             "设置": self._create_settings_page,
         }
         builder = builders.get(page_name)
@@ -986,7 +955,7 @@ class DesktopApp:
                      font=_font(18, "bold")).pack(side="left")
         ctk.CTkFrame(page, height=1, fg_color=self.HAIRLINE).pack(fill="x", pady=(12, 0))
 
-        scroll = ctk.CTkScrollableFrame(
+        scroll = self._scrollable(
             page, fg_color=self.BG, corner_radius=0,
             scrollbar_button_color=self.HAIRLINE,
             scrollbar_button_hover_color=self.ACCENT_TINT)
@@ -1026,7 +995,7 @@ class DesktopApp:
                      text_color=self.FAINT, font=_font(11)).pack(side="left", padx=(10, 0))
         self._quiet_button(head, "刷新书架", 84, self.load_shelf).pack(side="right")
 
-        self.shelf_frame = ctk.CTkScrollableFrame(card, fg_color=self.SUNKEN,
+        self.shelf_frame = self._scrollable(card, fg_color=self.SUNKEN,
                                                   corner_radius=8)
         self.shelf_frame.pack(fill="x", padx=14, pady=(10, 0))
         self.shelf_frame.configure(height=210)
@@ -1070,7 +1039,7 @@ class DesktopApp:
                                lambda: self._delete_exports(reclaimable)
                                ).pack(side="right", padx=(0, 14))
 
-        local = ctk.CTkScrollableFrame(card, fg_color=self.CARD, corner_radius=0)
+        local = self._scrollable(card, fg_color=self.CARD, corner_radius=0)
         local.pack(fill="both", expand=True, padx=8, pady=(8, 10))
         for name, size_mb, mtime, kind, path in rows:
             self._build_local_row(local, name, size_mb, kind, path)
@@ -1359,7 +1328,7 @@ class DesktopApp:
                          text_color=self.FAINT, font=_font(13), justify="center"
                          ).pack(expand=True)
             return
-        list_frame = ctk.CTkScrollableFrame(card, fg_color=self.CARD, corner_radius=0)
+        list_frame = self._scrollable(card, fg_color=self.CARD, corner_radius=0)
         list_frame.pack(fill="both", expand=True, padx=12, pady=10)
         for stamp, line in rows:
             row = ctk.CTkFrame(list_frame, fg_color="transparent")
@@ -1423,28 +1392,6 @@ class DesktopApp:
                      % thoughts_mb)
         ctk.CTkLabel(card, text=note, text_color=self.FAINT, font=_font(12),
                      justify="left").pack(anchor="w", padx=18, pady=(8, 16))
-
-    def _create_highlights_page(self, host):
-        """划线清单：每本书里没能定位的划线，来自成品 manifest。"""
-        page, card = self._page_scaffold(self.page_host, "划线清单")
-        rows = self._read_annotation_notes()
-        if not rows:
-            ctk.CTkLabel(card, text="没有未定位的划线。\n\n"
-                                    "当微信读书给不出某条划线的原文位置时，引擎会拒绝标注\n"
-                                    "而不是标错句子；这类划线的章节和区间会记录在这里。",
-                         text_color=self.FAINT, font=_font(13), justify="center"
-                         ).pack(expand=True)
-            return
-        list_frame = ctk.CTkScrollableFrame(card, fg_color=self.CARD, corner_radius=0)
-        list_frame.pack(fill="both", expand=True, padx=12, pady=10)
-        for stamp, line in rows:
-            row = ctk.CTkFrame(list_frame, fg_color="transparent")
-            row.pack(fill="x", pady=2)
-            ctk.CTkLabel(row, text=stamp, text_color=self.AMBER, width=130,
-                         font=_font(11, "normal", MONO), anchor="w").pack(side="left")
-            ctk.CTkLabel(row, text=line, text_color=self.MUTED, anchor="w",
-                         font=_font(12), wraplength=560, justify="left"
-                         ).pack(side="left", fill="x", expand=True)
 
     def _create_settings_page(self, host):
         """设置：real, small, and honest about what each item does."""
@@ -1525,6 +1472,22 @@ class DesktopApp:
             border_width=1, border_color="#D5D9DF",
             font=_font(13), **kwargs)
 
+    def _scrollable(self, parent, **kwargs):
+        """CTkScrollableFrame 的滚动步长固定为整像素。
+
+        Tk 的 Canvas 滚动是「按像素搬动可见区域、再补画露出的边」；偏移落在
+        半像素上时，字形行被搬到错位的位置，快速拖动滚动条会看到文字糊成
+        一团。yscrollincrement 让每一步都落在整像素上。
+        """
+        frame = ctk.CTkScrollableFrame(parent, **kwargs)
+        canvas = getattr(frame, "_parent_canvas", None)
+        if canvas is not None:
+            try:
+                canvas.configure(yscrollincrement=24)
+            except Exception:
+                pass
+        return frame
+
     def _stat_card(self, parent, key: str, initial: str, tint: str):
         """One of the reference design's statistic cards: grey label, big number.
 
@@ -1571,8 +1534,6 @@ class DesktopApp:
                                                     command=lambda: self._switch_page("下载记录"))
         self.nav_items["存储占用"] = self._nav_item(nav, "存储占用", "▥",
                                                     command=lambda: self._switch_page("存储占用"))
-        self.nav_items["划线清单"] = self._nav_item(nav, "划线清单", "≡",
-                                                    command=lambda: self._switch_page("划线清单"))
 
         # 分隔线必须放进 nav，不能打进 side。打进 side 会在 nav 已经 expand 之后
         # 再改它的高度：Tk 把行往上收，而 CustomTkinter 按钮内部画布不会跟着重排，
@@ -1643,7 +1604,7 @@ class DesktopApp:
         # lives in a scrollable frame; the results list keeps its own inner
         # scroll, and the body gets a fixed height so the outer scrollbar has
         # something concrete to scroll past.
-        page_scroll = ctk.CTkScrollableFrame(
+        page_scroll = self._scrollable(
             self.page_host, fg_color=self.BG, corner_radius=0,
             scrollbar_button_color=self.HAIRLINE,
             scrollbar_button_hover_color=self.ACCENT_TINT)
@@ -1751,7 +1712,7 @@ class DesktopApp:
         # 默认 200 会在矮窗口里把底部的翻页条挤出可视区：pack 先满足先入队的
         # 控件，列表请求太高，后打包的 page_bar 只剩 1x1（测试里实测 4 页结果
         # 时翻页条消失）。
-        self.results = ctk.CTkScrollableFrame(
+        self.results = self._scrollable(
             left, fg_color=self.CARD, corner_radius=0, height=120,
             scrollbar_button_color=self.HAIRLINE, scrollbar_button_hover_color=self.ACCENT_TINT)
         self.results.pack(fill="both", expand=True, padx=(10, 6), pady=(0, 4))
@@ -3824,7 +3785,7 @@ class DesktopApp:
         # 高度跟着书数走：固定 260 时队列只有 1 本也拉出一个大空白框，
         # 看起来像内容没加载出来。4 本以内正好贴边，更多才滚动。
         rows_height = min(260, 22 + 46 * len(self.download_queue))
-        body = ctk.CTkScrollableFrame(dialog, width=460, height=rows_height,
+        body = self._scrollable(dialog, width=460, height=rows_height,
                                       fg_color=self.CARD, corner_radius=0)
         # expand=False：让对话框按内容收缩。之前 expand=True 会把滚动区拉满
         # 整个 Toplevel，1 本书也是一个大白框。

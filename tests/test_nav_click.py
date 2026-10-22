@@ -68,7 +68,7 @@ def test_invoking_the_nav_item_switches_the_page():
     """The row's command must run -- this is what a real click does."""
     root, inst = _make_instance()
     try:
-        for name in ("我的书架", "下载记录", "存储占用", "划线清单", "设置", "下载工坊"):
+        for name in ("我的书架", "下载记录", "存储占用", "设置", "下载工坊"):
             inst.nav_items[name].invoke()   # exactly what a click triggers
             root.update()
             assert inst._current_page == name, (
@@ -106,11 +106,11 @@ def test_a_click_reaching_the_row_switches_the_page():
 
 @test
 def test_every_nav_row_is_a_single_clickable_button():
-    """All six rows must be one CTkButton each: nothing stacked over a child."""
+    """Every row must be one CTkButton each: nothing stacked over a child."""
     root, inst = _make_instance()
     try:
         expected = ("下载工坊", "我的书架", "下载记录",
-                    "存储占用", "划线清单", "设置")
+                    "存储占用", "设置")
         assert set(inst.nav_items) == set(expected), sorted(inst.nav_items)
         for name, item in inst.nav_items.items():
             assert isinstance(item, app.ctk.CTkButton), (
@@ -132,9 +132,9 @@ def test_the_selected_row_shows_the_active_look():
     """Selection must be visible: filled, bright, bold, with the accent bar."""
     root, inst = _make_instance()
     try:
-        inst._switch_page("划线清单")
+        inst._switch_page("存储占用")
         root.update()
-        active_item = inst.nav_items["划线清单"]
+        active_item = inst.nav_items["存储占用"]
         assert active_item._nav_active is True
         assert active_item.cget("border_width") == 3, active_item.cget("border_width")
         assert active_item.cget("text_color") == inst.SIDE_TXT_HI
