@@ -23,6 +23,7 @@ import traceback
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
+from PIL import ImageTk
 
 import requests
 import customtkinter as ctk
@@ -541,6 +542,372 @@ class _Scroller(ctk.CTkFrame):
         self._offset -= int(event.delta / 120) * 60
         self._refresh()
         return "break"
+
+
+class _CanvasText:
+    """cget/configure shim over one canvas text item (tests read these)."""
+
+    def __init__(self, owner, item):
+        self._owner = owner
+        self._item = item
+
+    def cget(self, key):
+        if key == "text":
+            return self._owner.canvas.itemcget(self._item, "text")
+        if key == "image":
+            return self._owner.cover_image(self._owner._bid_of(self._item))
+        return ""
+
+    def configure(self, **kwargs):
+        if "text" in kwargs:
+            self._owner.canvas.itemconfigure(self._item, text=kwargs["text"])
+
+    def winfo_exists(self):
+        return True
+
+
+class _ResultRowView:
+    """What the old `content.winfo_children()` loop used to see."""
+
+    def __init__(self):
+        pass
+
+    def destroy(self):
+        pass
+
+
+class _ResultContentView:
+    def __init__(self, owner):
+        self._owner = owner
+
+    def winfo_children(self):
+        return [_ResultRowView() for _ in self._owner.rows]
+
+
+class _ResultCanvas(ctk.CTkFrame):
+    """Search results drawn straight onto a canvas.
+
+    Every earlier attempt kept the cards as child windows, and Tk's canvas
+    scrolls child windows in two steps (blit the background, move the windows
+    afterwards); a fast dragbar drag showed the two out of step no matter how
+    the move was issued. Canvas *items* are part of the canvas bitmap, so they
+    scroll as one image and cannot tear. Rows are therefore drawn as items:
+    background, accent bar, cover, four text lines, checkbox.
+    """
+
+    ROW_HEIGHT = 150
+
+    def __init__(self, parent, app):
+        super().__init__(parent, fg_color=app.CARD, corner_radius=0)
+        self.app = app
+        self.canvas = tk.Canvas(self, highlightthickness=0, bd=0, bg=app.CARD)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self._bar = ctk.CTkScrollbar(
+            self, orientation="vertical", width=12, command=self.canvas.yview,
+            fg_color="transparent", button_color=app.HAIRLINE,
+            button_hover_color=app.ACCENT_TINT)
+        self._bar.pack(side="right", fill="y", padx=(2, 0))
+        self.canvas.configure(yscrollcommand=self._bar.set)
+        self.rows: list[dict] = []
+        self.items: dict[str, dict] = {}
+        self._photos: dict[str, object] = {}
+        self._bid_by_item: dict[int, str] = {}
+        self.canvas.bind("<Configure>", lambda _e: self.redraw())
+        self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<MouseWheel>", self._on_wheel)
+
+    # -- compatibility with the widget-based code/tests -------------------
+    @property
+    def content(self):
+        return _ResultContentView(self)
+
+    def _bid_of(self, item):
+        return self._bid_by_item.get(item, "")
+
+    def cover_image(self, bid):
+        return self._photos.get(bid)
+
+    def row_count(self):
+        return len(self.rows)
+
+    # -- drawing ---------------------------------------------------------
+    def rows_changed(self, rows):
+        self.rows = list(rows)
+        self.redraw()
+
+    def redraw(self):
+        canvas = self.canvas
+        top = canvas.yview()[0] if self.rows else 0.0
+        canvas.delete("all")
+        self.items.clear()
+        self._bid_by_item.clear()
+        width = max(canvas.winfo_width(), 200)
+        for index, row in enumerate(self.rows):
+            self._draw_row(index, row, width)
+        canvas.configure(scrollregion=(0, 0, width, len(self.rows) * self.ROW_HEIGHT))
+        if self.rows:
+            canvas.yview_moveto(top)
+
+    def _draw_row(self, index, row, width):
+        app = self.app
+        canvas = self.canvas
+        bid = str(row.get("bookId") or "")
+        tag = "row:%s" % bid
+        check_tag = "check:%s" % bid
+        y = index * self.ROW_HEIGHT
+        h = self.ROW_HEIGHT
+        selected = bid == app.selected_id
+        bg = canvas.create_rectangle(0, y, width, y + h, outline="",
+                                     fill=app.GREEN_TINT if selected else app.CARD,
+                                     tags=(tag,))
+        bar = canvas.create_rectangle(0, y, 3, y + h, outline="",
+                                      fill=app.ACCENT if selected else app.CARD,
+                                      tags=(tag,))
+        cover_x, cover_y, cover_w, cover_h = 12, y + 14, self.app.COVER_W // 2, self.app.COVER_H // 2
+        cover_bg = canvas.create_rectangle(cover_x, cover_y, cover_x + cover_w,
+                                           cover_y + cover_h, fill=app.SUNKEN,
+                                           outline="", tags=(tag,))
+        cover_text = canvas.create_text(cover_x + cover_w // 2, cover_y + cover_h // 2,
+                                        text="暂无封面" if bid in self._photos else "封面",
+                                        fill=app.FAINT, font=_font(10), tags=(tag,))
+        text_x = cover_x + cover_w + 14
+        wrap = max(120, width - text_x - 16)
+        title = canvas.create_text(text_x, y + 10, text=str(row.get("title") or "未命名书籍"),
+                                   anchor="nw", width=wrap, font=_font(13, "bold"),
+                                   fill=app.INK, tags=(tag,))
+        author = canvas.create_text(text_x, y + 44, text=str(row.get("author") or "作者未知"),
+                                    anchor="nw", font=_font(11), fill=app.MUTED, tags=(tag,))
+        category = str(row.get("category") or "").strip()
+        if not category:
+            category = "暂无信息" if app.search_done else "分类加载中…"
+        cat = canvas.create_text(text_x, y + 66, text="分类：%s" % category, anchor="nw",
+                                 font=_font(11), fill=app.FAINT, tags=(tag,))
+        raw_rating = row.get("newRating")
+        try:
+            rated = raw_rating not in (None, "") and float(raw_rating) > 0
+        except (TypeError, ValueError):
+            rated = False
+        rating = canvas.create_text(text_x, y + 90,
+                                    text=card_rating_text(raw_rating, row.get("newRatingCount")),
+                                    anchor="nw", font=_font(11),
+                                    fill=app.AMBER if rated else app.FAINT, tags=(tag,))
+        check_var = app._card_checks.get(bid)
+        checked = bool(check_var.get()) if check_var is not None else False
+        box_x, box_y = text_x, y + 116
+        box = canvas.create_rectangle(box_x, box_y, box_x + 16, box_y + 16, width=2,
+                                      outline=app.ACCENT if checked else app.MUTED,
+                                      fill=app.ACCENT if checked else app.CARD,
+                                      tags=(tag, check_tag))
+        if checked:
+            canvas.create_line(box_x + 3, box_y + 8, box_x + 7, box_y + 12,
+                               box_x + 13, box_y + 4, fill="#FFFFFF", width=2,
+                               tags=(tag, check_tag))
+        canvas.create_text(box_x + 24, box_y + 8, text="加入队列", anchor="w",
+                           fill=app.MUTED, font=_font(10), tags=(tag, check_tag))
+        canvas.create_line(0, y + h - 1, width, y + h - 1, fill=app.HAIRLINE,
+                           tags=(tag,))
+        self.items[bid] = {"bg": bg, "bar": bar, "cover_bg": cover_bg,
+                           "cover_text": cover_text, "category": cat, "title": title,
+                           "rating": rating, "check": box}
+        for item in (bg, bar, cover_bg, cover_text, title, author, cat, rating, box):
+            self._bid_by_item[item] = bid
+
+    # -- interactions ----------------------------------------------------
+    def _row_at(self, event):
+        return int(self.canvas.canvasy(event.y) // self.ROW_HEIGHT)
+
+    def _on_click(self, event):
+        x = self.canvas.canvasx(event.x)
+        y = self.canvas.canvasy(event.y)
+        index = int(y // self.ROW_HEIGHT)
+        if not (0 <= index < len(self.rows)):
+            return
+        row = self.rows[index]
+        bid = str(row.get("bookId") or "")
+        entry = self.items.get(bid) or {}
+        box = entry.get("check")
+        if box is not None:
+            x0, y0, x1, y1 = self.canvas.coords(box)
+            if x0 - 4 <= x <= x0 + 80 and y0 - 6 <= y <= y1 + 6:
+                var = self.app._card_checks.get(bid)
+                if var is None:
+                    var = tk.BooleanVar(value=False)
+                    self.app._card_checks[bid] = var
+                var.set(not var.get())
+                self.refresh_check(bid)
+                self.app._on_card_check(bid)
+                return
+        self.app._select_book(dict(row))
+
+    def _on_wheel(self, event):
+        self.canvas.yview_scroll(int(-event.delta / 120), "units")
+
+    # -- updates ---------------------------------------------------------
+    def set_selected(self, book_id):
+        for bid, entry in self.items.items():
+            chosen = bid == book_id
+            self.canvas.itemconfigure(entry["bg"],
+                                      fill=self.app.GREEN_TINT if chosen else self.app.CARD)
+            self.canvas.itemconfigure(entry["bar"],
+                                      fill=self.app.ACCENT if chosen else self.app.CARD)
+
+    def set_category(self, book_id, text):
+        entry = self.items.get(book_id)
+        if entry is not None:
+            self.canvas.itemconfigure(entry["category"], text=text)
+
+    def set_cover(self, book_id, photo):
+        entry = self.items.get(book_id)
+        if entry is None:
+            return
+        if photo is None:
+            self.canvas.itemconfigure(entry["cover_text"], text="暂无封面")
+            return
+        self._photos[book_id] = photo
+        x0, y0, _x1, _y1 = self.canvas.coords(entry["cover_bg"])
+        self.canvas.create_image(x0, y0, anchor="nw", image=photo,
+                                 tags=("row:%s" % book_id,))
+        self.canvas.itemconfigure(entry["cover_text"], text="")
+
+    def refresh_check(self, book_id):
+        entry = self.items.get(book_id)
+        if entry is None:
+            return
+        check_var = self.app._card_checks.get(book_id)
+        checked = bool(check_var.get()) if check_var is not None else False
+        x0, y0, x1, y1 = self.canvas.coords(entry["check"])
+        self.canvas.itemconfigure(entry["check"],
+                                  fill=self.app.ACCENT if checked else self.app.CARD,
+                                  outline=self.app.ACCENT if checked else self.app.MUTED)
+        for item in self.canvas.find_withtag("check:%s" % book_id):
+            if self.canvas.type(item) == "line":
+                self.canvas.delete(item)
+        if checked:
+            self.canvas.create_line(x0 + 3, y0 + 8, x0 + 7, y0 + 12, x0 + 13, y0 + 4,
+                                    fill="#FFFFFF", width=2,
+                                    tags=("row:%s" % book_id, "check:%s" % book_id))
+
+
+class _ShelfCanvas(ctk.CTkFrame):
+    """WeRead shelf drawn as canvas items (same reason as _ResultCanvas)."""
+
+    ROW_HEIGHT = 62
+
+    def __init__(self, parent, app):
+        super().__init__(parent, fg_color=app.SUNKEN, corner_radius=8)
+        self.app = app
+        self.canvas = tk.Canvas(self, highlightthickness=0, bd=0, bg=app.SUNKEN)
+        self.canvas.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
+        self._bar = ctk.CTkScrollbar(
+            self, orientation="vertical", width=12, command=self.canvas.yview,
+            fg_color="transparent", button_color=app.HAIRLINE,
+            button_hover_color=app.ACCENT_TINT)
+        self._bar.pack(side="right", fill="y", padx=(2, 4), pady=4)
+        self.canvas.configure(yscrollcommand=self._bar.set)
+        self.rows: list[dict] = []
+        self.items: dict[str, dict] = {}
+        self._photos: dict[str, object] = {}
+        self._empty = ""
+        self.canvas.bind("<Configure>", lambda _e: self.redraw())
+        self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<MouseWheel>", self._on_wheel)
+
+    @property
+    def content(self):
+        return _ResultContentView(self)
+
+    def row_count(self):
+        return len(self.rows)
+
+    def rows_changed(self, rows):
+        self.rows = list(rows)
+        self._empty = ""
+        self.redraw()
+
+    def show_empty(self, text):
+        self.rows = []
+        self._empty = text
+        self.redraw()
+
+    def redraw(self):
+        canvas = self.canvas
+        top = canvas.yview()[0] if self.rows else 0.0
+        canvas.delete("all")
+        self.items.clear()
+        width = max(canvas.winfo_width(), 200)
+        if not self.rows:
+            canvas.create_text(width // 2, max(60, canvas.winfo_height() // 2),
+                               text=self._empty, fill=self.app.FAINT,
+                               font=_font(12), justify="center", width=max(200, width - 40))
+            canvas.configure(scrollregion=(0, 0, width, max(1, canvas.winfo_height())))
+            return
+        for index, book in enumerate(self.rows):
+            self._draw_row(index, book, width)
+        total = len(self.rows) * self.ROW_HEIGHT
+        canvas.configure(scrollregion=(0, 0, width, total))
+        canvas.yview_moveto(top)
+
+    def _draw_row(self, index, book, width):
+        app = self.app
+        canvas = self.canvas
+        bid = str(book.get("bookId") or "")
+        tag = "shelf:%s" % bid
+        y = index * self.ROW_HEIGHT
+        x0, y0 = 4, y + 3
+        x1, y1 = width - 6, y + self.ROW_HEIGHT - 3
+        canvas.create_rectangle(x0, y0, x1, y1, fill=app.CARD, outline=app.HAIRLINE,
+                                tags=(tag,))
+        cover_x, cover_y, cw, ch = x0 + 10, y0 + 5, 36, 46
+        cover_bg = canvas.create_rectangle(cover_x, cover_y, cover_x + cw, cover_y + ch,
+                                           fill=app.SUNKEN, outline="", tags=(tag,))
+        cover_text = canvas.create_text(cover_x + cw // 2, cover_y + ch // 2, text="",
+                                        fill=app.FAINT, font=_font(9), tags=(tag,))
+        text_x = cover_x + cw + 10
+        button_w = 64
+        wrap = max(80, x1 - button_w - 24 - text_x)
+        title = canvas.create_text(text_x, y0 + 10, text=str(book.get("title") or "未命名书籍"),
+                                   anchor="nw", width=wrap, font=_font(13, "bold"),
+                                   fill=app.INK, tags=(tag,))
+        author = str(book.get("author") or "").strip() or "作者未知"
+        category = str(book.get("category") or "").strip()
+        meta = author + (" · " + category if category else "")
+        meta_item = canvas.create_text(text_x, y0 + 32, text=meta, anchor="nw", width=wrap,
+                                       font=_font(11), fill=app.FAINT, tags=(tag,))
+        bx1 = x1 - 12
+        bx0 = bx1 - button_w
+        by0, by1 = y0 + 13, y0 + 43
+        canvas.create_rectangle(bx0, by0, bx1, by1, fill=app.ACCENT, outline="",
+                                tags=(tag, "dl:%s" % bid))
+        canvas.create_text((bx0 + bx1) // 2, (by0 + by1) // 2, text="下载", fill="#FFFFFF",
+                           font=_font(12), tags=(tag, "dl:%s" % bid))
+        self.items[bid] = {"cover_bg": cover_bg, "cover_text": cover_text,
+                           "title": title, "meta": meta_item, "button": (bx0, by0, bx1, by1),
+                           "button_ids": [i for i in canvas.find_withtag("dl:%s" % bid)]}
+
+    def _on_click(self, event):
+        y = self.canvas.canvasy(event.y)
+        index = int(y // self.ROW_HEIGHT)
+        if not (0 <= index < len(self.rows)):
+            return
+        book = self.rows[index]
+        bid = str(book.get("bookId") or "")
+        title = str(book.get("title") or "")
+        if bid:
+            self.app._download_from_shelf(bid, title)
+
+    def _on_wheel(self, event):
+        self.canvas.yview_scroll(int(-event.delta / 120), "units")
+
+    def set_cover(self, book_id, photo):
+        entry = self.items.get(book_id)
+        if entry is None:
+            return
+        if photo is None:
+            return
+        self._photos[book_id] = photo
+        x0, y0, _x1, _y1 = self.canvas.coords(entry["cover_bg"])
+        self.canvas.create_image(x0, y0, anchor="nw", image=photo,
+                                 tags=("shelf:%s" % book_id,))
 
 
 class DesktopApp:
@@ -1127,11 +1494,10 @@ class DesktopApp:
                      text_color=self.FAINT, font=_font(11)).pack(side="left", padx=(10, 0))
         self._quiet_button(head, "刷新书架", 84, self.load_shelf).pack(side="right")
 
-        self.shelf_frame = _Scroller(card, fg_color=self.SUNKEN)
+        self.shelf_frame = _ShelfCanvas(card, self)
         self.shelf_frame.pack(fill="x", padx=14, pady=(10, 0))
         self.shelf_frame.configure(height=210)
-        ctk.CTkLabel(self.shelf_frame.content, text="正在读取微信书架…",
-                     text_color=self.FAINT, font=_font(12)).pack(expand=True, pady=40)
+        self.shelf_frame.show_empty("正在读取微信书架…")
         self.load_shelf()
 
         # ---- half 2: what this machine already holds ----------------------
@@ -1247,73 +1613,30 @@ class DesktopApp:
     def _show_shelf_error(self):
         if not hasattr(self, "shelf_frame") or not self.shelf_frame.winfo_exists():
             return
-        for widget in self.shelf_frame.content.winfo_children():
-            widget.destroy()
-        ctk.CTkLabel(self.shelf_frame.content,
-                     text="书架读取失败。请检查登录状态，再点「刷新书架」重试。",
-                     text_color=self.FAINT, font=_font(12), justify="center"
-                     ).pack(expand=True, pady=40)
+        self.shelf_frame.show_empty(
+            "书架读取失败。请检查登录状态，再点「刷新书架」重试。")
 
     def _show_shelf(self, rows):
         """Render the account's shelf into the shelf frame."""
         if not hasattr(self, "shelf_frame") or not self.shelf_frame.winfo_exists():
             return
-        for widget in self.shelf_frame.content.winfo_children():
-            widget.destroy()
         if not rows:
-            ctk.CTkLabel(self.shelf_frame.content,
-                         text="书架是空的，或登录状态已过期。\n\n点「刷新书架」重试，或先「检查登录」。",
-                         text_color=self.FAINT, font=_font(12), justify="center"
-                         ).pack(expand=True, pady=40)
+            self.shelf_frame.show_empty(
+                "书架是空的，或登录状态已过期。点「刷新书架」重试，或先「检查登录」。")
             return
+        self.shelf_frame.rows_changed(rows)
         for book in rows:
-            self._build_shelf_row(book)
+            self._register_shelf_row(book)
         self.status.set("已读取微信书架，共 %d 本。" % len(rows))
 
-    def _build_shelf_row(self, book):
-        """One shelf row: cover, title, author, category, and a download action."""
+    def _register_shelf_row(self, book):
+        """Ask for a shelf row's cover; the row itself is canvas items."""
         book_id = str(book.get("bookId") or "")
-        if not book_id:
-            return
-        title = str(book.get("title") or "").strip() or "未命名书籍"
-        author = str(book.get("author") or "").strip() or "作者未知"
-        category = str(book.get("category") or "").strip()
-
-        row = ctk.CTkFrame(self.shelf_frame.content, fg_color=self.CARD, corner_radius=6,
-                           border_width=1, border_color=self.HAIRLINE, height=56)
-        row.pack(fill="x", pady=2, padx=2)
-        row.pack_propagate(False)
-
-        cover = ctk.CTkLabel(row, text="", width=36, height=48, corner_radius=3,
-                             fg_color=self.SUNKEN)
-        cover.pack(side="left", padx=(10, 10), pady=4)
-
-        text_col = ctk.CTkFrame(row, fg_color="transparent")
-        text_col.pack(side="left", fill="both", expand=True, pady=6)
-        ctk.CTkLabel(text_col, text=title, text_color=self.INK, anchor="w",
-                     font=_font(13, "bold")).pack(fill="x")
-        meta = author + (" · " + category if category else "")
-        ctk.CTkLabel(text_col, text=meta, text_color=self.FAINT, anchor="w",
-                     font=_font(11)).pack(fill="x", pady=(1, 0))
-
-        ctk.CTkButton(row, text="下载", width=64, height=30,
-                      corner_radius=6, fg_color=self.ACCENT,
-                      hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
-                      font=_font(12),
-                      command=lambda b=book_id, t=title:
-                      self._download_from_shelf(b, t)
-                      ).pack(side="right", padx=(0, 12))
-
-        def choose(_event=None, b=book_id, t=title):
-            self._download_from_shelf(b, t)
-        for widget in (row, cover, text_col, *text_col.winfo_children()):
-            widget.bind("<Button-1>", choose)
-
         url = str(book.get("cover") or "").strip()
-        if url:
-            self._request_shelf_cover(cover, url)
+        if book_id and url:
+            self._request_shelf_cover(book_id, url)
 
-    def _request_shelf_cover(self, label, url):
+    def _request_shelf_cover(self, book_id, url):
         """Load a cover in the background; failures leave the placeholder."""
         def fetch():
             image = None
@@ -1324,7 +1647,7 @@ class DesktopApp:
                     image = _decode_cover(response.content, (36, 48))
             except Exception:
                 image = None
-            self.events.put(("shelf-cover", (label, image)))
+            self.events.put(("shelf-cover", (book_id, image)))
         threading.Thread(target=fetch, daemon=True).start()
 
     def _download_from_shelf(self, book_id, title):
@@ -1913,9 +2236,7 @@ class DesktopApp:
         # 默认 200 会在矮窗口里把底部的翻页条挤出可视区：pack 先满足先入队的
         # 控件，列表请求太高，后打包的 page_bar 只剩 1x1（测试里实测 4 页结果
         # 时翻页条消失）。
-        self.results = _Scroller(
-            left, fg_color=self.CARD, height=120,
-            scrollbar_button_color=self.HAIRLINE, scrollbar_button_hover_color=self.ACCENT_TINT)
+        self.results = _ResultCanvas(left, self)
         self.results.pack(fill="both", expand=True, padx=(10, 6), pady=(0, 4))
 
         # Results are paged rather than all built at once. Repainting a
@@ -2649,16 +2970,17 @@ class DesktopApp:
         if label is None:
             return
         if image is None:
-            label.configure(text="暂无封面", image=None)
+            self.results.set_cover(book_id, None)
             widget["image"] = None
             return
         try:
-            photo = ctk.CTkImage(light_image=image, dark_image=image, size=image.size)
+            slot = (self.COVER_W // 2, self.COVER_H // 2)
+            photo = ImageTk.PhotoImage(image.resize(slot))
             self._image_refs.append(photo)
             widget["image"] = photo
-            label.configure(text="", image=photo)
+            self.results.set_cover(book_id, photo)
         except Exception:
-            label.configure(text="暂无封面", image=None)
+            self.results.set_cover(book_id, None)
 
     def _parse_shelf(self, value: str):
         """`SHELF\\t{json}` -> list of book dicts, or None when unusable."""
@@ -2671,17 +2993,14 @@ class DesktopApp:
             return None
         return rows if isinstance(rows, list) else None
 
-    def _apply_shelf_cover(self, label, image):
+    def _apply_shelf_cover(self, book_id, image):
         """Put a fetched cover onto a shelf row; failures keep the placeholder."""
         try:
-            if not label.winfo_exists():
-                return
             if image is None:
-                label.configure(text="")
                 return
-            photo = ctk.CTkImage(light_image=image, dark_image=image, size=(36, 48))
+            photo = ImageTk.PhotoImage(image)
             self._image_refs.append(photo)
-            label.configure(text="", image=photo)
+            self.shelf_frame.set_cover(book_id, photo)
         except Exception:
             pass
 
@@ -2965,16 +3284,13 @@ class DesktopApp:
         if widget is None:
             return
         label = widget.get("category")
-        if label is None:
-            return
-        # A card from a previous page has been destroyed, so its Tk path is
-        # dead; the recorded category above is what the next render will use.
-        if not label.winfo_exists():
-            return
-        try:
-            label.configure(text=f"分类：{category}" if category else "分类：暂无信息")
-        except tk.TclError:
-            pass
+        text = f"分类：{category}" if category else "分类：暂无信息"
+        if label is not None:
+            try:
+                label.configure(text=text)
+            except tk.TclError:
+                pass
+        self.results.set_category(book_id, text)
 
     def _page_slice(self) -> list[dict]:
         start = self.page_index * RESULTS_PER_PAGE
@@ -3015,20 +3331,7 @@ class DesktopApp:
         _render_page() 会把整页卡片连同封面、分类、评分一起重建，点一次书
         就闪一遍占位态。选中态只是两处颜色：卡片底色和左侧 3px 绿条。
         """
-        for bid, widgets in self.card_widgets.items():
-            chosen = bid == self.selected_id
-            frame = widgets.get("frame")
-            bar = widgets.get("bar")
-            if frame is not None:
-                try:
-                    frame.configure(fg_color=self.GREEN_TINT if chosen else self.CARD)
-                except Exception:
-                    pass
-            if bar is not None:
-                try:
-                    bar.configure(fg_color=self.ACCENT if chosen else "transparent")
-                except Exception:
-                    pass
+        self.results.set_selected(self.selected_id)
 
     def _hover_card(self, book_id: str, card, entering: bool) -> None:
         """Card hover, except on the selected row (its wash must not flicker)."""
@@ -3045,11 +3348,11 @@ class DesktopApp:
         Building the widgets and letting Tk repaint them is the expensive part,
         so this only ever touches one page's worth of children.
         """
-        for widget in self.results.content.winfo_children():
-            widget.destroy()
         self.card_widgets.clear()
-        for item in self._page_slice():
-            self._build_book_card(item)
+        page = self._page_slice()
+        self.results.rows_changed(page)
+        for item in page:
+            self._register_card(item)
         self._set_page_buttons(self.page_index, self._page_count())
         self._refresh_queue_add()
 
@@ -3069,90 +3372,34 @@ class DesktopApp:
         total = self._page_count()
         self.page_index = min(self.page_index, total - 1)
         if bid in {str(row.get("bookId") or "") for row in self._page_slice()}:
-            # The result belongs to the page on screen: extend the real widgets.
-            self._build_book_card(self.book_rows[bid])
-            self._refresh_pager_text()
-        else:
-            self._refresh_pager_text()
+            # The result belongs to the page on screen: redraw the canvas rows.
+            self._render_page()
+        self._refresh_pager_text()
 
     def _refresh_pager_text(self) -> None:
         self.result_count.configure(
             text=f"找到 {len(self.book_rows)} 本书 · 点击一项查看详情")
         self._set_page_buttons(self.page_index, self._page_count())
 
-    def _build_book_card(self, item: dict):
+    def _register_card(self, item: dict):
+        """Bookkeeping for one row the canvas just drew.
+
+        The row itself is canvas items (see _ResultCanvas); this keeps the
+        checkbox variable and the test-facing shims in step, then asks for the
+        cover image.
+        """
         bid = str(item.get("bookId") or "")
-        if not bid:
+        entry = self.results.items.get(bid)
+        if entry is None or not bid:
             return
-        # Row style, as in the reference design's list panel: a full-width row
-        # separated by hairlines, cover left, text middle, rating right, and a
-        # 3px green bar plus green wash marking the selected row.
-        selected = bid == self.selected_id
-        card = ctk.CTkFrame(self.results.content, fg_color=self.GREEN_TINT if selected else self.CARD,
-                            corner_radius=0, border_width=0)
-        card.pack(fill="x", padx=2, pady=0)
-        bar = ctk.CTkFrame(card, width=3, corner_radius=0,
-                           fg_color=self.ACCENT if selected else "transparent")
-        bar.pack(side="left", fill="y")
-        inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="x", padx=(2, 10), pady=10)
-        cover = ctk.CTkLabel(inner, text="封面\n加载中", width=self.COVER_W, height=self.COVER_H,
-                             fg_color=self.SUNKEN, corner_radius=4, text_color=self.FAINT,
-                             font=_font(10), justify="center")
-        cover.pack(side="left", anchor="n", padx=(0, 12))
-        text_col = ctk.CTkFrame(inner, fg_color="transparent")
-        text_col.pack(side="left", fill="both", expand=True)
-        title = str(item.get("title") or "").strip() or "未命名书籍"
-        author = str(item.get("author") or "").strip() or "作者未知"
-        category = str(item.get("category") or "").strip()
-        ctk.CTkLabel(text_col, text=title, text_color=self.INK, anchor="w", justify="left",
-                     font=_font(13, "bold"), wraplength=240
-                     ).pack(fill="x", anchor="w")
-        ctk.CTkLabel(text_col, text=author, text_color=self.MUTED, anchor="w",
-                     font=_font(11)).pack(fill="x", anchor="w", pady=(3, 0))
-        if not category and self.search_done:
-            category = "暂无信息"
-        category_label = ctk.CTkLabel(text_col,
-                                      text=category if category else "分类加载中…",
-                                      text_color=self.FAINT, anchor="w",
-                                      font=_font(11))
-        category_label.pack(fill="x", anchor="w", pady=(2, 0))
-        raw_rating = item.get("newRating")
-        try:
-            rated = raw_rating not in (None, "") and float(raw_rating) > 0
-        except (TypeError, ValueError):
-            rated = False
-        ctk.CTkLabel(text_col,
-                     text=card_rating_text(raw_rating, item.get("newRatingCount")),
-                     text_color=self.AMBER if rated else self.FAINT, anchor="w", font=_font(11)
-                     ).pack(fill="x", anchor="w", pady=(3, 0))
-
-        # 排队下载：每张卡片一个「加入队列」勾选框。
-        # 勾选状态存在 self._card_checks 里，按页重建卡片时复用，避免勾选丢失。
-        #
-        # 必须放进 text_col（左列、expand），不能直接 pack 到 inner：inner 里
-        # cover 和 text_col 都是 side="left"，再横向填充一个控件只会拿到被
-        # expand 挤剩的那点空隙——标题一长，勾选框连同「加入队列」四个字就被
-        # 卡片右边裁掉了（用户截图：只剩半个圆圈）。
-        check_var = self._card_checks.get(bid) or tk.BooleanVar(value=False)
-        self._card_checks[bid] = check_var
-        ctk.CTkCheckBox(text_col, text="加入队列", variable=check_var, font=_font(10),
-                        width=86, height=22,
-                        command=lambda b=bid: self._on_card_check(b)
-                        ).pack(anchor="w", pady=(5, 0))
-
-        def choose(_event=None, selected=dict(item)):
-            self._select_book(selected)
-
-        for widget in (card, inner, cover, text_col, *text_col.winfo_children()):
-            widget.bind("<Button-1>", choose)
-        chosen = bid == self.selected_id
-        if not chosen:
-            card.bind("<Enter>", lambda _e, w=card, b=bid: self._hover_card(b, w, True))
-            card.bind("<Leave>", lambda _e, w=card, b=bid: self._hover_card(b, w, False))
-
-        self.card_widgets[bid] = {"frame": card, "bar": bar, "cover": cover,
-                                  "category": category_label, "image": None}
+        var = self._card_checks.get(bid) or tk.BooleanVar(value=False)
+        self._card_checks[bid] = var
+        self.card_widgets[bid] = {
+            "frame": None, "bar": None,
+            "cover": _CanvasText(self.results, entry["cover_text"]),
+            "category": _CanvasText(self.results, entry["category"]),
+            "image": None,
+        }
         self._request_card_cover(bid, str(item.get("cover") or "").strip())
 
     def _request_card_cover(self, book_id: str, url: str):

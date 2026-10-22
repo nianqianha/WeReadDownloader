@@ -52,19 +52,15 @@ class ShelfFailuresTests(unittest.TestCase):
         self.error.assert_called_once_with()
 
     def test_error_renderer_removes_the_placeholder_and_shows_recovery(self):
-        placeholder = Mock()
-        # 书架区现在是 _Scroller：行放在 .content 里（滚动靠 place 移动它）。
-        content = SimpleNamespace(winfo_children=lambda: [placeholder])
+        # 书架区现在画在 canvas 上，空/错误状态统一走 show_empty(text)。
         self.app.shelf_frame = SimpleNamespace(winfo_exists=lambda: True,
-                                               content=content)
+                                               show_empty=Mock())
         self.app.FAINT = "gray"
         self.namespace["_show_shelf_error"](self.app)
-        placeholder.destroy.assert_called_once_with()
-        label = self.namespace["ctk"].CTkLabel
-        text = label.call_args.kwargs["text"]
+        self.app.shelf_frame.show_empty.assert_called_once()
+        text = self.app.shelf_frame.show_empty.call_args.args[0]
         self.assertIn("登录", text)
         self.assertIn("重试", text)
-        label.return_value.pack.assert_called_once()
 
 
 if __name__ == "__main__":

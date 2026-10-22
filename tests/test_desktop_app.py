@@ -204,9 +204,8 @@ def test_gui_search_click_detail_flow_survives_worker_failure():
             time.sleep(0.05)
         assert card["image"] is not None, "result card cover never rendered"
 
-        # 2. the card surface carries the click binding (CTkFrame.bind() on the
-        #    public wrapper hides it; the drawable canvas is where clicks land)
-        assert card["frame"]._canvas.bind("<Button-1>"), "result card lost its click binding"
+        # 2. 结果行画在 canvas 上（不再是子窗口），点击由整块 canvas 处理
+        assert instance.results.canvas.bind("<Button-1>"), "result list lost its click binding"
         instance._select_book(instance.book_rows["19480992"])
         info_job = instance.job_seq
         assert instance.selected_id == "19480992"

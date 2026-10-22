@@ -201,11 +201,10 @@ def _find_checkboxes(widget):
 
 @test
 def test_the_queue_checkbox_is_not_clipped_by_a_long_title():
-    """勾选框要完整落在卡片里。
+    """勾选框要完整落在行内。
 
-    真机截图：长标题（三字经·百家姓·千字文…）的卡片上，「加入队列」连同文字
-    被挤到卡片右边缘之外，只剩半个圆圈。原因是勾选框被 pack 到 inner 的剩余
-    空隙里，而不是放进会伸展的文字列。
+    这张卡片曾经把勾选框 pack 到右侧剩余空隙，长标题时被卡片边缘裁掉，只剩
+    半个圆圈。现在行画在 canvas 上，直接量勾选框与「加入队列」文字的坐标。
     """
     root, instance = _make_gui()
     try:
@@ -214,20 +213,17 @@ def test_the_queue_checkbox_is_not_clipped_by_a_long_title():
                 "author": "李逸安译注", "category": "文学-古典文学",
                 "newRating": "8.75", "newRatingCount": "22"}
         instance.result_rows = [item]
-        instance._build_book_card(item)
-        root.update_idletasks()
-        card = instance.results.content.winfo_children()[-1]
-        boxes = _find_checkboxes(card)
-        assert boxes, "卡片上没有加入队列勾选框"
-        box = boxes[0]
-        # 不只是"在卡片内"：旧实现把它 pack 到 inner 的剩余空隙，正好贴在卡片
-        # 右缘、被滚动条盖住，「加入队列」四个字看不见。它必须在左侧文字列里。
-        offset = box.winfo_rootx() - card.winfo_rootx()
-        ratio = offset / max(1, card.winfo_width())
-        assert ratio < 0.6, (
-            "勾选框贴在卡片右侧（offset %d / width %d = %.2f），会被滚动条盖住"
-            % (offset, card.winfo_width(), ratio))
-        assert "加入队列" in str(box.cget("text")), box.cget("text")
+        instance._render_page()
+        root.update()
+        canvas = instance.results.canvas
+        entry = instance.results.items["111"]
+        x0, y0, x1, y1 = canvas.coords(entry["check"])
+        width = max(1, canvas.winfo_width())
+        assert x1 < width * 0.6, (
+            "勾选框贴在行右侧（x1 %d / width %d），会被滚动条盖住" % (x1, width))
+        texts = [canvas.itemcget(i, "text") for i in canvas.find_all()
+                 if canvas.type(i) == "text"]
+        assert "加入队列" in texts, texts
     finally:
         root.destroy()
 
