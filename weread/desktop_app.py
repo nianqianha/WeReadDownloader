@@ -1716,6 +1716,13 @@ class DesktopApp:
             try:
                 if abs(current - target) > 8:
                     self.body.configure(height=target)
+                # 状态行会写整段缺失说明（「152 张插图…2537 条划线…」），
+                # 没有 wraplength 时标签的请求宽度等于整行文字，会把 ③ 面板
+                # 撑出窗口，右侧按钮被推出去。按窗口宽度换行。
+                status = getattr(self, "status_label", None)
+                if status is not None:
+                    status.configure(
+                        wraplength=max(320, self.page_host.winfo_width() - 64))
             finally:
                 self._fitting = False
 
@@ -1981,7 +1988,7 @@ class DesktopApp:
         self.progress.set(0)
         self.status_label = ctk.CTkLabel(
             export, textvariable=self.status, text_color=self.MUTED, height=1,
-            font=_font(12), justify="left", anchor="w")
+            font=_font(12), justify="left", anchor="w", wraplength=960)
         self.status_label.grid(row=3, column=0, columnspan=4, sticky="w",
                                padx=18, pady=(0, 6))
 
