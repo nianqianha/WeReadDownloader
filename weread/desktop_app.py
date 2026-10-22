@@ -439,24 +439,44 @@ def _tidy_reason(reason) -> str:
 
 
 class _Scroller(ctk.CTkFrame):
-    """A scrolling area that moves its content with place(), not a canvas.
+    """A clipped viewport whose content is moved as one canvas window item.
 
-    CTkScrollableFrame puts the content inside a canvas window item; Tk scrolls
-    by BitBlt-ing the canvas and moving that item afterwards, so a fast
-    scrollbar drag briefly shows text where it used to be. Moving one child
-    frame with place() has no two-phase step: Windows moves the frame and every
-    widget inside it in one operation.
+    Two earlier attempts failed, for different reasons:
+
+    * CTkScrollableFrame scrolls with Canvas.yview: Tk BitBlts the canvas and
+      moves the window item afterwards, so fast drags show text in its old
+      place for a few frames.
+    * A plain Frame with place() has no BitBlt, but Tk frames do not clip child
+      windows, so rows scrolled out of the area were still painted outside it.
+
+    Here a tk.Canvas provides the clip (it clips window items by definition)
+    and scrolling moves that item with coords(), never yview(): the canvas
+    itself does not scroll, so there is no background blit, and the item is
+    moved in one operation with every widget inside it.
 
     `content` is the frame callers add rows to.
     """
+
+    @staticmethod
+    def _solid_bg(widget):
+        while widget is not None:
+            try:
+                color = widget.cget("fg_color")
+            except Exception:
+                color = None
+            if isinstance(color, str) and color not in ("", "transparent"):
+                return color
+            widget = getattr(widget, "master", None)
+        return "#FFFFFF"
 
     def __init__(self, parent, scrollbar_button_color=None,
                  scrollbar_button_hover_color=None, **kwargs):
         kwargs.setdefault("fg_color", "transparent")
         kwargs.pop("corner_radius", None)
         super().__init__(parent, corner_radius=0, **kwargs)
-        self._clip = ctk.CTkFrame(self, fg_color=kwargs.get("fg_color", "transparent"),
-                                  corner_radius=0)
+        fg = kwargs.get("fg_color", "transparent")
+        clip_bg = fg if isinstance(fg, str) and fg not in ("", "transparent")             else self._solid_bg(parent)
+        self._clip = tk.Canvas(self, highlightthickness=0, bd=0, bg=clip_bg)
         self._clip.pack(side="left", fill="both", expand=True)
         bar_kwargs = {"orientation": "vertical", "width": 12,
                       "command": self._on_scroll, "fg_color": "transparent"}
@@ -468,7 +488,7 @@ class _Scroller(ctk.CTkFrame):
         self._bar.pack(side="right", fill="y", padx=(2, 0))
         self.content = ctk.CTkFrame(self._clip, fg_color=kwargs.get("fg_color", "transparent"),
                                     corner_radius=0)
-        self.content.place(x=0, y=0, relwidth=1.0)
+        self._item = self._clip.create_window(0, 0, window=self.content, anchor="nw")
         self._offset = 0
         self.content.bind("<Configure>", lambda _e: self._refresh())
         self._clip.bind("<Configure>", lambda _e: self._refresh())
@@ -485,7 +505,9 @@ class _Scroller(ctk.CTkFrame):
         max_offset = max(0, total - view)
         self._offset = max(0, min(int(self._offset), max_offset))
         try:
-            self.content.place_configure(y=-self._offset)
+            width = max(1, self._clip.winfo_width())
+            self._clip.itemconfigure(self._item, width=width)
+            self._clip.coords(self._item, 0, -self._offset)
             first = self._offset / total
             last = min(1.0, (self._offset + view) / total)
             self._bar.set(first, last)
@@ -1760,6 +1782,12 @@ class DesktopApp:
         # lives in a scrollable frame; the results list keeps its own inner
         # scroll, and the body gets a fixed height so the outer scrollbar has
         # something concrete to scroll past.
+        # ③ 下载面板固定在底部，不跟内容一起滚：它是操作区，任何窗口高度下
+        # 都必须可见。以前它和卡片一起放在滚动区里，靠"算卡片区高度"来腾地方，
+        # 算错一次（窗口刚建、DPI 变化）底部按钮就被裁掉。
+        footer = ctk.CTkFrame(self.page_host, fg_color=self.BG, corner_radius=0)
+        footer.pack(side="bottom", fill="x", pady=(10, 0))
+        self.workshop_footer = footer
         page_scroll = self._scrollable(
             self.page_host, fg_color=self.BG, corner_radius=0,
             scrollbar_button_color=self.HAIRLINE,
@@ -1832,8 +1860,8 @@ class DesktopApp:
                 scale = ctk.ScalingTracker.get_window_dpi_scaling(self.root) or 1.0
             except Exception:
                 scale = 1.0
-            available = (viewport - head.winfo_height()
-                         - panel.winfo_height() - 36) / scale
+            # ③ 面板已经在滚动区之外，这里只需扣掉标题行和间距。
+            available = (viewport - head.winfo_height() - 24) / scale
             target = int(max(340, available))
             try:
                 current = int(self.body.cget("height"))
@@ -1982,9 +2010,10 @@ class DesktopApp:
         # The right column keeps book identity + intro; the action zone moves
         # below both columns so it spans the full width, exactly like the
         # reference's bottom "③ 下载到电脑" panel.
-        export = ctk.CTkFrame(page, fg_color=self.CARD, corner_radius=self.RADIUS,
+        export = ctk.CTkFrame(self.workshop_footer, fg_color=self.CARD,
+                              corner_radius=self.RADIUS,
                               border_width=1, border_color=self.HAIRLINE)
-        export.pack(fill="x", pady=(10, 0))
+        export.pack(fill="x")
         self.export_panel = export
         # ③ 面板的高度在运行中会变（状态文字换行、按钮行出现），只在窗口
         # Configure 时算一次，面板一变高就把底部按钮挤出可视区。
