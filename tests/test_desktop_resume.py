@@ -95,6 +95,8 @@ def test_a_real_wedge_is_still_reported_as_a_stall():
     """The other half: the sampler's sleep was punctual, so the Tk thread is stuck."""
     root, instance = _make_gui()
     try:
+        for _ in range(2):
+            instance._poll()   # consume the startup grace before measuring
         instance._modal_depth = 0
         _clear_logs()
         instance._resume_mark = 0.0  # sampler kept running, nothing suspended

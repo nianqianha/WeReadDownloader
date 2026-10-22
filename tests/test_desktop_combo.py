@@ -1,4 +1,4 @@
-"""The 并发 box must be operable without hitting a 13 px arrow.
+"""The 标注 box must be operable without hitting a 13 px arrow.
 
 CTkComboBox binds its click handling to the "dropdown_arrow" / "right_parts"
 canvas tags and never moves keyboard focus to the inner ttk combobox, so the
@@ -55,7 +55,7 @@ def test_a_click_on_the_box_takes_focus():
     """
     root, instance = _make_gui()
     try:
-        box = instance.jobs_box
+        box = instance.annotations_box
         canvas = box._canvas
         canvas.event_generate("<Button-1>", x=4, y=canvas.winfo_height() // 2,
                               when="now")
@@ -72,7 +72,7 @@ def test_a_click_on_the_box_takes_focus():
 def test_box_focus_survives_later_canvas_class_binding():
     root, instance = _make_gui()
     try:
-        box = instance.jobs_box
+        box = instance.annotations_box
         canvas = box._canvas
         tag = "SyntheticCanvasFocus"
         canvas.bind_class(tag, "<Button-1>", lambda event: canvas.focus_set())
@@ -90,30 +90,35 @@ def test_the_arrow_keys_reach_the_value_once_focused():
     """The gap this closes: focus_set() works, but nothing called it for you."""
     root, instance = _make_gui()
     try:
-        box = instance.jobs_box
+        box = instance.annotations_box
         box.focus_set()
         root.update()
         entry = root.focus_get()
         assert entry is not None and str(entry).endswith("entry"), entry
         values = list(box.cget("values"))
-        start = instance.jobs.get()
+        start = instance.annotations_var.get()
         # Drive the entry the way a keystroke would, then confirm the wired
         # variable followed it.
         box.set(values[-1])
         root.update()
-        assert instance.jobs.get() == values[-1], (
-            "the combobox variable did not follow a selection: %r" % instance.jobs.get())
-        assert values[0] == start or instance.jobs.get() != start
+        assert instance.annotations_var.get() == values[-1], (
+            "the combobox variable did not follow a selection: %r" % instance.annotations_var.get())
+        assert values[0] == start or instance.annotations_var.get() != start
     finally:
         root.destroy()
 
 
 @test
-def test_the_worker_still_receives_a_valid_job_count():
-    """jobs=1 (not the raw widget text) is what export() sends; clamp it."""
-    for raw, expected in (("1", 1), ("4", 4), ("9", 4), ("0", 1)):
-        jobs = max(1, min(4, int(raw)))
-        assert jobs == expected, (raw, jobs)
+def test_the_queue_always_sends_a_single_job():
+    """并发选择器已删：jobs 固定 1，界面不再能把它调高（实测会触发 426 限流）。"""
+    root, instance = _make_gui()
+    try:
+        args = instance._queue_args({"bookId": "123"})
+        assert args[:3] == ["123", "--jobs", "1"], args
+        assert app.WORKER_JOBS == 1
+        assert not hasattr(instance, "jobs_box"), "并发控件没删干净"
+    finally:
+        root.destroy()
 
 
 if __name__ == "__main__":

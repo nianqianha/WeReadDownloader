@@ -84,7 +84,7 @@ def test_spawn_runs_off_the_tk_thread():
         subprocess.Popen = slow_popen
         try:
             t0 = time.perf_counter()
-            started = inst._start_worker(["--check-auth"], "auth", "…")
+            started = inst._start_worker(["123"], "export", "…")
             returned_ms = (time.perf_counter() - t0) * 1000.0
         finally:
             subprocess.Popen = real_popen
@@ -128,10 +128,10 @@ def test_a_pending_spawn_counts_as_busy():
 
         subprocess.Popen = gated_popen
         try:
-            assert inst._start_worker(["--check-auth"], "auth", "…")
+            assert inst._start_worker(["123"], "export", "…")
             # _is_busy() must already be True even though no process exists.
             assert inst._is_busy(), "a pending spawn does not count as busy"
-            assert not inst._start_worker(["--search", "x"], "search", "…"), (
+            assert not inst._start_worker(["456"], "export", "…"), (
                 "a second start was accepted while the first spawn was pending")
         finally:
             gate.set()
@@ -158,7 +158,7 @@ def test_spawn_failure_unsticks_the_app():
 
         subprocess.Popen = broken_popen
         try:
-            assert inst._start_worker(["--check-auth"], "auth", "…")
+            assert inst._start_worker(["123"], "export", "…")
             for _ in range(400):
                 root.update()
                 inst._drain_events()
