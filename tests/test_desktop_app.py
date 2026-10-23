@@ -93,6 +93,11 @@ def test_common_errors_are_translated_to_actionable_chinese():
     assert "技术日志" in app.friendly_error("unexpected crash")
     assert "断点" in app.friendly_error("RuntimeError: cannot acquire desktop export lock")
     assert "重试" in app.friendly_error("RuntimeError: WeRead gateway error for /store/search: -1")
+    # #66: 失败文案不能落进兜底，用户要知道旧成品没被覆盖。
+    preserved = app.friendly_error(
+        "RuntimeError: Annotation requests failed; preserved the previous complete export. "
+        "Retry to fetch failed chapters.")
+    assert "完整成品" in preserved and "重取" in preserved
 
 
 def test_book_details_are_safe_to_display_when_optional_fields_are_missing():
