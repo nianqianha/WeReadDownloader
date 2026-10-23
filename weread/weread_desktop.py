@@ -635,6 +635,16 @@ def _dropped_annotations() -> int:
     return _DROPPED_ANNOTATION_FRAGMENTS
 
 
+def _annotation_error(exc: Exception) -> str:
+    # Exception text and response bodies may contain private request data.
+    kind = type(exc).__name__
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        status = exc.response.status_code
+        if isinstance(status, int) and 100 <= status <= 599:
+            return f"{kind}, HTTP {status}"
+    return kind
+
+
 class WeRead:
     def __init__(self, credentials: dict[str, Any], lua: LuaRuntime):
         self.auth = credentials
@@ -903,7 +913,7 @@ class WeRead:
                                                                "chapterUid": chapter_uid})
         except Exception as exc:
             print(f"[ANNOTATION] chapter {chapter_uid}: underlines unavailable "
-                  f"({type(exc).__name__}); keeping the text",
+                  f"({_annotation_error(exc)}); keeping the text",
                   file=sys.stderr, flush=True)
             underlines = {"underlines": []}
             fetch_failures["underlines"] += 1
@@ -929,7 +939,7 @@ class WeRead:
             except Exception as exc:
                 fetch_failures["reviews"] += 1
                 print(f"[ANNOTATION] chapter {chapter_uid}: reviews batch at {start} "
-                      f"failed ({type(exc).__name__}); keeping the other batches",
+                      f"failed ({_annotation_error(exc)}); keeping the other batches",
                       file=sys.stderr, flush=True)
                 continue
             if not isinstance(batch_reviews, list):
