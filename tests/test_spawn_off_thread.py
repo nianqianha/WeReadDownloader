@@ -129,6 +129,7 @@ def test_a_pending_spawn_counts_as_busy():
         subprocess.Popen = gated_popen
         try:
             assert inst._start_worker(["123"], "export", "…")
+            assert inst.pause_button.cget("state") == "normal"
             # _is_busy() must already be True even though no process exists.
             assert inst._is_busy(), "a pending spawn does not count as busy"
             assert not inst._start_worker(["456"], "export", "…"), (

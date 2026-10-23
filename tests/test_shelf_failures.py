@@ -20,7 +20,7 @@ class ShelfFailuresTests(unittest.TestCase):
                      str(path), "exec"), namespace)
         self.app = SimpleNamespace(status=Mock(), _persist_log=Mock(), _spawn_pending=True,
                                    current_action="shelf", job_seq=1, process=object(), last_failure=False,
-                                   _service_job=None,
+                                   _service_job=None, queue_paused=False,
                                    pause_button=Mock(), annotations_box=Mock(), _flush_pending_book=Mock())
         self.error = Mock()
         self.app._show_shelf_error = self.error
