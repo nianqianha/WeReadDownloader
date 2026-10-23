@@ -711,6 +711,8 @@ class _ResultCanvas(ctk.CTkFrame):
                            "rating": rating, "check": box}
         for item in (bg, bar, cover_bg, cover_text, title, author, cat, rating, box):
             self._bid_by_item[item] = bid
+        if bid in self._photos:
+            self.set_cover(bid, self._photos[bid])
 
     # -- interactions ----------------------------------------------------
     def _row_at(self, event):
@@ -760,13 +762,19 @@ class _ResultCanvas(ctk.CTkFrame):
         entry = self.items.get(book_id)
         if entry is None:
             return
+        self._photos[book_id] = photo
+        previous = entry.pop("cover_image", None)
+        if previous is not None:
+            self.canvas.delete(previous)
+            self._bid_by_item.pop(previous, None)
         if photo is None:
             self.canvas.itemconfigure(entry["cover_text"], text="暂无封面")
             return
-        self._photos[book_id] = photo
         x0, y0, _x1, _y1 = self.canvas.coords(entry["cover_bg"])
-        self.canvas.create_image(x0, y0, anchor="nw", image=photo,
-                                 tags=("row:%s" % book_id,))
+        item = self.canvas.create_image(x0, y0, anchor="nw", image=photo,
+                                        tags=("row:%s" % book_id,))
+        entry["cover_image"] = item
+        self._bid_by_item[item] = book_id
         self.canvas.itemconfigure(entry["cover_text"], text="")
 
     def refresh_check(self, book_id):
