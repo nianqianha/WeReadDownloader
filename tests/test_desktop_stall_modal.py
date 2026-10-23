@@ -80,7 +80,7 @@ def test_an_open_dialog_is_counted_and_released_even_if_it_raises():
             def _boom(*a, **k):
                 raise RuntimeError("messagebox exploded")
             messagebox.askokcancel = _boom
-            assert instance._ask("askokcancel", "t", "m") == "no"
+            assert instance._ask("askokcancel", "t", "m") is False
             assert instance._modal_depth == 0, "counter left high after an exception"
         finally:
             messagebox.askokcancel = real
