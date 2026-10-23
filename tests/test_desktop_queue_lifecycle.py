@@ -91,3 +91,34 @@ def test_detail_completion_preserves_both_queue_resume_entries():
     finally:
         app.messagebox.askyesno, app.messagebox.showinfo = original
         root.destroy()
+
+
+def test_pause_keeps_the_running_book_after_browsing_another_one():
+    """暂停时插入队列的必须是正在下载的那本，不是用户正在浏览的那本。"""
+    root, instance = _make_gui()
+    original = _mock_dialogs(instance)
+    try:
+        calls = []
+        _spy_start(instance, calls)
+        # 详情补载会起自己的 job，与本测试要验证的队首归属无关。
+        instance._flush_pending_book = lambda: None
+        instance.download_queue = [_row("111", "first"), _row("222", "second")]
+        instance._start_queue()
+        assert calls[-1][0][0] == "111"
+        # 下载中点了另一本书：selected_* 变成浏览的那本。
+        instance._select_book(_row("999", "browsed"), load_info=False)
+        assert instance.selected_id == "999"
+        instance._pause_requested = True
+        instance._handle_done(instance.job_seq, 1)
+        assert [book["bookId"] for book in instance.download_queue] == ["111", "222"]
+        assert instance.queue_results == []
+        instance._resume_queue()
+        assert calls[-1][0][0] == "111"
+        instance._handle_done(instance.job_seq, 0)   # 111 完成，222 开始
+        assert instance.queue_results[0][0] == "first"
+        instance._handle_done(instance.job_seq, 0)   # 222 完成，队列结束
+        assert [row[0] for row in instance.queue_results] == ["first", "second"]
+        assert not instance.queue_running
+    finally:
+        app.messagebox.askyesno, app.messagebox.showinfo = original
+        root.destroy()
