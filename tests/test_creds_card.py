@@ -56,9 +56,9 @@ def test_the_download_buttons_are_replaced_when_credentials_are_missing():
     assert "probe_button.grid_remove()" in refresh, \
         "a missing credential must take the buttons out of the way"
     assert "export_button.grid_remove()" in refresh
-    assert "creds_panel.grid()" in refresh, "and the card must take their place"
+    assert "creds_panel.pack(" in refresh, "and the card must remain reachable"
     # ...and the reverse: a complete file restores them
-    assert "creds_panel.grid_remove()" in refresh, \
+    assert "creds_panel.pack_forget()" in refresh, \
         "a complete credential file must hide the card"
     assert "probe_button.grid()" in refresh, \
         "and the buttons must come back"

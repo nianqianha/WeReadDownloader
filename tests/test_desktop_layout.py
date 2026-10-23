@@ -199,6 +199,44 @@ def _find_checkboxes(widget):
     return found
 
 
+def test_unconfigured_pages_keep_viewport_and_credentials_reachable(monkeypatch, tmp_path):
+    monkeypatch.setattr(app, "_settings_path", lambda: tmp_path / "missing.lua")
+    monkeypatch.setattr(app, "_credentials_usable", lambda _path: False)
+    monkeypatch.setattr(app, "_has_api_key", lambda _path: False)
+    for height in (580, SCREEN_FIT_HEIGHT):
+        root, instance = _make_gui(height)
+        try:
+            instance.check_credentials_on_start()
+            root.update()
+            assert instance.creds_api_entry.winfo_ismapped()
+            assert instance.creds_panel.winfo_rooty() >= instance.page_scroll.winfo_rooty()
+            canvas = instance.page_scroll._parent_canvas
+            canvas.yview_moveto(1)
+            root.update()
+            assert canvas.yview()[1] == 1.0
+            for name in ("我的书架", "下载记录", "存储占用", "设置"):
+                instance._switch_page(name)
+                root.update()
+                page = instance.pages[name]
+                assert not instance.workshop_footer.winfo_ismapped()
+                assert page.winfo_height() >= instance.page_host.winfo_height() - 2
+                assert instance.login_button.winfo_ismapped()
+            instance._switch_page("下载工坊")
+            canvas.yview_moveto(0)
+            root.update()
+            assert instance.workshop_footer.winfo_ismapped()
+            assert instance.creds_api_entry.winfo_ismapped()
+            assert instance.creds_api_entry.winfo_rooty() < root.winfo_rooty() + root.winfo_height()
+            monkeypatch.setattr(app, "_credentials_usable", lambda _path: True)
+            instance._refresh_creds_panel()
+            root.update()
+            assert not instance.creds_panel.winfo_ismapped()
+            assert instance.export_button.winfo_ismapped()
+            monkeypatch.setattr(app, "_credentials_usable", lambda _path: False)
+        finally:
+            root.destroy()
+
+
 @test
 def test_the_queue_checkbox_is_not_clipped_by_a_long_title():
     """勾选框要完整落在行内。

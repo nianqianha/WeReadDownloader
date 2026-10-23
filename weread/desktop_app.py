@@ -1342,6 +1342,10 @@ class DesktopApp:
         if self._current_page in self.pages:
             self.pages[self._current_page].pack_forget()
         self._current_page = page_name
+        if page_name == "下载工坊":
+            self.workshop_footer.pack(side="bottom", fill="x", pady=(10, 0))
+        else:
+            self.workshop_footer.pack_forget()
         if page_name not in self.pages:
             # Build on first visit; the builder registers the page in self.pages.
             self._create_page(page_name)
@@ -1925,6 +1929,8 @@ class DesktopApp:
         btns.pack(fill="x", padx=18, pady=(8, 16))
         self._quiet_button(btns, "登录 / 切换账号", 136, self.open_login).pack(side="left")
         self._quiet_button(btns, "检查登录状态", 118, self.check_auth).pack(side="left", padx=(8, 0))
+        self._quiet_button(btns, "准备下载凭证", 118,
+                           lambda: self._switch_page("下载工坊")).pack(side="left", padx=(8, 0))
         ctk.CTkFrame(card, height=1, fg_color=self.HAIRLINE).pack(fill="x", padx=18, pady=(14, 0))
         ctk.CTkLabel(card, text="版本与更新", text_color=self.INK, anchor="w",
                      font=_font(13, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
@@ -2480,11 +2486,10 @@ class DesktopApp:
         # panel takes the place of the buttons and says what is missing. It
         # hides itself again the moment load_credentials() would succeed, so the
         # window is the only UI a new user ever has to look at.
-        self.creds_panel = ctk.CTkFrame(export, fg_color=self.SUNKEN,
+        # Credential fields scroll with workshop content, never consume the
+        # fixed action area or the viewport of unrelated pages.
+        self.creds_panel = ctk.CTkFrame(page, fg_color=self.SUNKEN,
                                          corner_radius=8)
-        self.creds_panel.grid(row=1, column=0, columnspan=4, sticky="ew",
-                              padx=18, pady=(6, 10))
-        self.creds_panel.grid_remove()          # shown only when incomplete
 
         ctk.CTkLabel(self.creds_panel, text="需要两个凭证才能下载",
                      text_color=self.INK, anchor="w",
@@ -4102,7 +4107,7 @@ class DesktopApp:
         except Exception:
             return
         if usable:
-            self.creds_panel.grid_remove()
+            self.creds_panel.pack_forget()
             self.probe_button.grid()
             self.export_button.grid()
             return
@@ -4110,7 +4115,7 @@ class DesktopApp:
         # Something is missing: the card takes the place of the buttons.
         self.probe_button.grid_remove()
         self.export_button.grid_remove()
-        self.creds_panel.grid()
+        self.creds_panel.pack(fill="x", before=self.body, pady=(10, 0))
         self.creds_error.configure(text="")
 
         if has_key:
