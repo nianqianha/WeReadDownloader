@@ -1054,6 +1054,9 @@ class DesktopApp:
         self.selected_id = ""
         self.selected_title = ""
         self.selected_author = ""
+        # 队列正在下载的那本。下载中用户点另一本书浏览会把 selected_* 改成
+        # 浏览的那本，所以暂停续队和结果标签都不能再读 selected_*。
+        self._queue_book: dict | None = None
         self.book_info: dict = {}
         self.cover_image = None
         self.book_rows: dict[str, dict] = {}
@@ -3271,19 +3274,25 @@ class DesktopApp:
             # `if self.last_failure` 分支，永远到不了这里：实测 汉书 打包失败后，
             # 队列里的 三字经 一直没开始，界面停在失败提示上。
             if action == "export" and self.queue_running:
+                # 结果与暂停都必须指向真正在下载的那本：排队时可以点另一本
+                # 浏览，selected_* 会被改成浏览的那本，用它会把用户正在看的
+                # 书插回队首，真正中断的那本反而丢出队列。
+                current = self._queue_book or {
+                    "bookId": self.selected_id, "title": self.selected_title,
+                    "author": self.selected_author}
+                label = current.get("title") or current.get("bookId") or "未命名"
                 if self._pause_requested:
                     # 用户按了暂停：把刚停下的这本插回队首，队列原地不动。
                     self._pause_queue()
                     self.status.set("队列已暂停：《%s》停在已下载的章节，队列还剩 %d 本。"
                                     "点「继续队列」接着跑。"
-                                    % (self.selected_title or self.selected_id,
-                                       len(self.download_queue)))
+                                    % (label, len(self.download_queue)))
                 else:
                     success = code == 0 and not self.last_failure and not self.last_unresolved
                     reason = "" if success else (
                         self.last_failure_status or
                         ("任务退出码 %s，未完成" % code if code else "仍有未解决章节"))
-                    self.queue_results.append((self.selected_title or self.selected_id, success, reason))
+                    self.queue_results.append((label, success, reason))
                     nxt = self._pop_next_book()
                     if nxt is not None:
                         reason = "；上一本未完成，断点已保留" if not success else ""
@@ -3293,6 +3302,7 @@ class DesktopApp:
                         self._select_book(nxt, load_info=False)
                         self._start_one(nxt)
                     else:
+                        self._queue_book = None
                         self.queue_running = False
                         self.queue_paused = False
                         self._queue_skipped.clear()
@@ -4410,6 +4420,9 @@ class DesktopApp:
     def _start_one(self, book: dict) -> None:
         """起一本的下载（队列与单本共用）。不弹确认框，直接跑。"""
         self.progress.set(0)
+        self._queue_book = {"bookId": str(book.get("bookId") or ""),
+                            "title": book.get("title") or "",
+                            "author": book.get("author") or ""}
         if not self._start_worker(self._queue_args(book), "export",
                                   "正在准备下载《%s》并检查本地断点…"
                                   % (book.get("title") or book.get("bookId", ""))):
@@ -4621,14 +4634,17 @@ class DesktopApp:
         self._start_one(nxt)
 
     def _pause_queue(self):
-        """Keep the selected book retryable after a pause or failed start."""
+        """Keep the book that was actually running retryable after a pause or failed start."""
         self._pause_requested = False
         self.queue_running = False
         self.queue_paused = True
-        current = {"bookId": self.selected_id, "title": self.selected_title,
-                   "author": self.selected_author}
+        current = self._queue_book or {"bookId": self.selected_id,
+                                       "title": self.selected_title,
+                                       "author": self.selected_author}
         if current["bookId"] and not any(book["bookId"] == current["bookId"] for book in self.download_queue):
             self.download_queue.insert(0, current)
+        # 暂停后 _queue_book 不再指向任何在跑的书；恢复时 _start_one 会重新设置。
+        self._queue_book = None
         self.pause_button.configure(text="继续队列", state="normal")
         self._refresh_queue_button()
 
