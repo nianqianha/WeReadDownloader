@@ -1952,6 +1952,41 @@ class DesktopApp:
         finally:
             self._modal_depth -= 1
 
+    def _ask_choice(self, title: str, message: str, options) -> str | None:
+        """Offer explicit scopes; closing or failing the dialog cancels."""
+        dialog = None
+        result = None
+        self._modal_depth += 1
+        try:
+            dialog = ctk.CTkToplevel(self.root)
+            dialog.title(title)
+            dialog.transient(self.root)
+            dialog.resizable(False, False)
+            def choose(value):
+                nonlocal result
+                result = value
+                dialog.destroy()
+            ctk.CTkLabel(dialog, text=message, text_color=self.INK, justify="left",
+                         wraplength=520, font=_font(12)).pack(padx=24, pady=(20, 16))
+            row = ctk.CTkFrame(dialog, fg_color="transparent")
+            row.pack(fill="x", padx=24, pady=(0, 16))
+            for label, value in options:
+                self._quiet_button(row, label, 120, lambda value=value: choose(value)).pack(side="left", padx=4)
+            cancel = self._quiet_button(row, "取消", 88, lambda: choose(None))
+            cancel.pack(side="right", padx=4)
+            dialog.protocol("WM_DELETE_WINDOW", lambda: choose(None))
+            dialog.bind("<Escape>", lambda event: choose(None))
+            dialog.grab_set()
+            cancel.focus_set()
+            dialog.wait_window()
+            return result
+        except Exception:
+            return None
+        finally:
+            self._modal_depth -= 1
+            if dialog is not None and dialog.winfo_exists():
+                dialog.destroy()
+
     def _quiet_button(self, parent, text: str, width: int, command, **kwargs):
         """Secondary action: outlined on the card surface, never a filled slab."""
         return ctk.CTkButton(
@@ -4548,7 +4583,7 @@ class DesktopApp:
             "下次打开直接可用。\n\n"
             "彻底清除：两个凭证文件都删，下次需要重新扫码并重抄一次 api_key。",
             [("仅退出会话", "session"), ("彻底清除", "all")])
-        if not scope:
+        if scope not in ("session", "all"):
             return
 
         try:
@@ -4557,7 +4592,7 @@ class DesktopApp:
             self._persist_log(f"[LOGOUT_ERROR] {type(exc).__name__}: {exc}")
             self.status.set(f"退出登录失败：{exc}")
             return
-        if not removed:
+        if not removed and scope == "session":
             self.status.set("本机没有已保存的登录会话，无需退出。")
             self._set_login_identity(None)
             self.logout_button.configure(state="disabled")
@@ -4572,9 +4607,19 @@ class DesktopApp:
                 base = _settings_path()
                 if base.is_file():
                     base.unlink(missing_ok=True)
+                    removed = True
                     self._persist_log("[LOGOUT] weread-live-settings.lua removed")
             except OSError as exc:
                 self._persist_log(f"[LOGOUT_ERROR] failed to remove SETTINGS: {exc}")
+                self.status.set("会话已清除，但基础凭证删除失败；未完成彻底清除。")
+                self._refresh_logout_button()
+                return
+
+        if not removed:
+            self.status.set("本机没有已保存的登录凭证，无需退出。")
+            self._set_login_identity(None)
+            self._refresh_logout_button()
+            return
 
         self._set_login_identity(None)
         self.logout_button.configure(state="disabled")

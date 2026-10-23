@@ -192,6 +192,8 @@ def test_logging_out_with_nothing_stored_is_harmless():
     root, instance = _make_gui()
     try:
         assert not _CRED.exists()
+        # The preceding session-only case deliberately retained the base file.
+        (_PROFILE / "weread-live-settings.lua").unlink(missing_ok=True)
         instance._refresh_logout_button()
         instance.logout()
         root.update()
@@ -251,6 +253,77 @@ def test_clear_credentials_reports_whether_it_removed_anything():
     target.write_text("{}", encoding="utf-8")
     assert clear_credentials(target) is True
     assert not target.exists()
+
+
+@test
+def test_logout_scope_covers_all_file_combinations():
+    root, instance = _make_gui()
+    try:
+        base = _PROFILE / "weread-live-settings.lua"
+        _PROFILE.mkdir(parents=True, exist_ok=True)
+        for scope in (None, "session", "all"):
+            for has_base in (False, True):
+                for has_session in (False, True):
+                    base.unlink(missing_ok=True)
+                    _CRED.unlink(missing_ok=True)
+                    if has_base:
+                        base.write_text("synthetic base", encoding="utf-8")
+                    if has_session:
+                        _write_credentials()
+                    instance._ask_choice = lambda *args, scope=scope: scope
+                    instance.logout()
+                    assert base.exists() == (has_base and scope != "all"), (scope, has_base, has_session)
+                    assert _CRED.exists() == (has_session and scope is None), (scope, has_base, has_session)
+    finally:
+        root.destroy()
+
+
+@test
+def test_base_delete_failure_does_not_claim_full_wipe():
+    root, instance = _make_gui()
+    try:
+        _PROFILE.mkdir(parents=True, exist_ok=True)
+        base = _PROFILE / "weread-live-settings.lua"
+        base.write_text("synthetic base", encoding="utf-8")
+        _write_credentials()
+        with patch.object(Path, "unlink", side_effect=PermissionError("locked")):
+            # Isolate the second operation: the session was already removed.
+            with patch.object(app.weread_login, "clear_credentials", return_value=True):
+                instance.logout()
+        assert base.is_file()
+        assert "未完成彻底清除" in instance.status.get()
+    finally:
+        root.destroy()
+
+
+@test
+def test_real_scope_dialog_can_choose_and_cancel_without_clearing_files():
+    root, instance = _make_gui()
+    try:
+        _write_credentials()
+        original = _CRED.read_bytes()
+        for label, expected in (("仅退出会话", "session"), ("彻底清除", "all"), ("取消", None)):
+            def select():
+                pending = list(root.winfo_children())
+                while pending:
+                    widget = pending.pop()
+                    if isinstance(widget, app.ctk.CTkButton) and widget.cget("text") == label:
+                        widget.invoke()
+                        return
+                    pending.extend(widget.winfo_children())
+                raise AssertionError("scope button missing: " + label)
+            root.after(100, select)
+            answer = app.DesktopApp._ask_choice(instance, "scope", "synthetic",
+                [("仅退出会话", "session"), ("彻底清除", "all")])
+            assert answer == expected
+            assert instance._modal_depth == 0
+            assert _CRED.read_bytes() == original
+        with patch.object(app.ctk, "CTkToplevel", side_effect=RuntimeError("dialog unavailable")):
+            assert app.DesktopApp._ask_choice(instance, "scope", "synthetic", []) is None
+        assert instance._modal_depth == 0
+        assert _CRED.read_bytes() == original
+    finally:
+        root.destroy()
 
 
 if __name__ == "__main__":
