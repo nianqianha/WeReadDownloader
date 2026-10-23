@@ -397,9 +397,16 @@ def describe_omissions(report, compact: bool = False) -> str:
                           % (real_images, chapters))
         shorts.append("%d 张插图无法取回" % real_images)
     if markers:
-        paragraphs.append("注角标图标 %d 处无法取回（每章一个 note.png）；"
-                          "注文本身已保留，收在书末附录。" % markers)
-        shorts.append("%d 处注角标图标无法取回（注文已保留）" % markers)
+        location = "注文已收在书末附录。" if report.get("notes_in_appendix") else "注文的可读性需在阅读器中确认。"
+        paragraphs.append("注角标图标 %d 处无法取回（每章一个 note.png）；%s" % (markers, location))
+        shorts.append("%d 处注角标图标无法取回" % markers)
+    fetch_failures = report.get("annotation_fetch_failures") or {}
+    if any(fetch_failures.values()):
+        count = int(report.get("chapters_with_annotation_fetch_failures") or 0)
+        impact = "想法可能不完整或全部缺失" if report.get("thoughts_requested") else "划线数据可能不完整"
+        paragraphs.append("%d 章的标注请求失败（划线请求 %d 次、想法批次 %d 次）；%s，不能视为没有标注。可稍后重试。"
+                          % (count, fetch_failures.get("underlines", 0), fetch_failures.get("reviews", 0), impact))
+        shorts.append("%d 章标注获取失败（%s）" % (count, impact))
     dropped = int(report.get("underline_ranges_dropped") or 0)
     if dropped:
         # The worker emits chapters_with_unplaced_underlines and keeps
