@@ -1892,7 +1892,7 @@ class DesktopApp:
             card, "检查更新", 110, self._check_for_update)
         self.check_update_button.pack(anchor="w", padx=18, pady=(8, 16))
 
-    def _ask(self, kind: str, title: str, message: str, **kwargs) -> str:
+    def _ask(self, kind: str, title: str, message: str, **kwargs) -> bool | str | None:
         """Run a modal dialog with the main window as its parent, and log it.
 
         A modal takes over the Tk main loop until the user answers, so the
@@ -1913,7 +1913,7 @@ class DesktopApp:
         try:
             return getattr(messagebox, kind)(title, message, parent=self.root, **kwargs)
         except Exception:
-            return "no"
+            return False
         finally:
             self._modal_depth -= 1
 
