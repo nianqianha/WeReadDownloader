@@ -56,6 +56,36 @@ def test_wechat_rating_scale_formats_as_ten_point_score():
     assert app.rating_text(None, None) == ""
 
 
+def test_details_sync_identity_for_shelf_and_search_confirmation():
+    import customtkinter as ctk
+    root = ctk.CTk()
+    instance = app.DesktopApp(root)
+    try:
+        instance._is_busy = lambda: False
+        instance._start_book_info = lambda _item: True
+        messages = []
+        instance._ask = lambda _kind, _title, message, **_kw: messages.append(message) or False
+        for item in ({"bookId": "1", "title": "Shelf title"},
+                     {"bookId": "2", "title": "Search title", "author": "Search author"}):
+            instance._select_book(item)
+            instance._show_book_info({"bookId": item["bookId"],
+                                      "title": "Detail title", "author": "Detail author"})
+            instance.export()
+            assert instance.selected_id == item["bookId"]
+            assert instance.selected_title == "Detail title"
+            assert instance.selected_author == "Detail author"
+            assert instance.author_label.cget("text") == "作者：Detail author"
+            assert "Detail title" in messages[-1] and "Detail author" in messages[-1]
+        instance._show_book_info({"bookId": "1", "title": "Stale", "author": "Stale"})
+        assert instance.selected_id == "2"
+        assert instance.selected_title == "Detail title"
+        assert instance.selected_author == "Detail author"
+        instance._show_book_info({"bookId": "2", "author": "  "})
+        assert instance.selected_author == "Detail author"
+    finally:
+        root.destroy()
+
+
 def test_common_errors_are_translated_to_actionable_chinese():
     assert "服务器实际返回空正文" in app.friendly_error("empty body despite catalog wordCount=41")
     assert "划线无法可靠对应" in app.friendly_error("only 0 embedded marker(s)")
