@@ -3177,10 +3177,6 @@ class DesktopApp:
             # `if self.last_failure` 分支，永远到不了这里：实测 汉书 打包失败后，
             # 队列里的 三字经 一直没开始，界面停在失败提示上。
             if action == "export" and self.queue_running:
-                self.queue_results.append((
-                    self.selected_title or self.selected_id,
-                    not self.last_failure,
-                    "" if not self.last_failure else (self.last_failure_status or "")))
                 if self._pause_requested:
                     # 用户按了暂停：把刚停下的这本插回队首，队列原地不动。
                     self._pause_requested = False
@@ -3195,9 +3191,14 @@ class DesktopApp:
                                     % (current["title"] or current["bookId"],
                                        len(self.download_queue)))
                 else:
+                    success = code == 0 and not self.last_failure and not self.last_unresolved
+                    reason = "" if success else (
+                        self.last_failure_status or
+                        ("任务退出码 %s，未完成" % code if code else "仍有未解决章节"))
+                    self.queue_results.append((self.selected_title or self.selected_id, success, reason))
                     nxt = self._pop_next_book()
                     if nxt is not None:
-                        reason = "；上一本未完成，断点已保留" if self.last_failure else ""
+                        reason = "；上一本未完成，断点已保留" if not success else ""
                         self.status.set("队列继续：开始下载《%s》（剩余 %d 本%s）。"
                                         % (nxt.get("title") or nxt.get("bookId", ""),
                                            len(self.download_queue), reason))
