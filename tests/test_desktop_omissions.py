@@ -219,6 +219,28 @@ def test_the_report_is_cleared_between_jobs():
         root.destroy()
 
 
+@test
+def test_note_location_only_claims_an_actual_appendix():
+    for included in (False, True):
+        report = _report(images_dropped=1, images_dropped_note_markers=1,
+                         notes_in_appendix=included)
+        notice = app.describe_omissions(report)
+        assert ("收在书末附录" in notice) == included
+        assert "注文已保留" not in app.describe_omissions(report, compact=True)
+
+
+@test
+def test_annotation_failure_is_visible_even_with_zero_ranges():
+    report = _report(thoughts_requested=True,
+                     annotation_fetch_failures={"underlines": 1, "reviews": 2},
+                     chapters_with_annotation_fetch_failures=3)
+    for compact in (False, True):
+        notice = app.describe_omissions(report, compact=compact)
+        assert "想法" in notice and "失败" in notice and "3" in notice
+    report["annotation_fetch_failures"] = {"underlines": 0, "reviews": 0}
+    assert app.describe_omissions(report) == ""
+
+
 if __name__ == "__main__":
     for test_case in ALL_TESTS:
         test_case()
