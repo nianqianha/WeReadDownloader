@@ -3588,6 +3588,8 @@ class DesktopApp:
         self.book_info.update(data)
         title = str(data.get("title") or "").strip() or self.selected_title
         author = str(data.get("author") or "").strip() or self.selected_author
+        self.selected_title = title
+        self.selected_author = author
         self.book_title_label.configure(text=title or "暂无书名")
         self.author_label.configure(text=f"作者：{author or '暂无信息'}")
         self.category_label.configure(text="    ·    ".join(book_detail_lines(data)))
