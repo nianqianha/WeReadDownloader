@@ -65,6 +65,45 @@ def _make_gui():
 ALL_TESTS = []
 
 
+def test_cached_result_cover_survives_redraw_and_window_restore():
+    root, instance = _make_gui()
+    try:
+        instance._request_card_cover = lambda *args: None
+        instance._add_book_card({"bookId": "123", "title": "Synthetic", "cover": ""})
+        root.update()
+        photo = app.tk.PhotoImage(master=root, width=20, height=30)
+        instance.results.set_cover("123", photo)
+        for action in (instance.results.redraw, lambda: root.state("zoomed"),
+                       lambda: root.state("normal"), instance.results.redraw):
+            action()
+            root.update()
+            entry = instance.results.items["123"]
+            item = entry["cover_image"]
+            assert instance.results.canvas.type(item) == "image"
+            assert instance.results.canvas.itemcget(item, "image") == str(photo)
+            assert instance.results.canvas.itemcget(entry["cover_text"], "text") == ""
+        assert len([i for i in instance.results.canvas.find_all() if instance.results.canvas.type(i) == "image"]) == 1
+    finally:
+        root.destroy()
+
+
+def test_failed_cover_placeholder_and_replacement_survive_redraw():
+    root, instance = _make_gui()
+    try:
+        instance._request_card_cover = lambda *args: None
+        instance._add_book_card({"bookId": "123", "title": "Synthetic", "cover": ""})
+        root.update()
+        results = instance.results
+        results.set_cover("123", app.tk.PhotoImage(master=root, width=20, height=30))
+        results.set_cover("123", None)
+        results.redraw()
+        assert "cover_image" not in results.items["123"]
+        assert results.canvas.itemcget(results.items["123"]["cover_text"], "text") == "暂无封面"
+        assert not [i for i in results.canvas.find_all() if results.canvas.type(i) == "image"]
+    finally:
+        root.destroy()
+
+
 def test(fn):
     ALL_TESTS.append(fn)
     return fn
