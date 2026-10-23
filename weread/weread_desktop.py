@@ -897,6 +897,7 @@ class WeRead:
             # readreviews round trip, nothing to inject. Cheaper and smaller than
             # --no-thoughts, which still pays for both calls to place highlights.
             return {"underlines": [], "chapterUid": chapter_uid}, []
+        fetch_failures = {"underlines": 0, "reviews": 0}
         try:
             underlines = self.gateway("/book/underlines", {"bookId": book_id,
                                                                "chapterUid": chapter_uid})
@@ -905,6 +906,7 @@ class WeRead:
                   f"({type(exc).__name__}); keeping the text",
                   file=sys.stderr, flush=True)
             underlines = {"underlines": []}
+            fetch_failures["underlines"] += 1
         rows = underlines.get("underlines")
         if not isinstance(rows, list):
             print(f"[ANNOTATION] chapter {chapter_uid}: underline response was "
@@ -912,6 +914,7 @@ class WeRead:
                   file=sys.stderr, flush=True)
             rows = []
             underlines["underlines"] = rows
+            fetch_failures["underlines"] += 1
         underlines["chapterUid"] = chapter_uid
         ranges = list(dict.fromkeys(str(row["range"]) for row in rows if row.get("range")))
         reviews: list[dict[str, Any]] = []
@@ -924,11 +927,13 @@ class WeRead:
                     "chapterUid": chapter_uid, "reviews": batch})
                 batch_reviews = response.get("reviews")
             except Exception as exc:
+                fetch_failures["reviews"] += 1
                 print(f"[ANNOTATION] chapter {chapter_uid}: reviews batch at {start} "
                       f"failed ({type(exc).__name__}); keeping the other batches",
                       file=sys.stderr, flush=True)
                 continue
             if not isinstance(batch_reviews, list):
+                fetch_failures["reviews"] += 1
                 print(f"[ANNOTATION] chapter {chapter_uid}: review batch at {start} "
                       f"was {type(batch_reviews).__name__}, not a list; skipped",
                       file=sys.stderr, flush=True)
@@ -936,6 +941,7 @@ class WeRead:
             reviews.extend(batch_reviews)
         if not want_thoughts:
             reviews = strip_thought_bodies(reviews)
+        underlines["annotation_fetch_failures"] = fetch_failures
         return underlines, reviews
 
     def fetch_book(self, book_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -2029,6 +2035,10 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             for path in stale:
                 path.unlink()
     cached_by_uid = discover_checkpoint_files(workspace, chapters)
+    # Retry only chapters with failed annotation requests; placement refusals remain reusable.
+    cached_by_uid = {uid: paths for uid, paths in cached_by_uid.items()
+                     if not any(json.loads(paths[1].read_text(encoding="utf-8"))
+                                .get("annotation_fetch_failures", {}).values())}
     chapter_paths: list[Path] = []
     review_paths: list[Path] = []
     css_paths: list[Path] = []
@@ -2141,6 +2151,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         temp_css = css_path.with_suffix(".css.part")
         temp_body.write_text(body, encoding="utf-8")
         temp_review.write_text(json.dumps({"chapter_uid": str(chapter["chapterUid"]), "reviews": reviews,
+            "annotation_fetch_failures": underlines.get("annotation_fetch_failures", {}),
             "underline_ranges": expected_ranges, "embedded_markers": embedded_markers,
             # The exact ids that did not land, so the omission can be audited
             # rather than taken on the count's word.
@@ -2259,11 +2270,18 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     # 所以页面永远是空的。
     unplaced_details: list[dict[str, str]] = []
     unplaced_total = 0
+    fetch_failures = {"underlines": 0, "reviews": 0}
+    chapters_with_fetch_failures = 0
     for index in range(1, len(chapters) + 1):
         chapter_css = css_paths[index - 1].read_text(encoding="utf-8")
         if chapter_css and chapter_css not in style_set:
             styles.append(chapter_css); style_set.add(chapter_css)
         row = json.loads(review_paths[index - 1].read_text(encoding="utf-8"))
+        failures = row.get("annotation_fetch_failures", {})
+        if any(failures.values()):
+            chapters_with_fetch_failures += 1
+        for kind in fetch_failures:
+            fetch_failures[kind] += int(failures.get(kind, 0))
         annotation_coverage["underline_ranges"] += int(row.get("underline_ranges", 0))
         annotation_coverage["embedded_markers"] += int(row.get("embedded_markers", 0))
         dropped = int(row.get("dropped_underline_ranges", 0) or 0)
@@ -2350,6 +2368,9 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     # if the loss is stated.
     omission_report = {
         "text_complete": True,
+        "thoughts_requested": bool(want_thoughts),
+        "annotation_fetch_failures": fetch_failures,
+        "chapters_with_annotation_fetch_failures": chapters_with_fetch_failures,
         "underline_ranges_expected": annotation_coverage["underline_ranges"],
         "underline_marker_spans": annotation_coverage["embedded_markers"],
         "underlines_not_placed": annotation_coverage["dropped_underline_ranges"],
@@ -2432,6 +2453,12 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         except requests.RequestException:
             cover_path = None
     epub_path = package_dir / (stem + ".epub")
+    if want_thoughts and any(fetch_failures.values()) and (package_dir / "manifest.json").is_file():
+        previous = json.loads((package_dir / "manifest.json").read_text(encoding="utf-8")).get("omissions", {})
+        if (previous.get("text_complete") and previous.get("thoughts_requested")
+                and not any(previous.get("annotation_fetch_failures", {}).values())):
+            export_lock.unlink(missing_ok=True)
+            raise RuntimeError("Annotation requests failed; preserved the previous complete export. Retry to fetch failed chapters.")
     # reviews.jsonl 先汇总落盘：统一附录（下面）与 KOReader bundle（后面）都以它
     # 为想法数据源。它只是把各章 review 缓存拼起来，提前写无副作用。
     review_file = package_dir / "reviews.jsonl"
@@ -2468,6 +2495,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             atomic_text(body_copy, rewritten)
             appendix_bodies[uid] = body_copy
         appendix_arg = (appendix_files, appendix_bodies)
+    omission_report["notes_in_appendix"] = bool(appendix_manifest.get("appendix", {}).get("notes"))
     write_epub(epub_path, book, chapters, chapter_paths, css, workspace_images, cover_path, appendix_arg)
     manifest = {"version": 1, "book_id": book_id, "title": book.get("title"),
         "author": book.get("author", ""), "epub": epub_path.name,
