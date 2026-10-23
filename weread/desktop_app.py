@@ -600,7 +600,8 @@ class _ResultCanvas(ctk.CTkFrame):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color=app.CARD, corner_radius=0)
         self.app = app
-        self.canvas = tk.Canvas(self, highlightthickness=0, bd=0, bg=app.CARD)
+        self.canvas = tk.Canvas(self, takefocus=True, highlightthickness=1,
+                                highlightcolor=app.ACCENT, highlightbackground=app.CARD, bd=0, bg=app.CARD)
         self.canvas.pack(side="left", fill="both", expand=True)
         self._bar = ctk.CTkScrollbar(
             self, orientation="vertical", width=12, command=self.canvas.yview,
@@ -612,9 +613,12 @@ class _ResultCanvas(ctk.CTkFrame):
         self.items: dict[str, dict] = {}
         self._photos: dict[str, object] = {}
         self._bid_by_item: dict[int, str] = {}
+        self._focus_index = 0
         self.canvas.bind("<Configure>", lambda _e: self.redraw())
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<MouseWheel>", self._on_wheel)
+        for key in ("Up", "Down", "Home", "End", "space", "Return"):
+            self.canvas.bind("<" + key + ">", self._on_key)
 
     # -- compatibility with the widget-based code/tests -------------------
     @property
@@ -633,6 +637,8 @@ class _ResultCanvas(ctk.CTkFrame):
     # -- drawing ---------------------------------------------------------
     def rows_changed(self, rows):
         self.rows = list(rows)
+        self._focus_index = next((i for i, row in enumerate(self.rows)
+                                  if str(row.get("bookId")) == self.app.selected_id), 0)
         self.redraw()
 
     def redraw(self):
@@ -722,6 +728,8 @@ class _ResultCanvas(ctk.CTkFrame):
         index = int(y // self.ROW_HEIGHT)
         if not (0 <= index < len(self.rows)):
             return
+        self.canvas.focus_set()
+        self._focus_index = index
         row = self.rows[index]
         bid = str(row.get("bookId") or "")
         entry = self.items.get(bid) or {}
@@ -729,15 +737,36 @@ class _ResultCanvas(ctk.CTkFrame):
         if box is not None:
             x0, y0, x1, y1 = self.canvas.coords(box)
             if x0 - 4 <= x <= x0 + 80 and y0 - 6 <= y <= y1 + 6:
-                var = self.app._card_checks.get(bid)
-                if var is None:
-                    var = tk.BooleanVar(value=False)
-                    self.app._card_checks[bid] = var
-                var.set(not var.get())
-                self.refresh_check(bid)
-                self.app._on_card_check(bid)
+                self._toggle_check(bid)
                 return
         self.app._select_book(dict(row))
+
+    def _toggle_check(self, bid):
+        var = self.app._card_checks.get(bid)
+        if var is None:
+            var = tk.BooleanVar(value=False)
+            self.app._card_checks[bid] = var
+        var.set(not var.get())
+        self.refresh_check(bid)
+        self.app._on_card_check(bid)
+
+    def _on_key(self, event):
+        if not self.rows:
+            return "break"
+        index = min(self._focus_index, len(self.rows) - 1)
+        if event.keysym in ("Up", "Down"):
+            index = max(0, min(index + (1 if event.keysym == "Down" else -1), len(self.rows) - 1))
+        elif event.keysym in ("Home", "End"):
+            index = 0 if event.keysym == "Home" else len(self.rows) - 1
+        self._focus_index = index
+        row = self.rows[index]
+        self.app._select_book(dict(row))
+        if event.keysym == "space":
+            self._toggle_check(str(row.get("bookId") or ""))
+        top = self.canvas.canvasy(0)
+        if index * self.ROW_HEIGHT < top or (index + 1) * self.ROW_HEIGHT > top + self.canvas.winfo_height():
+            self.canvas.yview_moveto(index / len(self.rows))
+        return "break"
 
     def _on_wheel(self, event):
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
