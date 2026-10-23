@@ -4434,10 +4434,18 @@ class DesktopApp:
 
         silent=True 用于启动后静默检查：无网络/无新版本时一律不打扰用户。
         """
-        latest = _updater.fetch_latest()
-        if not latest or latest.get("prerelease") or latest.get("draft"):
+        try:
+            latest = _updater.fetch_latest()
+        except Exception:
+            latest = None
+        if not isinstance(latest, dict) or not latest.get("version"):
             if not silent:
-                self._ask("showinfo", "已是最新", "没有检测到新版本。")
+                self.status.set("无法检查更新，请检查网络后重试。")
+                self._ask("showerror", "无法检查更新", "未能取得有效版本信息，暂时无法确认是否有新版本。")
+            return
+        if latest.get("prerelease") or latest.get("draft"):
+            if not silent:
+                self._ask("showinfo", "没有正式更新", "没有检测到可安装的正式发布版本。")
             return
         if not _updater.is_newer(_version.APP_VERSION, latest["version"]):
             if not silent:
@@ -4474,12 +4482,16 @@ class DesktopApp:
             self.check_update_button.configure(state="disabled")
 
         def run():
-            path = _updater.download_setup(latest["setup_url"])
+            try:
+                path = _updater.download_setup(latest["setup_url"])
+            except Exception:
+                path = None
             if not path:
                 self.events.put(("update-failed", ("下载安装包失败，请稍后重试或手动从 GitHub 下载。",)))
                 return
             try:
-                _updater.apply_update(path)
+                if not _updater.apply_update(path):
+                    self.events.put(("update-failed", ("启动安装程序失败，请手动运行下载的安装包。",)))
             except Exception:
                 self.events.put(("update-failed", ("启动安装程序失败，请手动运行下载的安装包。",)))
 
