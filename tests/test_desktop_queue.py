@@ -7,6 +7,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "weread"))
@@ -459,6 +460,55 @@ def test_empty_queue_start_shows_info_not_crash():
         _spy_start(instance, calls)
         instance._start_queue()
         assert calls == [], calls
+        assert instance.queue_running is False
+    finally:
+        app.messagebox.askyesno, app.messagebox.showinfo = original
+        root.destroy()
+
+
+def test_pause_resume_counts_each_completed_book_once():
+    root, instance = _make_gui()
+    calls = []
+    original = _mock_dialogs(instance)
+    try:
+        _spy_start(instance, calls)
+        instance.download_queue = [_row("111", "first"), _row("222", "second")]
+        instance._start_queue()
+        instance._spawn_pending = True
+        instance._pause_requested = True
+        instance._handle_done(instance.job_seq, 1)
+        assert instance.queue_results == []
+        instance._spawn_pending = False
+        instance._resume_queue()
+        instance._spawn_pending = True
+        instance._handle_done(instance.job_seq, 0)
+        instance._handle_done(instance.job_seq, 0)
+        assert [args[0] for args, action in calls if action == "export"] == ["111", "111", "222"]
+        assert instance.queue_results == [("first", True, ""), ("second", True, "")]
+        assert "2 本" in instance.status.get()
+        assert instance.queue_running is False
+    finally:
+        app.messagebox.askyesno, app.messagebox.showinfo = original
+        root.destroy()
+
+
+@pytest.mark.parametrize("code,failed,unresolved", [(7, False, False), (-1, False, False),
+                                                   (0, True, False), (0, False, True)])
+def test_incomplete_queue_result_never_reports_success(code, failed, unresolved):
+    root, instance = _make_gui()
+    original = _mock_dialogs(instance)
+    try:
+        _spy_start(instance, [])
+        instance.download_queue = [_row("111", "first")]
+        instance._start_queue()
+        instance._spawn_pending = True
+        instance.last_failure = failed
+        instance.last_unresolved = unresolved
+        instance._handle_done(instance.job_seq, code)
+        assert len(instance.queue_results) == 1
+        assert instance.queue_results[0][1] is False
+        assert instance.queue_results[0][2]
+        assert "0 本成功，1 本未完成" in instance.status.get()
         assert instance.queue_running is False
     finally:
         app.messagebox.askyesno, app.messagebox.showinfo = original
