@@ -2690,6 +2690,7 @@ class DesktopApp:
                     "thread; the window was never blocked)" % (action, spawn_ms))
             self.events.put(("spawned", (action, process)))
 
+        self.pause_button.configure(state="normal" if action == "export" else "disabled")
         threading.Thread(target=spawn, daemon=True).start()
         return True
 
@@ -2729,6 +2730,11 @@ class DesktopApp:
             return
         self.process = process
         job = self._begin_job(action)
+        if action == "export" and self._pause_requested:
+            try:
+                process.terminate()
+            except OSError as exc:
+                self._persist_log("[PAUSE_ERROR] %s" % type(exc).__name__)
         self.reader = threading.Thread(target=self._read_output, args=(self.process, job), daemon=True)
         self.reader.start()
 
@@ -2736,12 +2742,16 @@ class DesktopApp:
         """The off-thread Popen raised; tell the user and unstick the widgets."""
         self._spawn_pending = False
         self.current_action = ""
+        self._pause_requested = False
         # 没有 worker 在跑，标注格不该停在 disabled——否则一次启动失败之后，
         # 用户再也改不了模式（全文件只有 _handle_done 会恢复它）。
         self.annotations_box.configure(state="readonly")
         self._set_busy_controls(False)
         self._persist_log(f"[WORKER_START_ERROR] {detail}")
         self.status.set("任务没有启动。请查看技术日志后重试。")
+        if action == "export" and self.queue_running:
+            self._pause_queue()
+            self.status.set("任务没有启动，队列已暂停；点击“继续队列”重试当前书。")
         if action == "shelf":
             self._show_shelf_error()
 
@@ -3183,16 +3193,10 @@ class DesktopApp:
                     "" if not self.last_failure else (self.last_failure_status or "")))
                 if self._pause_requested:
                     # 用户按了暂停：把刚停下的这本插回队首，队列原地不动。
-                    self._pause_requested = False
-                    self.queue_paused = True
-                    current = {"bookId": self.selected_id, "title": self.selected_title,
-                               "author": self.selected_author}
-                    if current["bookId"]:
-                        self.download_queue.insert(0, current)
-                    self.pause_button.configure(text="继续队列", state="normal")
+                    self._pause_queue()
                     self.status.set("队列已暂停：《%s》停在已下载的章节，队列还剩 %d 本。"
                                     "点「继续队列」接着跑。"
-                                    % (current["title"] or current["bookId"],
+                                    % (self.selected_title or self.selected_id,
                                        len(self.download_queue)))
                 else:
                     nxt = self._pop_next_book()
@@ -3225,7 +3229,11 @@ class DesktopApp:
                             self.status.set("队列已全部完成（%d 本）。"
                                             % len(self.queue_results))
         finally:
+            if action == "export":
+                self._pause_requested = False
             self._flush_pending_book()
+            if self.queue_paused and not self._is_busy():
+                self.pause_button.configure(text="继续队列", state="normal")
 
     def _report_login_problem(self):
         """Turn a failed auth check into one concrete next step.
@@ -4318,8 +4326,7 @@ class DesktopApp:
         if not self._start_worker(self._queue_args(book), "export",
                                   "正在准备下载《%s》并检查本地断点…"
                                   % (book.get("title") or book.get("bookId", ""))):
-            self.status.set("《%s》没有启动。请检查程序目录后重试。"
-                            % (book.get("title") or book.get("bookId", "")))
+            self._handle_spawn_failed("export", "Worker start rejected")
 
     def _start_queue(self) -> None:
         """从队首起第一本；之后由 _handle_done 自动续下一本。"""
@@ -4449,6 +4456,8 @@ class DesktopApp:
     def stop(self):
         if not self._is_busy():
             return
+        if self.current_action == "export":
+            self._pause_requested = True
         if self.queue_running and self.current_action == "export":
             # 队列里点暂停 = 停在这本、队列原地不动。原来的实现只是杀 worker，
             # 而 _handle_done 会立刻接下一本——用户以为整列停了，回来发现后面
@@ -4502,6 +4511,7 @@ class DesktopApp:
         if not self.queue_paused or self._is_busy():
             return
         self.queue_paused = False
+        self.queue_running = True
         self.pause_button.configure(text="暂停下载", state="disabled")
         nxt = self._pop_next_book()
         if nxt is None:
@@ -4510,6 +4520,18 @@ class DesktopApp:
             return
         self._select_book(nxt, load_info=False)
         self._start_one(nxt)
+
+    def _pause_queue(self):
+        """Keep the selected book retryable after a pause or failed start."""
+        self._pause_requested = False
+        self.queue_running = False
+        self.queue_paused = True
+        current = {"bookId": self.selected_id, "title": self.selected_title,
+                   "author": self.selected_author}
+        if current["bookId"] and not any(book["bookId"] == current["bookId"] for book in self.download_queue):
+            self.download_queue.insert(0, current)
+        self.pause_button.configure(text="继续队列", state="normal")
+        self._refresh_queue_button()
 
     def _pop_next_book(self):
         """取下一本，跳过运行中被取消勾选的书。"""
