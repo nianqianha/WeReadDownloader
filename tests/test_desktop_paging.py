@@ -53,6 +53,55 @@ def _feed(instance, count, offset=0):
     instance._drain_events()
 
 
+def test_result_click_takes_focus_and_keyboard_selects_and_checks_rows():
+    root, instance = _make_gui()
+    try:
+        instance._start_book_info = lambda item: True
+        _feed(instance, 3)
+        root.update()
+        root.focus_force()
+        instance.search_entry.insert(0, "needle")
+        instance.search_entry.focus_set()
+        root.update()
+        canvas = instance.results.canvas
+        canvas.event_generate("<Button-1>", x=100, y=20)
+        root.update()
+        assert root.focus_get() == canvas
+        canvas.event_generate("<Down>")
+        canvas.event_generate("<space>")
+        root.update()
+        assert instance.selected_id == "800001"
+        assert instance._card_checks["800001"].get() is True
+        assert instance.search_entry.get() == "needle"
+        canvas.event_generate("<Home>")
+        root.update()
+        assert instance.selected_id == "800000"
+        canvas.event_generate("<End>")
+        root.update()
+        assert instance.selected_id == "800002"
+        canvas.event_generate("<Down>")
+        root.update()
+        assert instance.selected_id == "800002"
+        assert canvas.cget("takefocus") == "1"
+    finally:
+        root.destroy()
+
+
+def test_search_input_keeps_space_when_results_do_not_have_focus():
+    root, instance = _make_gui()
+    try:
+        _feed(instance, 2)
+        root.focus_force()
+        instance.search_entry.focus_set()
+        root.update()
+        instance.search_entry._entry.event_generate("<space>")
+        root.update()
+        assert instance.search_entry.get() == " "
+        assert not any(value.get() for value in instance._card_checks.values())
+    finally:
+        root.destroy()
+
+
 ALL_TESTS = []
 
 
