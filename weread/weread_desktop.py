@@ -720,7 +720,7 @@ class WeRead:
         return state
 
     def chapter_shard(self, book: dict[str, Any], chapter: dict[str, Any],
-                      psvts: str, endpoint: str) -> str:
+                      psvts: str, endpoint: str) -> bytes:
         now = int(time.time())
         params = py_value(self.lua.globals()[b"_EXPORT"][b"make_content_params"](
             str(book["bookId"]).encode(), str(chapter["chapterUid"]).encode(),
@@ -731,35 +731,13 @@ class WeRead:
             headers={"Content-Type": "application/json;charset=UTF-8",
                      "Origin": WEB, "Referer": reader_url}, timeout=(10, 45))
         response.raise_for_status()
-        return self._decode_shard_bytes(response)
-
-    @staticmethod
-    def _decode_shard_bytes(response) -> str:
-        """Decode a shard body without trusting the response's charset.
-
-        `response.text` lets requests guess an encoding and then raise
-        UnicodeDecodeError on the bytes that are not text at all -- these
-        endpoints sometimes answer with a binary/compressed body and no
-        charset, which killed a chapter outright. The shards are the plugin's
-        own encoded payload, so latin-1 is the lossless byte-preserving
-        fallback: it never raises, and the Lua side works on the bytes.
-        """
-        raw = response.content
-        if not raw:
-            return ""
-        charset = None
-        try:
-            charset = response.encoding
-        except Exception:
-            charset = None
-        for candidate in (charset, "utf-8"):
-            if not candidate:
-                continue
-            try:
-                return raw.decode(candidate)
-            except (UnicodeDecodeError, LookupError):
-                continue
-        return raw.decode("latin-1")
+        # 分片必须按原始字节直通 Lua：每个分片响应开头自带 32 位 MD5，Lua 侧
+        # 核对的是"收到的密文"。旧实现把响应解码成 str（非 UTF-8 响应走
+        # latin-1 兜底）再 .encode() 传回——latin-1→utf-8 往返会改掉所有
+        # >=0x80 的字节，MD5 必挂且 4 次重试全败（外部用户实测 UID 90 4/4
+        # 失败、相邻 154 章全过的机制）。lupa 在 encoding=None 下原生接受
+        # bytes，密文字节一个都不动。
+        return response.content or b""
 
     def chapter_html(self, book: dict[str, Any], chapter: dict[str, Any]) -> tuple[str, str]:
         # Retry checksum mismatches and transport faults, and refetch the whole
@@ -791,14 +769,13 @@ class WeRead:
     def _chapter_html_once(self, book: dict[str, Any], chapter: dict[str, Any]) -> tuple[str, str]:
         state = self.reader_state(book, str(chapter["chapterUid"]))
         e0 = self.chapter_shard(book, chapter, state["psvts"], "/web/book/chapter/e_0")
-        if e0.startswith("{") and '"bookId"' in e0:
+        if e0.startswith(b"{") and b'"bookId"' in e0:
             t0 = self.chapter_shard(book, chapter, state["psvts"], "/web/book/chapter/t_0")
             try:
                 t1 = self.chapter_shard(book, chapter, state["psvts"], "/web/book/chapter/t_1")
             except requests.RequestException:
-                t1 = ""
-            plain = py_value(self.lua.globals()[b"_EXPORT"][b"decode_shards"](
-                t0.encode(), t1.encode(), b""))
+                t1 = b""
+            plain = py_value(self.lua.globals()[b"_EXPORT"][b"decode_shards"](t0, t1, b""))
             # decode_shards answers with a string for real text, but on some
             # catalogue entries it hands back a Lua table, and calling
             # .encode() on that raised "TypeError: data must be str, not
@@ -817,8 +794,7 @@ class WeRead:
         e3 = self.chapter_shard(book, chapter, state["psvts"], "/web/book/chapter/e_3")
         if len(e0) + len(e1) + len(e3) > CHAPTER_HTML_LIMIT * 4:
             raise RuntimeError("Encoded chapter exceeds safety limit")
-        xhtml = py_value(self.lua.globals()[b"_EXPORT"][b"decode_shards"](
-            e0.encode(), e1.encode(), e3.encode()))
+        xhtml = py_value(self.lua.globals()[b"_EXPORT"][b"decode_shards"](e0, e1, e3))
         # Some catalogue items decode to plain text without XHTML wrappers.
         # Match the installed plugin's text-to-XHTML normalization.
         xhtml = normalize_chapter_xhtml(xhtml, self.lua)
@@ -829,7 +805,7 @@ class WeRead:
             css_state = self.reader_state(book, str(chapter["chapterUid"]))
             shard = self.chapter_shard(book, chapter, css_state["psvts"],
                                        "/web/book/chapter/e_2")
-            decoded = py_value(self.lua.globals()[b"_EXPORT"][b"decode_shard"](shard.encode()))
+            decoded = py_value(self.lua.globals()[b"_EXPORT"][b"decode_shard"](shard))
             # decode_shard can also answer with several Lua values, which lupa
             # hands back as a tuple; .encode() on that is an AttributeError
             # rather than a decode failure.
