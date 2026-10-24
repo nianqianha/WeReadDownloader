@@ -2116,7 +2116,14 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         # same HTML, with no second network call.
         underline_audit = summarize_underline_audit(worker_lua, raw_xhtml, underlines,
                                                     reviews, book_id, chapter["chapterUid"])
-        chapter_css = py_value(annotation_css) or chapter_css or ""
+        # 书籍样式表（_chapter_html_once 恢复出来的）与划线/想法的注入样式都要
+        # 进 EPUB。旧写法 `annotation_css or chapter_css` 在注入样式非空时整体
+        # 覆盖——那是在书籍样式表被 tuple bug 清空的年代写的兜底，书籍样式修
+        # 回来后它会把样式再次丢掉。拼接后交给 style.css 的去重合并（各章相同
+        # 则只落一份）。
+        book_css = chapter_css
+        annotation_text = py_value(annotation_css) or ""
+        chapter_css = "\n".join(part for part in (book_css, annotation_text) if part)
         underline_rows = underlines.get("underlines", [])
         expected_ranges = len({str(row.get("range")) for row in underline_rows if row.get("range")})
         # Measure what actually landed, by identity rather than by arithmetic.
