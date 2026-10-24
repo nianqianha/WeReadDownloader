@@ -253,6 +253,11 @@ WeReadWorker.exe (CLI 引擎)
   EPUB 只剩全局 style.css，排版降级且无任何提示。
 - **修复**：元组恢复分支把 bytes 严格按 UTF-8 解码后再挑非空项；解不开的垃圾
   数据跳过、不当作样式（`b"\xff\xfe\x00"` 用例守住这条）。
+- **连带修掉第二层覆盖**：`download_one` 里 `chapter_css = annotation_css or
+  chapter_css` 是 tuple bug 年代的兜底（书籍样式一直是空，注入样式顶上才有划线
+  样式）；书籍样式修回来后这行会把刚恢复的样式再次覆盖。现改为书籍样式与注入
+  样式**拼接**后交给 style.css 去重合并。新增 `tests/test_css_merge.py` 3 个
+  集成用例（两者同进 / 纯正文档也有书籍样式 / 书籍样式为空时注入样式兜底）。
 - **验证**：用真实凭证直接调引擎确认数据形态；`tests/test_weread_accessories.py`
   新增 2 个用例（bytes 元组恢复成功 / 纯垃圾 bytes 仍降级），17 个全过。
 - 外部用户日志（康熙的红票，1.0.4）由此发现；该用户另见 591 次 note.png 404
