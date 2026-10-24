@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-REPO = Path(r"C:\Users\asus\Desktop\各类\Kindle\05_补丁与其他\桌面端WeRead下载器")
+REPO = Path(__file__).resolve().parents[1]
 EXE = REPO / "release-fresh" / "WeReadDesktop" / "WeReadDesktop.exe"
 WIZARD_MARK = "首次运行"
 

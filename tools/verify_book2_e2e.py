@@ -15,14 +15,16 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-HERE = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location("desktop_app", HERE / "desktop_app.py")
+SRC = Path(__file__).resolve().parents[1] / "weread"
+spec = importlib.util.spec_from_file_location("desktop_app", SRC / "desktop_app.py")
 app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
 
 import customtkinter as ctk
 
-WORKER = Path(r"C:\Users\asus\Desktop\WeReadWorker\WeReadWorker.exe")
+WORKER = Path(os.environ.get(
+    "WEREAD_WORKER",
+    r"C:\Program Files\WeReadDownloader\WeReadWorker\WeReadWorker.exe"))
 FAILURES = []
 
 

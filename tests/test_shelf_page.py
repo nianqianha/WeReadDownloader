@@ -83,6 +83,39 @@ def test_the_shelf_page_shows_the_accounts_books():
         root.destroy()
 
 
+@test
+def test_shelf_covers_survive_redraw_and_resize():
+    """重绘（最大化/还原）后已缓存的封面必须回到 canvas 上。
+
+    搜索结果列表在 #68 修过同一个问题；书架列表当时漏了：set_cover 只画一次，
+    redraw 删掉所有 item 之后就再也不补，拖一下窗口封面全没。
+    """
+    root, inst = _make_instance()
+    try:
+        inst.load_shelf = lambda: None
+        inst._switch_page("我的书架")
+        root.update()
+        inst._show_shelf(inst._parse_shelf(SHELF_LINE))
+        root.update()
+        shelf = inst.shelf_frame
+        photo = app.tk.PhotoImage(master=root, width=36, height=46)
+        shelf.set_cover("19398284", photo)
+        root.update()
+        before = [i for i in shelf.canvas.find_all() if shelf.canvas.type(i) == "image"]
+        assert len(before) == 1, before
+        shelf.redraw()
+        root.update()
+        after = [i for i in shelf.canvas.find_all() if shelf.canvas.type(i) == "image"]
+        assert len(after) == 1, "cover disappeared after redraw"
+        # 失败/无封面时不能留旧图，占位文字要回来。
+        shelf.set_cover("19398284", None)
+        root.update()
+        assert not [i for i in shelf.canvas.find_all() if shelf.canvas.type(i) == "image"]
+        assert shelf.canvas.itemcget(shelf.items["19398284"]["cover_text"], "text") == "暂无封面"
+    finally:
+        root.destroy()
+
+
 def _walk(w):
     out = []
     for c in w.winfo_children():

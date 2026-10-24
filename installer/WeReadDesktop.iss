@@ -143,3 +143,8 @@ Type: filesandordirs; Name: "{app}\WeReadWorker"
 ; WeReadDownloader。留着旧目录会让人以为还装着另一个版本，所以升级时清掉它。
 ; 只删程序目录，不动 %LOCALAPPDATA%\WeReadDesktop（那是用户的导出与凭证）。
 Type: filesandordirs; Name: "{autopf}\WeReadDesktop"
+; 升级时先清空两个 bundle 目录，再整体复制。Inno 只会覆盖同名文件，旧版本里有、
+; 新版本里没有的文件（实测：旧插件目录残留 .git/199 个文件、tests/__pycache__）
+; 会一直留在用户机器上，越升越多。用户数据不在 {app}，删这两个目录是安全的。
+Type: filesandordirs; Name: "{app}\WeReadDesktop"
+Type: filesandordirs; Name: "{app}\WeReadWorker"

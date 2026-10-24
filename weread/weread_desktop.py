@@ -2464,9 +2464,15 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             cover_path = None
     epub_path = package_dir / (stem + ".epub")
     if want_thoughts and any(fetch_failures.values()) and (package_dir / "manifest.json").is_file():
-        previous = json.loads((package_dir / "manifest.json").read_text(encoding="utf-8")).get("omissions", {})
+        previous_manifest = json.loads((package_dir / "manifest.json").read_text(encoding="utf-8"))
+        previous = previous_manifest.get("omissions", {})
+        # epub 在 manifest 顶层，不在 omissions 里。
+        previous_epub = package_dir / str(previous_manifest.get("epub") or "")
         if (previous.get("text_complete") and previous.get("thoughts_requested")
-                and not any(previous.get("annotation_fetch_failures", {}).values())):
+                and not any(previous.get("annotation_fetch_failures", {}).values())
+                # manifest 在、EPUB 被用户删掉时不能声称“保留了旧成品”：那种情况
+                # 下拒绝写新书会让用户一本都拿不到。
+                and previous_epub.is_file()):
             export_lock.unlink(missing_ok=True)
             raise RuntimeError("Annotation requests failed; preserved the previous complete export. Retry to fetch failed chapters.")
     # reviews.jsonl 先汇总落盘：统一附录（下面）与 KOReader bundle（后面）都以它

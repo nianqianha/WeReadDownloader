@@ -927,6 +927,10 @@ class _ShelfCanvas(ctk.CTkFrame):
         self.items[bid] = {"cover_bg": cover_bg, "cover_text": cover_text,
                            "title": title, "meta": meta_item, "button": (bx0, by0, bx1, by1),
                            "button_ids": [i for i in canvas.find_withtag("dl:%s" % bid)]}
+        # 重绘（resize/maximize）会删掉所有 canvas item；已缓存封面必须在这里补回，
+        # 否则书架页一拖窗口封面就全没了（搜索结果列表已在 #68 修过同样的坑）。
+        if bid in self._photos:
+            self.set_cover(bid, self._photos[bid])
 
     def _on_click(self, event):
         y = self.canvas.canvasy(event.y)
@@ -946,12 +950,17 @@ class _ShelfCanvas(ctk.CTkFrame):
         entry = self.items.get(book_id)
         if entry is None:
             return
-        if photo is None:
-            return
         self._photos[book_id] = photo
+        previous = entry.pop("cover_image", None)
+        if previous is not None:
+            self.canvas.delete(previous)
+        if photo is None:
+            self.canvas.itemconfigure(entry["cover_text"], text="暂无封面")
+            return
         x0, y0, _x1, _y1 = self.canvas.coords(entry["cover_bg"])
-        self.canvas.create_image(x0, y0, anchor="nw", image=photo,
-                                 tags=("shelf:%s" % book_id,))
+        entry["cover_image"] = self.canvas.create_image(
+            x0, y0, anchor="nw", image=photo, tags=("shelf:%s" % book_id,))
+        self.canvas.itemconfigure(entry["cover_text"], text="")
 
 
 class DesktopApp:
@@ -3043,6 +3052,8 @@ class DesktopApp:
                     self._handle_done(*value)
                 elif kind == "update-failed":
                     self._on_update_failed(*value)
+                elif kind == "update":
+                    self._handle_update(*value)
                 else:
                     self._handle_line(value)
         finally:
@@ -3208,6 +3219,9 @@ class DesktopApp:
         self._set_busy_controls(False)
         self.pause_button.configure(state="disabled")
         self.annotations_box.configure(state="readonly")
+        # 暂停提示要在 finally 的详情补载之后重新落一次：补载会写“正在加载书籍详情…”，
+        # 把“队列已暂停”覆盖掉，用户就看不到队列停在哪本。
+        pause_note = None
         try:
             if self.last_failure:
                 self._finish_failed_action(action)
@@ -3284,9 +3298,10 @@ class DesktopApp:
                 if self._pause_requested:
                     # 用户按了暂停：把刚停下的这本插回队首，队列原地不动。
                     self._pause_queue()
-                    self.status.set("队列已暂停：《%s》停在已下载的章节，队列还剩 %d 本。"
-                                    "点「继续队列」接着跑。"
-                                    % (label, len(self.download_queue)))
+                    pause_note = ("队列已暂停：《%s》停在已下载的章节，队列还剩 %d 本。"
+                                  "点「继续队列」接着跑。"
+                                  % (label, len(self.download_queue)))
+                    self.status.set(pause_note)
                 else:
                     success = code == 0 and not self.last_failure and not self.last_unresolved
                     reason = "" if success else (
@@ -3327,6 +3342,8 @@ class DesktopApp:
             if action == "export":
                 self._pause_requested = False
             self._flush_pending_book()
+            if pause_note:
+                self.status.set(pause_note)
             if self.queue_paused and not self._is_busy():
                 self.pause_button.configure(text="继续队列", state="normal")
 
@@ -4481,12 +4498,23 @@ class DesktopApp:
     def _check_for_update(self, silent: bool = False) -> None:
         """查 GitHub Releases 是否有新版本。
 
-        silent=True 用于启动后静默检查：无网络/无新版本时一律不打扰用户。
+        网络请求放到后台线程：这条路径既被「检查更新」按钮调用，也会在启动时
+        自动跑一次。以前在 Tk 线程里同步请求（超时 8s），点一下就把窗口卡住；
+        启动时的旧实现在线程里跑完整流程，命中新版本时会从非 Tk 线程弹模态框。
+        现在线程只负责取数据，结果经 events 回到主线程，由 _handle_update 处理。
         """
+        threading.Thread(target=self._fetch_update, args=(silent,), daemon=True).start()
+
+    def _fetch_update(self, silent: bool) -> None:
+        """Runs off the Tk thread; the UI decision happens in _handle_update."""
         try:
             latest = _updater.fetch_latest()
         except Exception:
             latest = None
+        self.events.put(("update", (silent, latest)))
+
+    def _handle_update(self, silent: bool, latest) -> None:
+        """On the Tk thread: decide whether to tell the user about a release."""
         if not isinstance(latest, dict) or not latest.get("version"):
             if not silent:
                 self.status.set("无法检查更新，请检查网络后重试。")
@@ -4797,9 +4825,9 @@ def main() -> int:
         print("[SERVICE] warm-up failed: %s: %s" % (type(exc).__name__, exc),
               file=sys.stderr)
     # 启动后静默查一次更新：无网络/无新版本一律不打扰；发现新版本且非忙才弹提示。
+    # _check_for_update 自己起后台线程，结果经 events 回到 Tk 线程再弹窗。
     try:
-        threading.Thread(target=lambda: app._check_for_update(silent=True),
-                         daemon=True).start()
+        app._check_for_update(silent=True)
     except Exception as exc:
         print("[SELF_UPDATE] startup check failed: %s: %s"
               % (type(exc).__name__, exc), file=sys.stderr)
