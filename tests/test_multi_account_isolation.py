@@ -537,6 +537,23 @@ def test_installer_closes_the_running_apps() -> None:
         % (SINGLE_INSTANCE_KEY, sorted(listed)))
 
 
+def test_installer_purges_stale_bundles_on_upgrade() -> None:
+    """升级时必须先清空 {app} 下两个 bundle 目录，否则旧文件会越积越多。
+
+    实测 1.0.4 -> 1.0.5 覆盖安装后，worker 的插件目录残留 330 个文件（新构建
+    只有 122 个），包括旧版本的 .git 和 tests/__pycache__：Inno 只覆盖同名文件。
+    """
+    from pathlib import Path
+
+    iss = Path(__file__).resolve().parent.parent / "installer" / "WeReadDesktop.iss"
+    text = iss.read_text(encoding="utf-8", errors="replace")
+    section = text.split("[InstallDelete]", 1)[1].split("\n[", 1)[0]
+    for target in (r"{app}\WeReadDesktop", r"{app}\WeReadWorker"):
+        assert 'Name: "%s"' % target in section, (
+            "InstallDelete must purge %s so an upgrade cannot keep files the new "
+            "build no longer ships" % target)
+
+
 # -----------------------------------------------------------------------------
 # INTEGRATION / STRESS TESTS
 # -----------------------------------------------------------------------------

@@ -98,6 +98,8 @@ def test_common_errors_are_translated_to_actionable_chinese():
         "RuntimeError: Annotation requests failed; preserved the previous complete export. "
         "Retry to fetch failed chapters.")
     assert "完整成品" in preserved and "重取" in preserved
+    assert "凭证文件格式异常" in app.friendly_error(
+        "RuntimeError: Credential file has an unexpected format")
 
 
 def test_book_details_are_safe_to_display_when_optional_fields_are_missing():

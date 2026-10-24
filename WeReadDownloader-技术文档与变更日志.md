@@ -243,6 +243,46 @@ WeReadWorker.exe (CLI 引擎)
 
 ## 四、变更日志（Keep a Changelog 格式）
 
+### 2026-10-24 全项目复查后的修复批次（**Fixed**）
+
+**Fixed（用户可见）**
+
+- **书架封面**：`_ShelfCanvas` 加 `cover_image` 记录与 `_draw_row` 回放；最大化/还原/拖窗口
+  触发 redraw 后封面不再消失，失败时显示「暂无封面」。搜索结果列表的同类问题在 #68 已修，
+  书架当时漏了。新增 `test_shelf_covers_survive_redraw_and_resize`。
+- **更新检查的线程**：`_check_for_update` 现在只负责起后台线程取 release，
+  结果经 `events` 回 Tk 线程由 `_handle_update` 处理。旧实现有两条问题：手动「检查更新」
+  在 Tk 线程同步请求（最多卡 8 秒）；启动时的静默检查在后台线程里直接弹模态框
+  （实测 `_offer_update` 运行在 Thread-1）。启动入口不再额外包一层线程。
+  测试改为分别覆盖 `_fetch_update`/`_handle_update`，并断言 `_check_for_update` 不碰 UI。
+- **凭证损坏提示**：`Credential file has an unexpected format` 进入 `ERRORS_ZH`，
+  不再落到「操作没有完成」的兜底文案。
+
+**Fixed（队列与导出边界）**
+
+- **暂停提示**：`_handle_done` 的 finally 会补载排队中的详情，原来会把「队列已暂停」
+  覆盖成「正在加载书籍详情…」。现在暂停提示在补载之后重新落一次。
+- **保留旧成品**：中止条件补上「旧 EPUB 仍然存在」。此前只看 `manifest.json`，
+  用户删掉 EPUB 但留下 manifest 时会拒绝生成新书、一本都拿不到。顺带修正：
+  `epub` 字段在 manifest 顶层而不是 `omissions` 里。
+
+**Fixed（发布与维护工具）**
+
+- `tools/verify_no_credentials.py`：默认目录从已删除的 `release-qrlogin` 改为
+  `release-fresh`，支持命令行传目录；目录不存在直接退出 2，不再「扫 0 个文件报 CLEAN」。
+  新增三条子进程测试。
+- 安装器 `[InstallDelete]` 增加 `{app}\WeReadDesktop`、`{app}\WeReadWorker`：
+  升级前先清空 bundle，避免旧版本才有的文件（实测旧插件目录残留 `.git` 199 个文件、
+  `tests/__pycache__`）在用户机器上越积越多。新增 iss 文本断言。
+- 修正仓库搬迁后失效的硬编码路径：`tools/verify_wizard_runtime.py`（改由 `__file__` 推导）、
+  `tools/verify_book2_e2e.py`（worker 走 `WEREAD_WORKER` 或安装目录；`desktop_app.py`
+  路径也修正）、`installer/drive.py`（`WeReadDownloader-Setup.exe`）、
+  `tests/test_worker_package_parity.py` 与两个 bundle 测试（插件目录支持
+  `WEREAD_KINDLE_ROOT`）。
+- 未发布的 `weread-importer.koplugin` 源码从 `release-fresh/` 移到 `plugins/`，
+  构建目录不再跟踪源码；`plugins/README.md` 说明其状态。
+- CI 注释改正：tests 与 privacy gate 都拦合并（与 ruleset 一致），测试数更新为 479。
+
 ### 2026-10-23 合并协作者 Wu-Wh0 的 11 个修复 PR + 两处收尾（**Fixed**）
 
 **Fixed（队列 / 标注 / 界面）**
