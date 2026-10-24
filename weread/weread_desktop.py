@@ -761,7 +761,11 @@ class WeRead:
                             f"Chapter UID {chapter['chapterUid']} shard MD5 mismatch after 4 full fetch attempts"
                         ) from exc
                     raise
-                delay = 0.5 * (attempt + 1)
+                # 旧节奏 0.5/1.0/1.5s 的实测教训（外部用户 + 本机后汉书）：
+                # MD5 失败的章都是连号聚集（22/23/24、42/43、89/90/91）——坏窗口
+                # 持续时间超过整个重试跨度，3 次重试全落在同一个坏窗口里，注定
+                # 全败。改为 2/8/20s 指数退避，让单章重试跨过约半分钟的坏窗口。
+                delay = (2.0, 8.0, 20.0)[attempt]
                 label = "shard checksum mismatch" if checksum else type(exc).__name__
                 print(f"[RETRY] UID {chapter['chapterUid']} {label}; retry {attempt + 1}/3 in {delay:.1f}s", file=sys.stderr, flush=True)
                 time.sleep(delay)
