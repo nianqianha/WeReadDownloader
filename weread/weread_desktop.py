@@ -854,7 +854,20 @@ class WeRead:
         if not isinstance(css, str):
             recovered = ""
             if isinstance(css, (tuple, list)):
-                recovered = next((item for item in css
+                # lua_runtime 用 encoding=None：Lua 字符串一律以 bytes 回来。
+                # 实测 sanitize_book_css 返回 (b'.frontCover{...}', 0)，而旧的
+                # 恢复只认 str，导致每章的书内样式被整段静默丢弃（每章日志
+                # 一条 "[CSS] ... decoded to tuple"）。bytes 严格按 UTF-8 解码
+                # 后再挑——解不开的是垃圾数据，不能当样式用。
+                texts = []
+                for item in css:
+                    if isinstance(item, bytes):
+                        try:
+                            item = item.decode("utf-8")
+                        except UnicodeDecodeError:
+                            continue
+                    texts.append(item)
+                recovered = next((item for item in texts
                                   if isinstance(item, str) and item.strip()), "")
             if recovered:
                 print(f"[CSS] chapter {chapter['chapterUid']} stylesheet arrived as "

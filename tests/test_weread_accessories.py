@@ -296,6 +296,29 @@ def test_a_tuple_with_no_usable_string_still_degrades_to_no_css():
 
 
 @test
+def test_a_bytes_first_element_is_decoded_not_dropped():
+    """实测形态（2026-10-24）：sanitize_book_css 返回 (b'.frontCover{...}', 0)。
+
+    lua_runtime 用 encoding=None，Lua 字符串一律按 bytes 回来；单值路径都有
+    bytes 解码，唯独这个元组恢复只认 str——于是每章的书内样式被整段静默
+    丢弃（每章日志一条 "[CSS] ... decoded to tuple"，所有书都命中）。
+    """
+    css_text = ".frontCover {\r\n    qrfullpage: 1;\r\n}"
+    api = _CssApi("p{color:red}", (css_text.encode("utf-8"), 0))
+    xhtml, css = _fetch_css(api)
+    assert css == css_text, repr(css)[:200]
+    assert "<body" in xhtml, xhtml
+
+
+@test
+def test_a_bytes_tuple_with_no_text_still_degrades():
+    api = _CssApi("p{color:red}", (b"\xff\xfe\x00", 0))
+    xhtml, css = _fetch_css(api)
+    assert css == "", css
+    assert "<body" in xhtml, xhtml
+
+
+@test
 def test_a_tuple_from_the_shard_decoder_also_degrades():
     """decode_shard returning several values must not raise on .encode()."""
     api = _CssApi(("raw", "extra"), "")

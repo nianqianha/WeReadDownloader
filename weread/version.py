@@ -8,4 +8,4 @@ tools/sync_version.py 在打包前从这里同步，避免两处版本号打架�
 
 发版时：只改 APP_VERSION 这一处，再跑 `python tools/sync_version.py`。
 """
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
