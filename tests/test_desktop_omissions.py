@@ -170,6 +170,7 @@ def test_the_report_line_is_logged_exactly_once():
     try:
         line = "OMISSIONS " + json.dumps(_report(images_dropped=100))
         instance._handle_line(line)
+        app._LOG_WRITER.flush()   # 日志走后台线程；断言前等队列清空
         text = "\n".join(p.read_text(encoding="utf-8")
                          for p in app.LOG_DIR.glob("*.log"))
         assert text.count(line) == 1, text.count(line)

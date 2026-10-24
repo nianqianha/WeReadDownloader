@@ -26,7 +26,7 @@ def _plugin_dir():
     env_root = os.environ.get("WEREAD_KINDLE_ROOT")
     if env_root:
         roots.append(Path(env_root))
-    roots.append(PROJ.parent)
+    roots.append(PROJ.parent / "Kindle")
     for root in roots:
         candidate = root / "03_插件源码与解压文件" / "weread.koplugin"
         if candidate.is_dir():
