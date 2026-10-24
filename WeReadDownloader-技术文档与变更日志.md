@@ -243,6 +243,29 @@ WeReadWorker.exe (CLI 引擎)
 
 ## 四、变更日志（Keep a Changelog 格式）
 
+### 2026-10-24 v1.0.8：插图包 4xx 降级，一书不再卡死在两张插图上（**Fixed**）
+
+- **现象**（外部用户日志，后汉书 3300228183，D 盘安装的 1.0.5/1.0.6）：第 72、120
+  两章的插图包 `res.weread.qq.com/wrco/tar_CB_<book>_<uid>` 每次都返回
+  **HTTP 499 "ERR"**，正文解码成功但 `extract_images` 在 `raise_for_status()`
+  炸掉整章 → 两章 INCOMPLETE → 拒绝出版 EPUB。两次「继续下载」同样失败，
+  书永远卡在"2 章未解决"。
+- **根因**：`extract_images` 只把 403/404/410 当"插图包没了"降级，499 不在
+  名单里。而插图包只是附件——正文已经解码成功。
+- **修复（三层）**：
+  1. `extract_images` 对**任何 4xx** 降级：保住正文，返回 `archive:` 标记；
+     5xx 仍抛出（瞬时故障，重试可能恢复）。
+  2. `download_one` 检测到 `archive:` 标记后摘除本章解析不到的 `<img>` 引用
+     （新增 `_drop_unresolved_images`），并按摘除张数如实计入 `dropped_image_urls`
+     （每张一条 `archive:<tar url>`）。
+  3. `omissions` 新增 `chapters_with_missing_archive`；`reason_images` 补充
+     插图包不可用的措辞；完成提示单独一句话（"另有 N 章的插图包无法下载……
+     正文不受影响"），不与"微信读书已删除原图"混在一起。
+- **测试**：`tests/test_weread_images.py` 新增 3 个用例（403/404/410/499 全降级、
+  5xx 仍抛出、摘图计数），`tests/test_desktop_omissions.py` 新增 GUI 措辞用例。
+  全量 508 passed / 31 skipped。
+- 版本号 1.0.7 → **1.0.8**。
+
 ### 2026-10-24 v1.0.7：修复每章样式表被静默丢弃（**Fixed**）
 
 - **根因**：`lua_runtime` 用 `encoding=None` 创建，Lua 字符串一律以 bytes 回来。
