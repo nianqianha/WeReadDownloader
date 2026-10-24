@@ -29,7 +29,7 @@ def _plugin_source() -> Path:
     env_root = os.environ.get("WEREAD_KINDLE_ROOT")
     if env_root:
         roots.append(Path(env_root))
-    roots.append(PROJECT.parent)
+    roots.append(PROJECT.parent / "Kindle")
     for root in roots:
         candidate = (root / "03_插件源码与解压文件" / "weread.koplugin"
                      / "weread" / "lib" / "annotation_source.lua")

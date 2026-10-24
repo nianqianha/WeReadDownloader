@@ -86,6 +86,7 @@ def _write_credentials(name="钦小糖"):
 
 
 def _logs():
+    app._LOG_WRITER.flush()   # 日志走后台线程；断言前等队列清空
     return "\n".join(
         path.read_text(encoding="utf-8")
         for path in sorted(app.LOG_DIR.glob("*.log"))

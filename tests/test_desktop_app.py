@@ -41,6 +41,7 @@ def _log_text(instance=None) -> str:
     "查看技术日志" button -- so the log file is the single sink and the thing
     to assert against.
     """
+    app._LOG_WRITER.flush()   # 日志走后台线程；断言前等队列清空
     parts = []
     for path in sorted(app.LOG_DIR.glob("*.log")):
         try:
