@@ -296,3 +296,59 @@ if __name__ == "__main__":
     for test_case in ALL_TESTS:
         test_case()
         print("PASS", test_case.__name__)
+
+
+# -------------------------------------------------------------- 插图包整包 4xx 降级
+@test
+def test_an_image_archive_4xx_degrades_instead_of_failing_the_chapter():
+    """实测（后汉书 3300228183 UID 72/120）：插图包 tar 每次都 499"ERR"。
+
+    旧行为只有 403/404/410 降级，499 走 raise_for_status 炸掉整章 → 两章
+    INCOMPLETE → 拒绝出版，一本书卡死在两张插图上。现在任何 4xx 都降级：
+    保住正文，返回 archive: 标记供缺失说明统计。
+    """
+    import tempfile
+    chapter = {"chapterUid": 72, "tar": "/wrco/tar_CB_3300228183_72"}
+    expected = "archive:" + wd.urljoin(wd.WEB + "/", chapter["tar"])
+    for status in (403, 404, 410, 499):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_map, dropped = wd.extract_images(
+                chapter, _Session(status), "https://weread.qq.com/reader/x",
+                root, set())
+            assert image_map == {}, (status, image_map)
+            assert dropped == [expected], (status, dropped)
+
+
+@test
+def test_an_image_archive_5xx_still_raises_for_retry():
+    """5xx 是服务端瞬时故障：照旧抛出，让重试机制有机会恢复。"""
+    import tempfile
+    chapter = {"chapterUid": 72, "tar": "/wrco/tar_CB_x_72"}
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            wd.extract_images(chapter, _Session(500), "https://weread.qq.com/reader/x",
+                              Path(tmp), set())
+        except requests.HTTPError:
+            return
+        raise AssertionError("HTTP 500 archive failure was swallowed")
+
+
+@test
+def test_unresolved_image_references_are_stripped_and_counted():
+    """插图包不可用时，本章 <img> 引用的是包内文件名——必须摘除并计数，
+    否则 EPUB 里全是坏图。远程 URL 与空 src 不动。"""
+    xhtml = ('<html><body>'
+             '<p>正文。</p>'
+             '<img src="tar-only-1.png"/>'
+             '<img src="tar-only-2.png"/>'
+             '<img src="https://weread.qq.com/kept.png"/>'
+             '<img src=""/>'
+             '</body></html>')
+    mapping = {"kept.png": "../images/kept.png"}
+    out, removed = wd._drop_unresolved_images(xhtml, mapping)
+    assert removed == 2, removed
+    assert "tar-only" not in out, out
+    assert "kept.png" in out and 'src="https://weread.qq.com/kept.png"' in out, out
+    # 空 src 留给 _strip_blank_images，不计数
+    assert 'src=""' in out, out

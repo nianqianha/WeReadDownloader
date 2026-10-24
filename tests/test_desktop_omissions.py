@@ -246,3 +246,18 @@ if __name__ == "__main__":
     for test_case in ALL_TESTS:
         test_case()
         print("PASS", test_case.__name__)
+
+
+@test
+def test_missing_image_archive_gets_its_own_sentence():
+    """插图包整包 4xx 降级后，说明里要单独交代，不能混进「微信读书已删除原图」。"""
+    report = _report(images_dropped=3, chapters_with_dropped_images=1,
+                     dropped_image_examples=["archive:https://res.weread.qq.com/wrco/tar_CB_x_72"])
+    report["chapters_with_missing_archive"] = 1
+    notice = app.describe_omissions(report)
+    assert "1 章的插图包无法下载" in notice, notice
+    assert "正文不受影响" in notice
+    compact = app.describe_omissions(report, compact=True)
+    assert "插图包无法下载" in compact, compact
+    report["chapters_with_missing_archive"] = 0
+    assert "插图包无法下载" not in app.describe_omissions(report)

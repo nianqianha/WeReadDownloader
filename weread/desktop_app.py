@@ -400,6 +400,12 @@ def describe_omissions(report, compact: bool = False) -> str:
         location = "注文已收在书末附录。" if report.get("notes_in_appendix") else "注文的可读性需在阅读器中确认。"
         paragraphs.append("注角标图标 %d 处无法取回（每章一个 note.png）；%s" % (markers, location))
         shorts.append("%d 处注角标图标无法取回" % markers)
+    archive_chapters = int(report.get("chapters_with_missing_archive") or 0)
+    if archive_chapters:
+        paragraphs.append("另有 %d 章的插图包无法下载（微信读书接口返回错误），"
+                          "该章插图未收录；正文不受影响。删除该书后重新下载可再试。"
+                          % archive_chapters)
+        shorts.append("%d 章插图包无法下载" % archive_chapters)
     fetch_failures = report.get("annotation_fetch_failures") or {}
     if any(fetch_failures.values()):
         count = int(report.get("chapters_with_annotation_fetch_failures") or 0)
@@ -984,12 +990,18 @@ class _LogWriter:
         self._ensure()
         self._queue.put((book_id or "general", text))
 
-    def flush(self, timeout: float = 5.0) -> None:
-        """等队列里**已入队**的行全部落盘。不会终止线程。"""
+    def flush(self, timeout: float = 30.0) -> None:
+        """等队列里**已入队**的行全部落盘。不会终止线程。
+
+        写线程可能正卡在上一批的长写盘上（CI 磁盘慢时实测 >5 秒），单个哨兵
+        等不到就返回会让调用方读到旧文件——所以循环发哨兵直到截止时间。"""
         self._ensure()
-        done = threading.Event()
-        self._queue.put((None, done))
-        done.wait(timeout)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            done = threading.Event()
+            self._queue.put((None, done))
+            if done.wait(timeout=min(1.0, deadline - time.monotonic()) or 0.01):
+                return
 
     def _ensure(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -1018,8 +1030,13 @@ class _LogWriter:
                         done_events.append(payload)
                     continue
                 files.setdefault(book_id, []).append(payload)
-            for book_id, lines in files.items():
-                self._write_file(book_id, lines)
+            try:
+                for book_id, lines in files.items():
+                    self._write_file(book_id, lines)
+            except Exception:
+                # 写线程绝不能死：线程一死，队列里的行（含 flush 哨兵）永远
+                # 没人处理，所有等待方全部超时，日志从此静默丢失。
+                pass
             for event in done_events:
                 event.set()
 

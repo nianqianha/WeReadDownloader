@@ -22,7 +22,7 @@
 ; 而且因为 weread/ 不是包、相对导入被 except 吞掉，first_run 模块根本没被打进
 ; 包。结果是全新安装后程序只报 "Credential file not found" 而没有出路。
 ; 1.0.4 删掉组件选择界面与网页版：见文件头设计要点。
-#define MyAppVersion "1.0.7"
+#define MyAppVersion "1.0.8"
 #define MyAppPublisher "Kindle 桌面端项目"
 
 [Setup]
