@@ -99,3 +99,26 @@ def test_failed_retry_preserves_previous_complete_product():
         assert case.fetched == ["1"]
     finally:
         case.doCleanups()
+
+
+def test_deleted_previous_epub_is_not_treated_as_preserved():
+    """manifest 还在、EPUB 被删时，不能以“保留旧成品”为由拒绝生成新书。"""
+    case = checkpoints.CheckpointModesTests()
+    case.setUp()
+    try:
+        case.export(True, True)
+        folder = case.output / "Synthetic book-123"
+        epub = next(folder.glob("*.epub"))
+        epub.unlink()
+        (case.workspace / "chapter-uid-1.body").write_text("", encoding="utf-8")
+        api_class = wd.WeRead
+        original = api_class.annotations
+        def failed(self, *args):
+            data, reviews = original(self, *args)
+            data["annotation_fetch_failures"] = {"underlines": 1, "reviews": 0}
+            return data, []
+        with patch.object(api_class, "annotations", failed), contextlib.redirect_stdout(io.StringIO()):
+            product = wd.export_book("123", case.output, {}, jobs=1)
+        assert product.is_file(), "export refused even though the old EPUB was gone"
+    finally:
+        case.doCleanups()

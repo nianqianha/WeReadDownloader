@@ -10,6 +10,7 @@ The stale release-windowed artifact predates the inclusive Source.quote fix; thi
 check prevents shipping a worker whose embedded Lua silently reintroduces the
 one-rune underline offset.
 """
+import os
 from pathlib import Path
 import sys
 
@@ -22,7 +23,22 @@ PLUGIN_RELATIVE = Path(
 )
 # PROJECT is the repository root (各类/weread-downloader since the 2026-10 move);
 # the Lua plugin lives in the SIBLING Kindle tree: 各类/Kindle/03_插件源码与解压文件.
-SOURCE = PROJECT.parent / "Kindle" / "03_插件源码与解压文件" / "weread.koplugin" / "weread" / "lib" / "annotation_source.lua"
+def _plugin_source() -> Path:
+    """WEREAD_KINDLE_ROOT 优先；其次仓库同级的 Kindle 树（2026-10 移动后仍适用）。"""
+    roots = []
+    env_root = os.environ.get("WEREAD_KINDLE_ROOT")
+    if env_root:
+        roots.append(Path(env_root))
+    roots.append(PROJECT.parent)
+    for root in roots:
+        candidate = (root / "03_插件源码与解压文件" / "weread.koplugin"
+                     / "weread" / "lib" / "annotation_source.lua")
+        if candidate.is_file():
+            return candidate
+    return roots[-1] / "03_插件源码与解压文件" / "weread.koplugin" / "weread" / "lib" / "annotation_source.lua"
+
+
+SOURCE = _plugin_source()
 
 
 def check_worker_distribution(dist: Path) -> None:

@@ -122,3 +122,25 @@ def test_pause_keeps_the_running_book_after_browsing_another_one():
     finally:
         app.messagebox.askyesno, app.messagebox.showinfo = original
         root.destroy()
+
+
+def test_pause_message_survives_the_pending_detail_reload():
+    """_handle_done 的 finally 会补载详情；暂停提示不能被“正在加载”覆盖。"""
+    root, instance = _make_gui()
+    original = _mock_dialogs(instance)
+    try:
+        calls = []
+        _spy_start(instance, calls)
+        instance.download_queue = [_row("111", "first"), _row("222", "second")]
+        instance._start_queue()
+        # 下载中浏览了另一本：pending_book 让 finally 去补载详情，状态会被改写。
+        instance._select_book(_row("999", "browsed"), load_info=False)
+        assert instance.pending_book is not None
+        instance._pause_requested = True
+        instance._handle_done(instance.job_seq, 1)
+        status = instance.status.get()
+        assert "队列已暂停" in status and "first" in status, status
+        assert "正在加载" not in status
+    finally:
+        app.messagebox.askyesno, app.messagebox.showinfo = original
+        root.destroy()

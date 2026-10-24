@@ -109,6 +109,11 @@ ERRORS_ZH = (
      "没有找到本机微信读书登录信息。请检查登录配置后重试。"),
     ("Credential file not found",
      "还没有配置微信读书基础凭证。请点顶栏「登录 / 切换账号」完成登录后重试。"),
+    # 1.0.5 起 worker 对畸形 Lua 明确报这句；不映射会落到兜底文案，
+    # 用户看不出是凭证文件坏了。
+    ("unexpected format",
+     "凭证文件格式异常（写入可能被中断）。请点顶栏「登录 / 切换账号」重新登录，"
+     "或用之前的 weread-live-settings.lua 备份恢复。"),
     ("already running",
      "同一本书已有导出任务正在运行；请等待当前任务结束。"),
     ("cannot acquire desktop export lock",

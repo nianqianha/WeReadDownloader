@@ -1,5 +1,6 @@
 """Offline contract tests for the Kindle desktop-bundle importer."""
 import importlib.util
+import os
 import time
 from pathlib import Path
 import sys
@@ -9,7 +10,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "weread"))
 # The plugin tree is a SIBLING of the repo's parent (repo: 各类/weread-downloader,
 # plugin: 各类/Kindle/03_插件源码与解压文件) -- parents[2] from this file since the
 # 2026-10 move; it was parents[3] when the repo sat inside 05_补丁与其他.
-PLUGIN = Path(__file__).resolve().parents[2] / "Kindle" / "03_插件源码与解压文件" / "weread.koplugin"
+def _plugin_dir():
+    """外部 Lua 插件目录：WEREAD_KINDLE_ROOT 优先，其次仓库同级的 Kindle 树。"""
+    roots = []
+    env_root = os.environ.get("WEREAD_KINDLE_ROOT")
+    if env_root:
+        roots.append(Path(env_root))
+    roots.append(Path(__file__).resolve().parents[2])
+    for root in roots:
+        candidate = root / "03_插件源码与解压文件" / "weread.koplugin"
+        if candidate.is_dir():
+            return candidate
+    return roots[-1] / "03_插件源码与解压文件" / "weread.koplugin"
+
+
+PLUGIN = _plugin_dir()
 BUNDLE = PLUGIN / "weread" / "lib" / "desktop_bundle.lua"
 
 # 这个用例读的是仓库外部的 Lua 插件树（它在 Kindle 目录里，不随仓库分发）。缺席时

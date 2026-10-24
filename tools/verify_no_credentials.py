@@ -11,7 +11,13 @@ import sys
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-ROOT = Path("release-qrlogin")
+# 默认检查当前构建目录。以前写死 release-qrlogin —— 那个目录早在 1.0.4 之前就
+# 删了，脚本扫 0 个文件仍然报 CLEAN，等于这道发布门禁从未真正执行过。
+ROOT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("release-fresh")
+if not ROOT.is_dir():
+    print("BUNDLE NOT FOUND:", ROOT)
+    print("  usage: python tools/verify_no_credentials.py [dist-dir]")
+    sys.exit(2)
 
 BANNED_NAMES = ("session-cookies", "weread-live-settings", ".env", "credential")
 print("--- stored credential state in bundle (must be none) ---")

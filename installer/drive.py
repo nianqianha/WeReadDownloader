@@ -16,10 +16,10 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from PIL import Image
 
-SETUP = Path("release-installer/WeReadDesktop-Setup.exe").resolve()
+SETUP = Path("release-installer/WeReadDownloader-Setup.exe").resolve()
 SHOT = Path("installer/shots")
 SHOT.mkdir(parents=True, exist_ok=True)
-PROC_KEY = "WeReadDesktop-Setup"
+PROC_KEY = "WeReadDownloader-Setup"
 BM_CLICK = 0x00F5
 LB_GETCOUNT, LB_GETTEXT, LB_GETCHECKSTATE, LB_SETCHECKSTATE = 0x018B, 0x0189, 0x0190, 0x0191
 PW_RENDERFULLCONTENT = 0x00000002
