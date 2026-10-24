@@ -57,6 +57,8 @@ def _make_gui():
 
 
 def _logs():
+    # 2026-10-24 起日志写盘走后台线程；读之前先等队列清空。
+    app._LOG_WRITER.flush()
     out = []
     for path in sorted(app.LOG_DIR.glob("desktop-*.log")):
         out.append(path.read_text(encoding="utf-8", errors="replace"))
@@ -64,6 +66,7 @@ def _logs():
 
 
 def _clear_logs():
+    app._LOG_WRITER.flush()   # 别让在途的旧行落在清空之后
     for path in app.LOG_DIR.glob("desktop-*.log"):
         path.write_text("", encoding="utf-8")
 

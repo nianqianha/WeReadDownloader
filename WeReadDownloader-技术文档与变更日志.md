@@ -243,6 +243,32 @@ WeReadWorker.exe (CLI 引擎)
 
 ## 四、变更日志（Keep a Changelog 格式）
 
+### 2026-10-24 检查更新多源回退 + 日志写盘异步化（**Fixed**）
+
+**Fixed（检查更新失败）**
+
+- `updater.fetch_latest()` 改为三源依次回退：
+  1. `api.github.com/releases/latest`（信息最全）；
+  2. `github.com/.../releases/latest` 网页 302 → `/tag/vX.Y.Z`，安装包直链按固定资产名拼出；
+  3. `github.com/.../releases.atom`（同样不占 api.github.com 的限额）。
+- 根因：未登录 API 限额只有每小时 60 次/出口 IP，共享网络（含本机）经常 403，
+  界面只会显示「无法检查更新」。网页与 atom 源不受该限额约束；回退源只认
+  整段 `vX.Y.Z` 的 tag（预发布后缀自然跳过），资产直链用 HEAD 探活（仅 404 拒绝）。
+- 实测：本机 API 源 403 时网页源成功返回 `source=web`。
+- 新增 5 个回退测试（`tests/test_updater.py`，共 16 个）。
+
+**Fixed（18 秒界面停顿）**
+
+- 新增 `_LogWriter` 后台写盘线程：`_persist_log` 只入队（微秒级），守护线程
+  批量落盘（每批一次 open/write）。根因：Tk 线程里逐行 open/write，实测被
+  磁盘/杀软卡住 **18 秒**（`desktop-general.log` 的 `[STALL_STACK]`）。
+- `flush()` 供测试与 shutdown 使用；shutdown 时先 flush 再退出，避免丢尾行。
+  LOG_DIR 在写盘时读取模块全局，测试重定向依然生效。
+- 读日志做断言的测试统一在读取前 `flush()`（resume/logout/stall_watch/
+  omissions/desktop_app `_log_text`）；新增 `tests/test_desktop_log_writer.py`
+  4 个用例（保序、分书、脱敏、慢盘不阻塞调用方——其中慢盘用例曾反过来抓到
+  flush 竞态：哨兵事件原来在写盘前就置位，已修）。
+
 ### 2026-10-24 v1.0.6 发布准备（**Fixed / Docs**）
 
 - 版本号 1.0.5 → **1.0.6**（`version.py` 单一事实源 + `sync_version.py` 同步安装器）。
