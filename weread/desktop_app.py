@@ -400,6 +400,12 @@ def describe_omissions(report, compact: bool = False) -> str:
         location = "注文已收在书末附录。" if report.get("notes_in_appendix") else "注文的可读性需在阅读器中确认。"
         paragraphs.append("注角标图标 %d 处无法取回（每章一个 note.png）；%s" % (markers, location))
         shorts.append("%d 处注角标图标无法取回" % markers)
+    archive_chapters = int(report.get("chapters_with_missing_archive") or 0)
+    if archive_chapters:
+        paragraphs.append("另有 %d 章的插图包无法下载（微信读书接口返回错误），"
+                          "该章插图未收录；正文不受影响。删除该书后重新下载可再试。"
+                          % archive_chapters)
+        shorts.append("%d 章插图包无法下载" % archive_chapters)
     fetch_failures = report.get("annotation_fetch_failures") or {}
     if any(fetch_failures.values()):
         count = int(report.get("chapters_with_annotation_fetch_failures") or 0)
