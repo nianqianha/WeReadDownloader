@@ -990,12 +990,18 @@ class _LogWriter:
         self._ensure()
         self._queue.put((book_id or "general", text))
 
-    def flush(self, timeout: float = 5.0) -> None:
-        """等队列里**已入队**的行全部落盘。不会终止线程。"""
+    def flush(self, timeout: float = 30.0) -> None:
+        """等队列里**已入队**的行全部落盘。不会终止线程。
+
+        写线程可能正卡在上一批的长写盘上（CI 磁盘慢时实测 >5 秒），单个哨兵
+        等不到就返回会让调用方读到旧文件——所以循环发哨兵直到截止时间。"""
         self._ensure()
-        done = threading.Event()
-        self._queue.put((None, done))
-        done.wait(timeout)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            done = threading.Event()
+            self._queue.put((None, done))
+            if done.wait(timeout=min(1.0, deadline - time.monotonic()) or 0.01):
+                return
 
     def _ensure(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -1024,8 +1030,13 @@ class _LogWriter:
                         done_events.append(payload)
                     continue
                 files.setdefault(book_id, []).append(payload)
-            for book_id, lines in files.items():
-                self._write_file(book_id, lines)
+            try:
+                for book_id, lines in files.items():
+                    self._write_file(book_id, lines)
+            except Exception:
+                # 写线程绝不能死：线程一死，队列里的行（含 flush 哨兵）永远
+                # 没人处理，所有等待方全部超时，日志从此静默丢失。
+                pass
             for event in done_events:
                 event.set()
 

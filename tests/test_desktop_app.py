@@ -894,6 +894,7 @@ def test_worker_lines_still_reach_the_log_file_after_batching():
     try:
         instance.events.put(("line", "AUTH_OK; shelf entries: 7"))
         instance._drain_events()
+        app._LOG_WRITER.flush()   # 日志走后台线程；断言前等队列清空
         assert "AUTH_OK" in _log_text()
     finally:
         root.destroy()
