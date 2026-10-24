@@ -963,6 +963,83 @@ class _ShelfCanvas(ctk.CTkFrame):
         self.canvas.itemconfigure(entry["cover_text"], text="")
 
 
+class _LogWriter:
+    """技术日志的后台写盘线程。
+
+    为什么存在：`_persist_log` 在 Tk 线程里逐行 open/write，实测有一次被磁盘/杀软
+    卡住 18 秒（desktop-general.log 的 [STALL_STACK]：_persist_log ← _poll），
+    期间整个界面无响应。现在 `_persist_log` 只做入队（微秒级），这条守护线程负责
+    落盘；批量化之后每批一次 open/write，磁盘压力也小得多。
+
+    LOG_DIR 在**写盘时**才读模块全局：测试会重定向它，重定向之后的行必须进新目录。
+    flush() 供测试与 shutdown 使用——sentinel 入队，处理完队列里所有既有行后置位。
+    """
+
+    def __init__(self) -> None:
+        self._queue: "queue.Queue[tuple]" = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._start_lock = threading.Lock()
+
+    def write(self, book_id: str, text: str) -> None:
+        self._ensure()
+        self._queue.put((book_id or "general", text))
+
+    def flush(self, timeout: float = 5.0) -> None:
+        """等队列里**已入队**的行全部落盘。不会终止线程。"""
+        self._ensure()
+        done = threading.Event()
+        self._queue.put((None, done))
+        done.wait(timeout)
+
+    def _ensure(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        with self._start_lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._run, daemon=True, name="weread-log-writer")
+                self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            batch = [self._queue.get()]
+            while True:
+                try:
+                    batch.append(self._queue.get_nowait())
+                except queue.Empty:
+                    break
+            files: dict[str, list[str]] = {}
+            done_events = []
+            for book_id, payload in batch:
+                if book_id is None:
+                    # flush sentinel：事件必须等这批**写盘完成**后再置位，
+                    # 否则 flush() 返回时文件还没落地（实测竞态）。
+                    if payload is not None:
+                        done_events.append(payload)
+                    continue
+                files.setdefault(book_id, []).append(payload)
+            for book_id, lines in files.items():
+                self._write_file(book_id, lines)
+            for event in done_events:
+                event.set()
+
+    @staticmethod
+    def _write_file(book_id: str, lines: list[str]) -> None:
+        try:
+            try:
+                LOG_DIR.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            with (LOG_DIR / ("desktop-%s.log" % book_id)).open(
+                    "a", encoding="utf-8") as stream:
+                stream.writelines(lines)
+        except OSError:
+            pass  # 与旧实现一致：日志写不进去不拖垮主流程
+
+
+_LOG_WRITER = _LogWriter()
+
+
 class DesktopApp:
     """Enterprise console layout: dark rail, white top bar, carded content.
 
@@ -2651,12 +2728,12 @@ class DesktopApp:
             pass
 
     def _persist_log(self, text: str) -> None:
+        # 写盘走后台线程（_LogWriter）：这条路径在 Tk 线程上，逐行 open/write
+        # 曾被磁盘/杀软卡住主线程 18 秒。入队是微秒级；测试需要确定性时先 flush。
         try:
-            LOG_DIR.mkdir(parents=True, exist_ok=True)
-            safe_id = self.selected_id or "general"
-            with (LOG_DIR / f"desktop-{safe_id}.log").open("a", encoding="utf-8") as stream:
-                stream.write(redact_secrets(text) + "\n")
-        except OSError:
+            _LOG_WRITER.write(self.selected_id or "general",
+                              redact_secrets(text) + "\n")
+        except Exception:
             pass
 
     def _log(self, text: str) -> None:
@@ -4582,6 +4659,10 @@ class DesktopApp:
 
     def shutdown(self) -> None:
         """Window is closing: stop the warm worker and any export still running."""
+        try:
+            _LOG_WRITER.flush(timeout=3.0)   # 进程马上要退，队列里的行必须先落盘
+        except Exception:
+            pass
         try:
             self._service.shutdown()
         except Exception:

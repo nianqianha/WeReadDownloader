@@ -128,3 +128,73 @@ def test_install_location_judgement():
         Path("C:/Program Files/WeReadDownloader/WeReadDesktop/WeReadDesktop.exe")) is True
     assert updater._is_installed_under_program_files(
         Path("C:/Users/asus/AppData/Local/Programs/WeReadDownloader/WeReadDesktop/WeReadDesktop.exe")) is False
+
+
+# ---------------------------------------------------------------- 多源回退（2026-10-24）
+class _FakeUrlResp:
+    """带 url/text 的假响应，覆盖网页 302 与 atom feed 两条回退路径。"""
+
+    def __init__(self, status, url="", text="", json_payload=None):
+        self.status_code = status
+        self.url = url
+        self.text = text
+        self._payload = json_payload
+
+    def json(self):
+        return self._payload
+
+
+def test_setup_url_for_builds_fixed_asset_link():
+    assert updater._setup_url_for("v1.2.3") == (
+        "https://github.com/nianqianha/WeReadDownloader/releases/download/v1.2.3/"
+        "WeReadDownloader-Setup.exe")
+    assert updater._setup_url_for("garbage") == ""
+
+
+def test_tag_from_url_accepts_only_plain_stable_tags():
+    assert updater._tag_from_url("https://github.com/o/r/releases/tag/v1.2.3") == "v1.2.3"
+    assert updater._tag_from_url("https://github.com/o/r/releases/tag/v1.2.3/") == "v1.2.3"
+    # 预发布后缀不认：回退源只发正式版
+    assert updater._tag_from_url("https://github.com/o/r/releases/tag/v1.2.3-beta") is None
+    assert updater._tag_from_url("https://github.com/o/r/releases") is None
+
+
+def test_page_fallback_used_when_api_rate_limited(monkeypatch):
+    """api.github.com 403（本机实测的限流形态）时，网页 302 源要顶上。"""
+    def router(url, **kw):
+        if url.startswith("https://api.github.com"):
+            return _FakeResp(403, {})
+        if url == updater.RELEASES_PAGE:
+            return _FakeUrlResp(200, url="https://github.com/nianqianha/WeReadDownloader/releases/tag/v1.0.6")
+        if url.endswith("/WeReadDownloader-Setup.exe"):
+            return _FakeUrlResp(200)          # HEAD 探活
+        raise AssertionError("unexpected url " + str(url))
+    monkeypatch.setattr(updater.requests, "get", router)
+    monkeypatch.setattr(updater.requests, "head", lambda *a, **k: _FakeUrlResp(200))
+    latest = updater.fetch_latest()
+    assert latest and latest["source"] == "web" and latest["version"] == "1.0.6", latest
+    assert latest["setup_url"].endswith("/download/v1.0.6/WeReadDownloader-Setup.exe")
+
+
+def test_atom_fallback_skips_prerelease_tags(monkeypatch):
+    atom = ('<feed><entry><id>https://github.com/o/r/releases/tag/v1.1.0-beta</id></entry>'
+            '<entry><id>https://github.com/o/r/releases/tag/v1.0.6</id></entry></feed>')
+
+    def router(url, **kw):
+        if url.startswith("https://api.github.com") or url == updater.RELEASES_PAGE:
+            return _FakeResp(503, {})
+        if url == updater.RELEASES_ATOM:
+            return _FakeUrlResp(200, text=atom)
+        if url.endswith("/WeReadDownloader-Setup.exe"):
+            return _FakeUrlResp(200)
+        raise AssertionError("unexpected url " + str(url))
+    monkeypatch.setattr(updater.requests, "get", router)
+    monkeypatch.setattr(updater.requests, "head", lambda *a, **k: _FakeUrlResp(200))
+    latest = updater.fetch_latest()
+    assert latest and latest["source"] == "atom" and latest["version"] == "1.0.6", latest
+
+
+def test_all_sources_down_stays_silent(monkeypatch):
+    monkeypatch.setattr(updater.requests, "get", lambda *a, **k: _FakeResp(503, {}))
+    monkeypatch.setattr(updater.requests, "head", lambda *a, **k: _FakeUrlResp(503))
+    assert updater.fetch_latest() is None

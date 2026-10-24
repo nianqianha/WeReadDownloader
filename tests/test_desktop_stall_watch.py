@@ -29,6 +29,7 @@ def test_stall_watcher_records_real_stuck_stack():
     instance = app.DesktopApp(root)
 
     def log_text():
+        app._LOG_WRITER.flush()   # 日志走后台线程；断言前等队列清空
         return "\n".join(p.read_text(encoding="utf-8", errors="replace")
                          for p in app.LOG_DIR.glob("*.log"))
 

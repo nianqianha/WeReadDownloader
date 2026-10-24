@@ -7,12 +7,14 @@
   三道坑；而 Inno Setup 已经全部解决（重跑官方 Setup.exe 会用自己的 AppMutex
   关掉运行中的实例、覆盖文件、保留用户数据）。所以自更新 = "检测新版本 →
   下载官方 Setup.exe → 提权拉起它自己覆盖安装 → 自己退出"。
-- 版本清单来源：GitHub Releases。`fetch_latest()` 调
-  GET https://api.github.com/repos/nianqianha/WeReadDownloader/releases/latest
-  一次拿到版本号（tag_name）、安装包直链（assets 里的
-  WeReadDownloader-Setup.exe）、更新说明（body）。
-- 失败必须静默降级：api.github.com 在国内可能不稳定，查不到就当"无更新"，
-  绝不阻断下载主流程。
+- 版本清单来源：GitHub Releases，三个源依次回退（2026-10-24 起）。实测这台机器的
+  出口 IP 会撞上 api.github.com 未登录限额（每小时 60 次，403），所以：
+    1. api.github.com/releases/latest —— 信息最全（tag/资产/说明）；
+    2. github.com/.../releases/latest —— 网页 302 到 /tag/vX.Y.Z，不占 API 限额，
+       安装包直链按固定资产名拼出；
+    3. github.com/.../releases.atom —— XML feed，同样不限流；只认 vX.Y.Z 形态的
+       tag（预发布后缀会被跳过，feed 最新在前）。
+- 失败必须静默降级：三个源全挂才当"无更新"，绝不阻断下载主流程。
 """
 from __future__ import annotations
 
@@ -33,11 +35,48 @@ import requests
 # nianqianha/WeReadDownloader 是公开仓库，Releases 即现状分发渠道。
 REPO_OWNER = "nianqianha"
 REPO_NAME = "WeReadDownloader"
+REPO_WEB = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
 RELEASES_API = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
+RELEASES_PAGE = f"{REPO_WEB}/releases/latest"     # 302 → /releases/tag/vX.Y.Z
+RELEASES_ATOM = f"{REPO_WEB}/releases.atom"       # XML feed，不占 api.github.com 限额
 SETUP_ASSET_NAME = "WeReadDownloader-Setup.exe"
 
 # 语义化版本比较用的正则：容忍可选的 "v" 前缀与末尾的预发布后缀。
 _VERSION_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
+
+_HEADERS = {"User-Agent": "WeReadDownloader-SelfUpdate"}
+
+
+def _setup_url_for(tag: str) -> str:
+    """由 tag 拼出固定资产名的直链；资产名是发布契约，改名必须同步改这里。"""
+    version = _normalize(tag)
+    if version is None:
+        return ""
+    return "%s/releases/download/v%d.%d.%d/%s" % (
+        REPO_WEB, version[0], version[1], version[2], SETUP_ASSET_NAME)
+
+
+def _tag_from_url(url: str) -> str | None:
+    """从 .../releases/tag/<tag> 形态的 URL 里取完整的稳定版 tag。
+
+    必须整段匹配 vX.Y.Z：v1.0.6 这类纯 tag 才算数，v1.1.0-beta（预发布后缀）
+    不认——回退源只提供正式发布，预发布交给 API 源去过滤。
+    """
+    tail = (url or "").rstrip("/").rsplit("/tag/", 1)[-1]
+    if tail and re.fullmatch(r"v?\d+\.\d+\.\d+", tail):
+        return tail
+    return None
+
+
+def _asset_missing(url: str, timeout: float) -> bool:
+    """HEAD 探一下安装包直链。只有明确的 404 才算缺失；网络层失败宁可放行，
+    让后续真正的下载步骤去报错（那里的提示已经具体）。"""
+    try:
+        resp = requests.head(url, timeout=timeout, allow_redirects=True,
+                             headers=_HEADERS)
+        return resp.status_code == 404
+    except Exception:
+        return False
 
 
 def _normalize(tag: str) -> tuple[int, int, int] | None:
@@ -86,11 +125,9 @@ def parse_release(payload: dict) -> dict | None:
     }
 
 
-def fetch_latest(timeout: float = 8.0) -> dict | None:
-    """查最新 Release；任何失败都静默返回 None（当"无更新"，不阻断主流程）。
-
-    预发布（prerelease）与草稿（draft）一律过滤掉，不把未正式发布的版本推给用户。
-    """
+def _fetch_via_api(timeout: float) -> dict | None:
+    """api.github.com 的 releases/latest：信息最全（notes/资产列表/prerelease 标记），
+    但未登录限额只有每小时 60 次/出口 IP，共享网络下经常 403。"""
     try:
         resp = requests.get(RELEASES_API, timeout=timeout, headers={
             "Accept": "application/vnd.github+json",
@@ -103,10 +140,73 @@ def fetch_latest(timeout: float = 8.0) -> dict | None:
             return None
         if payload.get("prerelease") or payload.get("draft"):
             return None
+        payload["source"] = "api"
         return payload
     except Exception:
-        # 网络不通 / 被墙 / JSON 坏掉 / 超时 —— 都当没更新。
         return None
+
+
+def _fetch_via_page(timeout: float) -> dict | None:
+    """github.com 的 /releases/latest 页面：302 到 /tag/vX.Y.Z，不占 API 限额。
+    资产直链按固定资产名拼出，HEAD 探活（404 视为该版本没带安装包）。"""
+    try:
+        resp = requests.get(RELEASES_PAGE, timeout=timeout, allow_redirects=True,
+                            headers=_HEADERS)
+        if resp.status_code != 200:
+            return None
+        tag = _tag_from_url(resp.url)
+        if not tag:
+            return None
+        setup_url = _setup_url_for(tag)
+        if not setup_url or _asset_missing(setup_url, timeout):
+            return None
+        version = _normalize(tag)
+        return {"version": "%d.%d.%d" % version, "raw_tag": tag,
+                "setup_url": setup_url, "notes": "",
+                "prerelease": False, "draft": False, "source": "web"}
+    except Exception:
+        return None
+
+
+def _fetch_via_atom(timeout: float) -> dict | None:
+    """releases.atom feed：同样不限流，最新在前。只认整段 vX.Y.Z 的 tag，
+    预发布后缀（v1.1.0-beta）自然跳过。"""
+    try:
+        resp = requests.get(RELEASES_ATOM, timeout=timeout, headers=_HEADERS)
+        if resp.status_code != 200:
+            return None
+        for raw in re.findall(r"releases/tag/([^<\"'\s]+)", resp.text):
+            tag = _tag_from_url("releases/tag/" + raw)
+            if not tag:
+                continue
+            setup_url = _setup_url_for(tag)
+            if not setup_url or _asset_missing(setup_url, timeout):
+                continue
+            version = _normalize(tag)
+            return {"version": "%d.%d.%d" % version, "raw_tag": tag,
+                    "setup_url": setup_url, "notes": "",
+                    "prerelease": False, "draft": False, "source": "atom"}
+        return None
+    except Exception:
+        return None
+
+
+def fetch_latest(timeout: float = 8.0) -> dict | None:
+    """查最新 Release；任何失败都静默返回 None（当"无更新"，不阻断主流程）。
+
+    预发布（prerelease）与草稿（draft）一律过滤掉，不把未正式发布的版本推给用户。
+    三个源按序回退：API（信息最全）→ 网页 302 → atom feed；单源超时各 6 秒封顶，
+    整个检查跑在后台线程里（GUI 侧），最坏 18 秒也不会卡界面。
+    """
+    per_source = max(2.0, min(timeout, 6.0))
+    for fetch in (_fetch_via_api, _fetch_via_page, _fetch_via_atom):
+        try:
+            payload = fetch(per_source)
+        except Exception:
+            payload = None
+        if payload:
+            return payload
+    return None
 
 
 def download_setup(url: str, dest: Path | None = None,
