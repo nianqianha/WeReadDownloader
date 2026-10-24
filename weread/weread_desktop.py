@@ -1185,12 +1185,16 @@ def extract_images(chapter: dict[str, Any], http: requests.Session, referer: str
     dropped_archive_images: list[str] = []
     with http.get(tar_url, headers={"Referer": referer}, timeout=(10, 90),
                   stream=True) as response:
-        # The image archive is an accessory, not the chapter. A 403/404/410 means
-        # the artwork is gone, which is no reason to throw away text that has
-        # already decoded -- the same reasoning as download_remote_images.
-        if response.status_code in (403, 404, 410):
-            print(f"[IMAGE] chapter {chapter['chapterUid']} has no image archive "
-                  f"(HTTP {response.status_code}); keeping the text",
+        # The image archive is an accessory, not the chapter. Any 4xx means this
+        # tarball is not obtainable -- 403/404/410 are the usual "artwork gone",
+        # and WeRead's own CDN answers a persistent 499 ("ERR") for some
+        # chapters (实测：后汉书 3300228183 的 UID 72/120 每次都 499，重跑也一样).
+        # Failing the chapter here left the whole book stuck on two images, so
+        # keep the already-decoded text and record the loss instead. 5xx still
+        # raises: a server-side outage is transient and the retry may recover.
+        if 400 <= response.status_code < 500:
+            print(f"[IMAGE] chapter {chapter['chapterUid']} image archive "
+                  f"unavailable (HTTP {response.status_code}); keeping the text",
                   file=sys.stderr, flush=True)
             return {}, [f"archive:{tar_url}"]
         response.raise_for_status()
@@ -1436,6 +1440,35 @@ def rewrite_images(xhtml: str, mapping: dict[str, str]) -> str:
     pieces.extend(etree.tostring(node, encoding="unicode", method="xml", with_tail=True)
                   for node in wrapper)
     return "".join(pieces)
+
+
+_IMG_TAG_RE = re.compile(r"(?i)<img\b[^>]*>")
+
+
+def _drop_unresolved_images(xhtml: str, mapping: dict[str, str]) -> tuple[str, int]:
+    """删掉解析不到本地文件的 <img>，返回 (新 xhtml, 删除数)。
+
+    插图包整包不可用时（extract_images 的 4xx 降级），本章 <img> 引用的是包内
+    文件名，永远无法解析；留在 EPUB 里就是坏图。远程 URL 不在此列——它们要么
+    已被 download_remote_images 映射，要么已按死链删除。src 为空的 <img> 交给
+    _strip_blank_images 处理。"""
+    removed = 0
+
+    def _decide(match: re.Match[str]) -> str:
+        nonlocal removed
+        tag = match.group(0)
+        src_match = re.search(r'(?i)\bsrc\s*=\s*["\']([^"\']*)["\']', tag)
+        src = src_match.group(1) if src_match else ""
+        if not src or src.startswith(("http://", "https://")):
+            return tag
+        base = Path(src.split("?", 1)[0]).name
+        if base in mapping:
+            return tag
+        removed += 1
+        return ""
+
+    result = _IMG_TAG_RE.sub(_decide, xhtml)
+    return result, removed
 
 
 def _cover_extension(data: bytes) -> tuple[str, str] | None:
@@ -2166,6 +2199,16 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         image_map, archive_dropped = extract_images(chapter, worker_api.http, referer, workspace, used_images)
         processed, remote_map, remote_dropped = download_remote_images(processed, worker_api.http, referer, workspace, used_images, str(chapter["chapterUid"]))
         image_map.update(remote_map)
+        # 插图包整包不可用（4xx 降级）时，本章 <img> 引用的是包内文件名，永远
+        # 解析不到本地文件——删掉这些引用并如实计数，否则 EPUB 里全是坏图，
+        # 或者整章被误标为未解决、一本书卡在两张插图上。
+        if any(str(item).startswith("archive:") for item in archive_dropped):
+            processed, missing_refs = _drop_unresolved_images(processed, image_map)
+            if missing_refs:
+                archive_dropped = [item for item in archive_dropped
+                                   if not str(item).startswith("archive:")]
+                tar_ref = urljoin(WEB + "/", str(chapter.get("tar") or ""))
+                archive_dropped.extend([f"archive:{tar_ref}"] * missing_refs)
         # Record every resource that is genuinely gone so the manifest can say
         # so. Degrading is only better than failing if the loss is visible.
         dropped_image_urls = list(archive_dropped) + list(remote_dropped)
@@ -2283,6 +2326,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     dropped_images = 0
     dropped_note_markers = 0
     chapters_with_dropped_images = 0
+    chapters_with_missing_archive = 0
     dropped_image_samples: list[str] = []
     missing_underline_samples: list[str] = []
     # Identity and text answer two different questions. Identity asks whether the
@@ -2337,6 +2381,11 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             for name in (row.get("dropped_image_urls") or [])[:3]:
                 if name not in dropped_image_samples:
                     dropped_image_samples.append(name)
+        # 插图包整包不可用（4xx 降级）的章节数：这类章损失的是"该章全部插图"，
+        # 与逐张 404 性质不同，说明里要分开说。
+        if any(str(item).startswith("archive:")
+               for item in (row.get("dropped_image_urls") or [])):
+            chapters_with_missing_archive += 1
         if int(row.get("underline_ranges", 0)) > 0: annotation_coverage["chapters_with_underlines"] += 1
         # A chapter that was never audited contributes nothing and is counted as
         # unmeasured. Reading its nulls as zeros would let a book nobody checked
@@ -2434,13 +2483,16 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         # 其中「注」角标（note.png）的条数；旧断点没有这个字段，为 0。
         "images_dropped_note_markers": dropped_note_markers,
         "chapters_with_dropped_images": chapters_with_dropped_images,
+        "chapters_with_missing_archive": chapters_with_missing_archive,
         "dropped_image_examples": dropped_image_samples,
         "reason_underlines": "WeRead reported these highlights but would not supply an "
                             "anchor this chapter's text could verify, so they were not "
                             "placed. An unverified anchor would highlight the wrong words. "
                             "This is deliberate, not a download failure.",
         "reason_images": "WeRead no longer serves these images (HTTP 403/404/410), "
-                            "or a single image exceeded the size cap and was skipped.",
+                            "or a single image exceeded the size cap and was skipped, "
+                            "or the chapter's image archive was unavailable "
+                            "(HTTP 4xx) and every image in it was skipped.",
         "reason_placement_audit": "underlines_verified_by_text counts highlights "
                                   "whose marked text equals the quote WeRead holds, "
                                   "proved by the plugin's own placement pass; "
