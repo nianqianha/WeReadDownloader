@@ -235,11 +235,12 @@ class _CssApi:
         return {"psvts": "p"}
 
     def chapter_shard(self, book, chapter, psvts, endpoint):
+        # 2026-10-24 起 chapter_shard 返回原始字节（见 test_shard_bytes.py）。
         if endpoint.endswith("e_0"):
-            return "e0-bytes"
+            return b"e0-bytes"
         if endpoint.endswith("e_2"):
-            return "e2-bytes"
-        return "e13-bytes"
+            return b"e2-bytes"
+        return b"e13-bytes"
 
     def globals(self):
         outer = self

@@ -243,6 +243,24 @@ WeReadWorker.exe (CLI 引擎)
 
 ## 四、变更日志（Keep a Changelog 格式）
 
+### 2026-10-24 分片字节直通：修复 MD5 mismatch 4/4 全败的自身问题（**Fixed**）
+
+- **现象**（外部用户日志，后汉书 UID 90）：正文分片 MD5 校验 4 次重试全败，
+  相邻 154 章全过。起初判断为服务端问题——**复查后确认有自身成分**。
+- **根因**：`chapter_shard` 把响应解码成 str（非 UTF-8 响应走 latin-1 兜底），
+  `_chapter_html_once` 再 `.encode()`（utf-8）传回 Lua。latin-1→utf-8 往返会把
+  所有 ≥0x80 的字节变成两字节，密文 MD5 必挂且重试无法恢复。ASCII 响应
+  （base64 形态）往返无损，所以其余 154 章全过——单章失败与全过的分界正是
+  响应是否含非 ASCII 字节。
+- **修复**：`chapter_shard` 返回原始 **bytes**，`_chapter_html_once` 原样传给
+  Lua（lupa 在 encoding=None 下原生接受 bytes），密文字节一个不动。输出侧
+  （解密后的正文/CSS 是真 UTF-8 文本）继续走 `py_value` 解码，不受影响。
+- **测试**：新增 `tests/test_shard_bytes.py` 3 个用例——非 UTF-8 分片逐字节
+  到达 Lua（fake 在 Lua 侧核对 MD5）、e_2 样式表分片同样直通、空分片降级；
+  `test_weread_accessories.py` 的分片假件同步改为 bytes 契约。
+- **对那位用户**：装上含此修复的版本后再「继续下载」，UID 90 这类章节的
+  重试才是有效的；此前 4 次重试每一次都在同一处损坏，注定失败。
+
 ### 2026-10-24 插图包 4xx 降级，一书不再卡死在两张插图上（**Fixed**，并入 1.0.7）
 
 - **现象**（外部用户日志，后汉书 3300228183，D 盘安装的 1.0.5/1.0.6）：第 72、120
