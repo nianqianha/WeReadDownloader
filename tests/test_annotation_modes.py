@@ -1,6 +1,6 @@
-"""The three annotation modes must differ in which API calls they make.
+"""The annotation modes must differ in which API calls they make.
 
-The GUI offers 划线 + 想法 / 只要划线 / 纯正文, and the modes are not a matter of
+The GUI offers 注释和想法 / 注释 / 想法 / 纯正文, and the modes are not a matter of
 degree:
 
   both  -> /book/underlines and /book/readreviews, notes written
