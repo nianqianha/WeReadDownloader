@@ -1056,6 +1056,93 @@ def body_fragment(xhtml: str) -> str:
     return re.sub(r"<\?xml.*?\?>|<!DOCTYPE.*?>", "", xhtml, flags=re.S)
 
 
+# 译文在正文里是 class="wr-translation" 的段落，紧跟原文段落之后。微信读书
+# 会给这份样式表配一条 `.wr-translation{display:none!important}`，由阅读器的
+# 解析开关决定显示哪一半；EPUB 里没有那个开关，照搬 CSS 的结果是「译文在
+# 文件里、屏幕上没有」。三种取法由 --translation 选。
+TRANSLATION_MODES = ("bilingual", "translation", "original")
+
+_PARA_BLOCK = re.compile(r"<p\b[^>]*>.*?</p\s*>", re.S | re.I)
+_TRANSLATION_MARK = re.compile(r'\bclass\s*=\s*"[^"]*\bwr-translation\b', re.I)
+
+
+def _is_translation_block(tag: str) -> bool:
+    return bool(_TRANSLATION_MARK.search(tag))
+
+
+def apply_translation_mode(body: str, mode: str) -> tuple[str, int]:
+    """按译文模式取舍段落，返回 (正文, 译文段落数)。
+
+    bilingual   原样保留，原文与译文交替（与微信读书打开翻译时的排版一致）
+    translation 只留译文，丢掉每段译文紧邻的原文段落
+    original    只留原文，丢掉全部译文段落
+
+    按出现顺序两两相邻判断，不做跨段猜测：只有「紧随译文的那一段」会被当成
+    它的原文，所以标题、插图、空段都不受影响。
+    """
+    if mode not in TRANSLATION_MODES:
+        raise ValueError(f"Unknown translation mode: {mode}")
+    blocks = list(_PARA_BLOCK.finditer(body))
+    if not blocks:
+        return body, 0
+    flags = [_is_translation_block(block.group(0)) for block in blocks]
+    translated = sum(flags)
+    if mode == "bilingual" or translated == 0:
+        return body, translated
+    if mode == "original":
+        drop = {index for index, is_translation in enumerate(flags) if is_translation}
+    else:
+        drop = {index for index, is_translation in enumerate(flags)
+                if not is_translation
+                and index + 1 < len(flags) and flags[index + 1]}
+    if not drop:
+        return body, translated
+    pieces: list[str] = []
+    cursor = 0
+    for index in sorted(drop):
+        block = blocks[index]
+        pieces.append(body[cursor:block.start()])
+        cursor = block.end()
+    pieces.append(body[cursor:])
+    return "".join(pieces), translated
+
+
+def reveal_translation_style(css: str) -> str:
+    """去掉随书样式表对 .wr-translation 的 display:none。
+
+    只改这类选择器里的 display 声明，其它规则原样保留；没有译文规则的书不会
+    被迫变样。
+    """
+    if "wr-translation" not in css:
+        return css
+
+    def repair(match: re.Match[str]) -> str:
+        selector, declarations = match.group(1), match.group(2)
+        if ".wr-translation" not in selector:
+            return match.group(0)
+        cleaned = re.sub(r"display\s*:\s*none\s*(?:!\s*important\s*)?;?", "",
+                         declarations, flags=re.I)
+        return f"{selector}{{{cleaned}}}"
+
+    return re.sub(r"([^{}]*\.wr-translation[^{}]*)\{([^{}]*)\}", repair, css)
+
+
+def translate_body_bytes(data: bytes, mode: str) -> tuple[int, bytes]:
+    """EPUB 落盘前按模式过滤正文，返回 (译文章数, 要写的字节)。
+
+    解码失败时原样返回 0 篇，不拿坏编码当正文；bilingual 直接回原字节，避免
+    无谓的重编码差异。
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return 0, data
+    filtered, translated = apply_translation_mode(text, mode)
+    if mode == "bilingual":
+        return translated, data
+    return translated, filtered.encode("utf-8")
+
+
 def epub_escape(value: Any) -> str:
     return str(value or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
@@ -1460,12 +1547,19 @@ def _cover_extension(data: bytes) -> tuple[str, str] | None:
 def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
                chapter_paths: list[Path], css: str, assets: Path,
                cover_path: Path | None,
-               appendix: tuple[list[tuple[str, bytes]], dict[str, Path]] | None = None) -> None:
+               appendix: tuple[list[tuple[str, bytes]], dict[str, Path]] | None = None,
+               translation: str = "bilingual") -> None:
     """打包 EPUB。
 
     appendix = ([(文件名, XHTML 字节)], {chapter_uid: 改写后 .body 路径}) 时，在书末追加
     「注释和想法」章节、正文用角标改写后的版本；None 时输出与引入本功能前逐字节
-    一致（spec R5：默认关闭，回归要求）。"""
+    一致（spec R5：默认关闭，回归要求）。
+
+    translation 只影响带译文的书（正文里有 wr-translation 段落）：bilingual 原样
+    双语输出并解除样式表对译文的隐藏，translation 只留译文，original 只留原文。
+    过滤在打包时做，.body 缓存始终保留完整双语，换模式不必重新下载。"""
+    if translation not in TRANSLATION_MODES:
+        raise ValueError(f"Unknown translation mode: {translation}")
     if len(chapters) != len(chapter_paths): raise RuntimeError("chapter staging list mismatch")
     manifest = ['<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
                 '<item id="style" href="style.css" media-type="text/css"/>']
@@ -1535,13 +1629,21 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
             nav_items += '<li><a href="text/%s">%s</a></li>' % (fname, label)
     nav = '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Contents</title></head><body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><ol>' + nav_items + "</ol></nav></body></html>"
     metadata_entries["OEBPS/nav.xhtml"] = nav.encode("utf-8")
-    metadata_entries["OEBPS/style.css"] = css.encode("utf-8")
+    # 只留原文时不碰样式表，输出与引入译文模式前一致；其余模式解除随书样式对
+    # 译文的隐藏，否则译文段落进了文件也显示不出来。
+    style_css = css if translation == "original" else reveal_translation_style(css)
+    metadata_entries["OEBPS/style.css"] = style_css.encode("utf-8")
     modified = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     opf = f'<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="bookid">weread-{epub_escape(book["bookId"])}</dc:identifier><dc:title>{epub_escape(book.get("title"))}</dc:title><dc:creator>{epub_escape(book.get("author"))}</dc:creator><dc:publisher>WeRead</dc:publisher><dc:language>zh-CN</dc:language><meta property="dcterms:modified">{modified}</meta>{cover_meta}</metadata><manifest>{"".join(manifest)}</manifest><spine>{"".join(spine)}</spine></package>'
     metadata_entries["OEBPS/content.opf"] = opf.encode("utf-8")
     temp_path = path.with_suffix(path.suffix + ".part")
     # 附录模式下正文用角标改写后的缓存副本；无附录时仍读原 .body 缓存
     appendix_bodies = appendix[1] if appendix is not None else {}
+    # 译文章数在这里数，而不是在下载里数：续传、换模式重打包时下载会整章跳过，
+    # 那时下载侧的计数器读出来是 0，manifest 会声称一本双语书「没有译文」。
+    # 打包时正文本来就要读，这是唯一一个跨缓存也成立的口径。
+    translated_paragraphs = 0
+    chapters_with_translation = 0
     with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
         archive.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_STORED)
         for name, data in metadata_entries.items(): archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
@@ -1550,11 +1652,14 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
             body_path = appendix_bodies.get(str(chapters[index - 1].get("chapterUid")), chapter_path)
             with archive.open(f"OEBPS/text/chapter-{index:04d}.xhtml", "w") as target:
                 target.write((f'<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>{title}</title><link rel="stylesheet" href="../style.css" type="text/css"/></head><body>').encode("utf-8"))
+                raw_body = body_path.read_bytes()
+                translated, body_data = translate_body_bytes(raw_body, translation)
+                translated_paragraphs += translated
+                if translated:
+                    chapters_with_translation += 1
                 if canonical_bytes:
-                    target.write(_dedupe_refs(body_path.read_bytes()))
-                else:
-                    with body_path.open("rb") as source:
-                        shutil.copyfileobj(source, target, 64 * 1024)
+                    body_data = _dedupe_refs(body_data)
+                target.write(body_data)
                 target.write(b"</body></html>")
         if appendix is not None:
             for fname, data in appendix[0]:
@@ -1569,6 +1674,7 @@ def write_epub(path: Path, book: dict[str, Any], chapters: list[dict[str, Any]],
     os.replace(temp_path, path)
     # Chapter XHTML is generated as a ZIP stream; staged bodies remain available
     # for resume and are not copied into a second full-book buffer.
+    return translated_paragraphs, chapters_with_translation
 
 
 def secure_output_directory(path: Path) -> None:
@@ -2011,7 +2117,10 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
                 want_thoughts: bool = True,
                 want_underlines: bool = True,
                 unified_appendix: bool = False,
-                appendix_scope: str = "both") -> Path:
+                appendix_scope: str = "both",
+                translation: str = "bilingual") -> Path:
+    if translation not in TRANSLATION_MODES:
+        raise RuntimeError(f"Unknown translation mode: {translation}")
     secure_output_directory(output)
     # 每次导出从零开始计数：同一进程内连跑两本书时，上一本丢弃的注数不能带到
     # 这一本的 manifest 里。
@@ -2199,6 +2308,8 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         dropped_note_markers = sum(
             1 for item in dropped_image_urls if "note.png" in str(item).lower())
         body = _strip_blank_images(rewrite_images(body_fragment(processed), image_map))
+        # .body 缓存始终存完整双语，取哪种模式在打包时决定：换模式不必重下。
+        # 译文章数也在打包时数——那里正文本来就要读，还能覆盖"整章跳过"的续传。
         temp_body = body_path.with_suffix(".body.part")
         temp_review = review_path.with_suffix(".json.part")
         temp_css = css_path.with_suffix(".css.part")
@@ -2460,6 +2571,11 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         "underlines_refused_by_reason": audit["refused_underline_reasons"] if audit["measured_chapters"] else None,
         "underline_mismatch_examples": quote_mismatch_samples if audit["measured_chapters"] else None,
         "images_dropped": dropped_images,
+        # 译文相关三个字段在打包后回填（write_epub 才知道每章正文里有多少篇
+        # 译文），这里先占位，键顺序保持在 manifest 里固定。
+        "translation_mode": translation,
+        "translation_paragraphs": 0,
+        "chapters_with_translation": 0,
         # 其中「注」角标（note.png）的条数；旧断点没有这个字段，为 0。
         "images_dropped_note_markers": dropped_note_markers,
         "chapters_with_dropped_images": chapters_with_dropped_images,
@@ -2564,7 +2680,14 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             appendix_bodies[uid] = body_copy
         appendix_arg = (appendix_files, appendix_bodies)
     omission_report["notes_in_appendix"] = bool(appendix_manifest.get("appendix", {}).get("notes"))
-    write_epub(epub_path, book, chapters, chapter_paths, css, workspace_images, cover_path, appendix_arg)
+    translated_paragraphs, chapters_with_translation = write_epub(
+        epub_path, book, chapters, chapter_paths, css, workspace_images, cover_path,
+        appendix_arg, translation)
+    # 打包时数出来的数才是真的：续传/换模式重打包会整章跳过下载，下载侧的
+    # 计数器那时读出来是 0。
+    omission_report["translation_mode"] = translation
+    omission_report["translation_paragraphs"] = translated_paragraphs
+    omission_report["chapters_with_translation"] = chapters_with_translation
     manifest = {"version": 1, "book_id": book_id, "title": book.get("title"),
         "author": book.get("author", ""), "epub": epub_path.name,
         "epub_size": epub_path.stat().st_size,
@@ -2760,6 +2883,15 @@ def main() -> int:
                         help="Which parts the unified appendix collects: both (default), "
                              "notes only, or thoughts only. Ignored without "
                              "--unified-appendix.")
+    parser.add_argument("--translation", choices=TRANSLATION_MODES, default="bilingual",
+                        help="Which half of a translated book to keep. WeRead ships the "
+                             "machine translation inline as class=\"wr-translation\" "
+                             "paragraphs right after each original paragraph, and its "
+                             "own stylesheet hides them; EPUB has no such switch. "
+                             "bilingual (default) keeps both halves and unhides the "
+                             "translation, translation keeps only the translation, "
+                             "original drops it. Books without a translation are "
+                             "unaffected.")
     args = parser.parse_args()
     if args.serve:
         return serve_forever()
@@ -2832,7 +2964,8 @@ def main() -> int:
             shelf_books(settings)
             return 0
         result = export_book(args.book_id, args.output, settings, args.jobs, want_thoughts,
-                       want_underlines, unified_appendix, appendix_scope)
+                       want_underlines, unified_appendix, appendix_scope,
+                       args.translation)
         print("DONE", result, flush=True)
         return 0
     except Exception as exc:

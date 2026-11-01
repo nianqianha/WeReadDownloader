@@ -130,6 +130,31 @@ Windows 桌面程序，Tk 图形界面，下载引擎是一个独立的 worker �
 
 ---
 
+## 译文
+
+微信读书给外文书配了机器翻译。这份译文**不是另一个接口，也不是另一本书**：它就在章节正文里，每段原文后面紧跟一段中文（`class="wr-translation"`）。微信读书自己的阅读器再用一个开关决定显示哪一半。
+
+问题在于，随书下发的样式表里有一条 `.wr-translation { display: none !important }`——照搬到 EPUB，译文确实在文件里，但屏幕上什么都不显示。
+
+所以在「设置 → 译文」里选导出时留哪一半：
+
+| 选项 | 结果 |
+|---|---|
+| **双语（原文＋译文）**（默认） | 两种都留，段落交替，并去掉隐藏译文的那条 CSS |
+| **仅译文** | 只留译文；每段译文紧邻的那段原文一并去掉 |
+| **仅原文** | 只留原文，译文段落全部丢弃 |
+
+- 只对**带译文**的书生效。中文书、没生成译本的书完全不受影响，三种模式导出结果一致。
+- 取舍发生在打包阶段：正文缓存始终存完整双语，**换模式不用重新下载**（实测 120 章的书重打包约 10 秒）。
+- 译本不完整时（有的段落只有原文没有译文），「仅译文」会保留这些没有译文的段落，不会把它们吞掉。
+- 成品 `manifest.json` 的 `omissions` 里有 `translation_mode`、`translation_paragraphs`（译文段数）、`chapters_with_translation`，可以据此确认这本书到底带不带译文。
+
+命令行等价写法：`WeReadWorker.exe <bookId> --translation bilingual|translation|original`。
+
+**要注意**：译文是微信读书的机器翻译，质量参差；它是否可用取决于你的账号是否具备该书的翻译权限。程序只搬运微信读书已经生成好的内容，不自己翻译，也不会绕过任何权限。
+
+---
+
 ## 排队下载
 
 1. 在搜索结果里勾选多本（卡片上的「加入队列」）。
@@ -173,6 +198,7 @@ Windows 桌面程序，Tk 图形界面，下载引擎是一个独立的 worker �
 | `images_dropped_note_markers` | 其中属于「注」角标图（note.png）的数量；注文本身已保留 |
 | `underlines_not_placed` / `chapters_with_unplaced_underlines` | 原文里找不到可用位置、被略去的划线条数与章节 |
 | `unplaced_underline_details` | 上面这些划线的章节与区间（最多 200 条） |
+| `translation_mode` / `translation_paragraphs` / `chapters_with_translation` | 按哪个译文档位导出的、正文里有多少段译文、涉及多少章（0 表示这本书没有译文） |
 
 单张图片超过 64 MiB 时会跳过该图并计入缺失，不会让整章失败。
 

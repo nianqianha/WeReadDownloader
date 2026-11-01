@@ -20,7 +20,8 @@ class DesktopAnnotationModesTests(unittest.TestCase):
         app = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "DesktopApp")
         methods = [n for n in app.body if isinstance(n, ast.FunctionDef)
                    and n.name in ("probe", "export", "_start_one", "_queue_args",
-                                  "_annotation_mode", "_annotation_flags")]
+                                  "_annotation_mode", "_annotation_flags",
+                                  "_translation_mode")]
         # The mode table is module-level, so exec of the methods alone would not see
         # it. Pull the class and the two assignments in too rather than importing
         # desktop_app (which drags in customtkinter).
@@ -29,6 +30,8 @@ class DesktopAnnotationModesTests(unittest.TestCase):
         mode_tables = [n for n in tree.body if isinstance(n, ast.Assign)
                        and any(getattr(t, "id", "") in ("_ANNOTATION_MODES",
                                                         "_DEFAULT_ANNOTATION_MODE",
+                                                        "_TRANSLATION_MODES",
+                                                        "_DEFAULT_TRANSLATION",
                                                         "WORKER_JOBS")
                                for t in n.targets)]
         # The real module starts with `from __future__ import annotations`; the
@@ -54,6 +57,9 @@ class DesktopAnnotationModesTests(unittest.TestCase):
         self.app._queue_args = MethodType(namespace["_queue_args"], self.app)
         self.app._annotation_mode = MethodType(namespace["_annotation_mode"], self.app)
         self.app._annotation_flags = MethodType(namespace["_annotation_flags"], self.app)
+        # _queue_args 现在也下发译文档位，同样按需绑定；这个子命名空间没有
+        # 真实实例的控件，少了它导出会在参数拼装处 AttributeError。
+        self.app._translation_mode = MethodType(namespace["_translation_mode"], self.app)
         self.methods = namespace
 
     def test_each_displayed_mode_reaches_both_callbacks_with_correct_flags(self):
@@ -84,6 +90,18 @@ class DesktopAnnotationModesTests(unittest.TestCase):
                     self.assertIn("123", arguments)
                     if action == "export":
                         self.assertEqual(len(self.confirmations), 1)
+
+    def test_every_translation_row_reaches_the_worker(self):
+        """译文档位必须显式下发：worker 的默认值不能替用户做决定。"""
+        for label, value, _hint in self.methods["_TRANSLATION_MODES"]:
+            with self.subTest(label=label):
+                self.app.annotations_var = SimpleNamespace(get=lambda: "注释和想法")
+                self.app.translation_var = SimpleNamespace(get=lambda label=label: label)
+                self.starts.clear()
+                self.methods["export"](self.app)
+                arguments = self.starts[0][0]
+                index = arguments.index("--translation")
+                self.assertEqual(arguments[index + 1], value, arguments)
 
     def test_the_default_row_is_the_unified_appendix(self):
         """默认档必须是「注释和想法」——用户要的正是这本书的形态。"""

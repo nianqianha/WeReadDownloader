@@ -91,6 +91,16 @@ _ANNOTATION_HINTS = {
     "纯正文": "不要划线、注释和想法，最快、体积最小",
 }
 
+# 译文：微信读书给外文书配的机器翻译就在正文里（每段原文后面跟一段
+# class="wr-translation" 的译文），随书样式表却把它 display:none 藏起来，由
+# 阅读器自己的开关决定显示哪一半。EPUB 没有那个开关，所以要问用户留哪一半。
+_TRANSLATION_MODES = (
+    ("双语（原文＋译文）", "bilingual", "两种都留，译文解除隐藏"),
+    ("仅译文", "translation", "只留译文，丢掉对应的原文段落"),
+    ("仅原文", "original", "只留原文，丢掉译文"),
+)
+_DEFAULT_TRANSLATION = _TRANSLATION_MODES[0]
+
 # 并发固定 1。GUI 上的并发选择器已删：实测 jobs>1 更容易触发 426 限流，而队列是
 # 串行执行的、单本下载也没有并发收益。worker 仍接受 --jobs，只是不再由界面决定。
 WORKER_JOBS = 1
@@ -2031,6 +2041,30 @@ class DesktopApp:
                                 "每本书下载前都可以在下载卡片里改。",
                      text_color=self.FAINT, anchor="w", font=_font(12),
                      wraplength=560, justify="left").pack(anchor="w", padx=18, pady=(2, 0))
+        ctk.CTkFrame(card, height=1, fg_color=self.HAIRLINE).pack(fill="x", padx=18, pady=(14, 0))
+        ctk.CTkLabel(card, text="译文", text_color=self.INK, anchor="w",
+                     font=_font(13, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
+        ctk.CTkLabel(card, text="微信读书给外文书配的机器翻译就在正文里，每段原文后面跟着译文；"
+                                "随书样式表默认把译文藏起来。这里决定导出时留哪一半，"
+                                "没有译文的书（中文书、未生成译本）不受影响。",
+                     text_color=self.FAINT, anchor="w", font=_font(12),
+                     wraplength=560, justify="left").pack(anchor="w", padx=18, pady=(2, 0))
+        self.translation_var = ctk.StringVar(value=_DEFAULT_TRANSLATION[0])
+        self.translation_box = ctk.CTkComboBox(
+            card, values=tuple(label for label, _value, _hint in _TRANSLATION_MODES),
+            variable=self.translation_var, width=168, height=28, state="readonly",
+            corner_radius=6, fg_color=self.CARD, border_color="#D5D9DF",
+            text_color=self.INK, font=_font(12), dropdown_font=_font(12),
+            dropdown_fg_color=self.CARD, dropdown_text_color=self.INK,
+            button_color=self.HAIRLINE, button_hover_color=self.SUNKEN)
+        self.translation_box.pack(anchor="w", padx=18, pady=(8, 0))
+        self.translation_hint = ctk.CTkLabel(card, text=_DEFAULT_TRANSLATION[2],
+                                             text_color=self.FAINT, anchor="w",
+                                             font=_font(11))
+        self.translation_hint.pack(anchor="w", padx=18, pady=(2, 0))
+        self.translation_var.trace_add(
+            "write", lambda *_a: self.translation_hint.configure(text=self._translation_mode()[2]))
+        self._make_combo_keyboard_reachable(self.translation_box)
         btns = ctk.CTkFrame(card, fg_color="transparent")
         btns.pack(fill="x", padx=18, pady=(8, 16))
         self._quiet_button(btns, "登录 / 切换账号", 136, self.open_login).pack(side="left")
@@ -4355,6 +4389,14 @@ class DesktopApp:
             flags.extend(["--appendix-scope", mode.appendix_scope])
         return flags
 
+    def _translation_mode(self) -> tuple[str, str, str]:
+        """当前译文档位的 (标签, worker 取值, 说明)。"""
+        label = self.translation_var.get() if hasattr(self, "translation_var") else _DEFAULT_TRANSLATION[0]
+        for option in _TRANSLATION_MODES:
+            if option[0] == label:
+                return option
+        return _DEFAULT_TRANSLATION
+
     def probe(self):
         if not self.selected_id:
             self._ask("showinfo", "先选择一本书", "先搜索并点击左侧的一本书，再进行章节检查。")
@@ -4526,7 +4568,9 @@ class DesktopApp:
         args = [str(book["bookId"]), "--jobs", str(WORKER_JOBS)]
         # appendix=True: 这是唯一真正会写书的地方，"注释和想法" 档把它翻译成
         # --unified-appendix，让书末多出注释分册和想法册（参考 EPUB 的形态）。
-        return args + self._annotation_flags(appendix=True)
+        # 译文档位同理显式下发，不让 worker 猜默认值。
+        return (args + self._annotation_flags(appendix=True)
+                + ["--translation", self._translation_mode()[1]])
 
     def _start_one(self, book: dict) -> None:
         """起一本的下载（队列与单本共用）。不弹确认框，直接跑。"""
