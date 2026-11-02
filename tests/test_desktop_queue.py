@@ -117,7 +117,7 @@ def test_queue_auto_continues_after_first_book_done():
         instance._spawn_pending = True
         assert instance.queue_running is True
         export_calls = [a for a, k in calls if k == "export"]
-        assert export_calls == [["111", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both"]], calls
+        assert export_calls == [["111", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both", "--translation", "bilingual"]], calls
         assert instance.selected_id == "111"
 
         # 第一本结束（成功）→ 自动接第二本
@@ -126,8 +126,8 @@ def test_queue_auto_continues_after_first_book_done():
 
         # 第二本也自动起 export worker
         export_calls = [a for a, k in calls if k == "export"]
-        assert export_calls == [["111", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both"],
-                                ["222", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both"]], calls
+        assert export_calls == [["111", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both", "--translation", "bilingual"],
+                                ["222", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both", "--translation", "bilingual"]], calls
         # 队列空了，但最后一本还在跑：queue_running 要等它结束才置 False，
         # 否则「队列已全部完成」永远不会显示。
         assert instance.download_queue == []
@@ -434,7 +434,7 @@ def test_queue_continues_through_partial_stop():
         instance._enqueue_checked()
         instance._start_queue()
         export_calls = [a for a, k in calls if k == "export"]
-        assert export_calls == [["111", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both"]], calls
+        assert export_calls == [["111", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both", "--translation", "bilingual"]], calls
 
         # 第一本以"暂停/断点"状态结束（code!=0, 非未解决）
         instance.last_unresolved = False
@@ -443,8 +443,8 @@ def test_queue_continues_through_partial_stop():
 
         # 第二本仍被自动起
         export_calls = [a for a, k in calls if k == "export"]
-        assert export_calls == [["111", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both"],
-                                ["222", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both"]], calls
+        assert export_calls == [["111", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both", "--translation", "bilingual"],
+                                ["222", "--jobs", "1", "--unified-appendix", "--appendix-scope", "both", "--translation", "bilingual"]], calls
     finally:
         app.messagebox.askyesno, app.messagebox.showinfo = original
         root.destroy()
