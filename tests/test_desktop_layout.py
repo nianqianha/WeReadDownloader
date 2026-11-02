@@ -266,6 +266,30 @@ def test_the_queue_checkbox_is_not_clipped_by_a_long_title():
         root.destroy()
 
 
+@test
+def test_the_translation_dropdown_sits_inside_the_download_card():
+    """「译文」下拉必须完整落在卡片里。
+
+    它和「标注方式」共享第 0 行，横向挤一挤就会被卡片右边缘裁掉——真机上第一版
+    显示成「双语（原文+译…」，下拉还在但看不见自己选了什么。这里量右边界，
+    两个下拉都必须整块在卡片可见宽度内。
+    """
+    root, instance = _make_gui()
+    try:
+        card = instance.export_panel
+        root.update()
+        right = card.winfo_rootx() + card.winfo_width()
+        for name, box in (("标注方式", instance.annotations_box),
+                          ("译文", instance.translation_box)):
+            box_right = box.winfo_rootx() + box.winfo_width()
+            assert box.winfo_ismapped(), "%s 下拉没有显示" % name
+            assert box_right <= right, (
+                "%s 下拉右边界 %d 超出卡片右边界 %d，会被裁掉"
+                % (name, box_right, right))
+    finally:
+        root.destroy()
+
+
 if __name__ == "__main__":
     for test_case in ALL_TESTS:
         test_case()

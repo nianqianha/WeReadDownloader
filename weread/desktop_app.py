@@ -84,11 +84,13 @@ _ANNOTATION_MODES = (
 _DEFAULT_ANNOTATION_MODE = _ANNOTATION_MODES[0]
 
 # 每个档位在界面上的后果，直接给用户看：附录有多大、会不会要划线。
+# 提示与「译文」下拉同处一行，太长会把下拉挤出卡片右边缘（实测 1280 宽被截成
+# 「双语（原文+译…」），所以这里只留最短能说明问题的说法，细节放到设置页。
 _ANNOTATION_HINTS = {
-    "注释和想法": "正文只留角标，注释与想法收进书末附录（文件明显变大）",
-    "注释": "只在书末附注释，不拉取想法",
-    "想法": "只在书末附想法，注角标保持原样",
-    "纯正文": "不要划线、注释和想法，最快、体积最小",
+    "注释和想法": "角标进正文，注释与想法收书末附录",
+    "注释": "书末只附注释，不拉取想法",
+    "想法": "书末只附想法，注角标照旧",
+    "纯正文": "不要划线、注释和想法，体积最小",
 }
 
 # 译文：微信读书给外文书配的机器翻译就在正文里（每段原文后面跟一段
@@ -2045,26 +2047,11 @@ class DesktopApp:
         ctk.CTkLabel(card, text="译文", text_color=self.INK, anchor="w",
                      font=_font(13, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
         ctk.CTkLabel(card, text="微信读书给外文书配的机器翻译就在正文里，每段原文后面跟着译文；"
-                                "随书样式表默认把译文藏起来。这里决定导出时留哪一半，"
-                                "没有译文的书（中文书、未生成译本）不受影响。",
+                                "随书样式表默认把译文藏起来。导出时留哪一半在下载卡片的"
+                                "「译文」里选（默认双语）；没有译文的书（中文书、未生成译本）"
+                                "不受影响，三种模式结果一致。",
                      text_color=self.FAINT, anchor="w", font=_font(12),
                      wraplength=560, justify="left").pack(anchor="w", padx=18, pady=(2, 0))
-        self.translation_var = ctk.StringVar(value=_DEFAULT_TRANSLATION[0])
-        self.translation_box = ctk.CTkComboBox(
-            card, values=tuple(label for label, _value, _hint in _TRANSLATION_MODES),
-            variable=self.translation_var, width=168, height=28, state="readonly",
-            corner_radius=6, fg_color=self.CARD, border_color="#D5D9DF",
-            text_color=self.INK, font=_font(12), dropdown_font=_font(12),
-            dropdown_fg_color=self.CARD, dropdown_text_color=self.INK,
-            button_color=self.HAIRLINE, button_hover_color=self.SUNKEN)
-        self.translation_box.pack(anchor="w", padx=18, pady=(8, 0))
-        self.translation_hint = ctk.CTkLabel(card, text=_DEFAULT_TRANSLATION[2],
-                                             text_color=self.FAINT, anchor="w",
-                                             font=_font(11))
-        self.translation_hint.pack(anchor="w", padx=18, pady=(2, 0))
-        self.translation_var.trace_add(
-            "write", lambda *_a: self.translation_hint.configure(text=self._translation_mode()[2]))
-        self._make_combo_keyboard_reachable(self.translation_box)
         btns = ctk.CTkFrame(card, fg_color="transparent")
         btns.pack(fill="x", padx=18, pady=(8, 16))
         self._quiet_button(btns, "登录 / 切换账号", 136, self.open_login).pack(side="left")
@@ -2608,6 +2595,22 @@ class DesktopApp:
         # 恢复成 readonly——也就是首次下载之前用户根本改不了标注模式，只能用它硬编码
         # 的默认值。既然默认值现在换成了「注释和想法」，这一格必须开机就可选。
         self.annotations_box.configure(state="readonly")
+        # 译文与标注方式并列，放在同一个操作区：选书之后当场决定要不要译文，不用
+        # 跑去设置页。三个档位的名字本身已经说明了后果，这一格不再配提示文字，
+        # 完整解释留在设置页（那里只说明，不再放第二个控件）。
+        ctk.CTkLabel(export, text="译文", text_color=self.FAINT,
+                     font=_font(12)).grid(row=0, column=4, sticky="e",
+                                          padx=(14, 6), pady=(12, 0))
+        self.translation_var = ctk.StringVar(value=_DEFAULT_TRANSLATION[0])
+        self.translation_box = ctk.CTkComboBox(
+            export, values=tuple(label for label, _value, _hint in _TRANSLATION_MODES),
+            variable=self.translation_var, width=132, height=28, state="readonly",
+            corner_radius=6, fg_color=self.CARD, border_color="#D5D9DF",
+            text_color=self.INK, font=_font(12), dropdown_font=_font(12),
+            dropdown_fg_color=self.CARD, dropdown_text_color=self.INK,
+            button_color=self.HAIRLINE, button_hover_color=self.SUNKEN)
+        self.translation_box.grid(row=0, column=5, sticky="e", padx=(0, 12), pady=(12, 0))
+        self._make_combo_keyboard_reachable(self.translation_box)
         self.probe_button = ctk.CTkButton(
             export, text="先检查第一章", command=self.probe, height=36,
             corner_radius=6, fg_color=self.CARD, hover_color=self.SUNKEN,
@@ -4620,7 +4623,8 @@ class DesktopApp:
         if not self._ask("askyesno",
                 "开始下载",
                 f"准备下载：{self.selected_title}\n作者：{self.selected_author or '暂无信息'}\n\n"
-                f"标注：{mode.label}\n\n"
+                f"标注：{mode.label}\n"
+                f"译文：{self._translation_mode()[0]}\n\n"
                 "已有章节会自动续传。若微信读书返回空章节或无法确认的划线，会记录问题并继续检查其它章节；"
                 "有未解决章节时不会生成不完整 EPUB。继续吗？"):
             return
