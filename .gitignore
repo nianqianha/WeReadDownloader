@@ -14,6 +14,9 @@ __pycache__/
 *.log
 *.bak
 *.tmp
+# oh-my-openagent 会把运行状态写进「项目根」的 .omo/run-continuation/，
+# 那是工具自己的账本，不属于这个仓库。
+.omo/
 Thumbs.db
 desktop.ini
 
@@ -21,7 +24,8 @@ desktop.ini
 # derived .ico files are tracked; the JPEGs they were built from are not.
 assets/icon-sources/
 
-# Design reference captures (UI screenshots) - tracked for reference only
+# 设计期基准截图只留在本机：它们是当时界面的样子，会过期，跟着仓库走只会误导
+# 后来的人（真正的对外截图在 docs/screenshots/，那几张是跟踪的）。
 docs/design/*.png
 
 # Never publish anything that could carry a session, even by accident.
@@ -34,5 +38,6 @@ credentials.json
 
 # NOTE: these ARE tracked on purpose:
 #   *.spec / installer\*.iss / installer\*.isl  - reproducible build + installer definition
-#   assets\ (icons) / design\ (reference captures + NOTES.md)
+#   assets\ (icons) / docs\design\ (NOTES.md + capture.py；里面的 PNG 不跟踪)
+#   docs\screenshots\ (README 用的对外截图，需随界面更新)
 #   *.py / *.lua / *.html / *.md                 - source and its tests
