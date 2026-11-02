@@ -243,6 +243,79 @@ WeReadWorker.exe (CLI 引擎)
 
 ## 四、变更日志（Keep a Changelog 格式）
 
+### 2026-11-02 全项目体检：README 逐条核对 + 截图重拍 + 仓库残留清理（**Docs / Chore**，PR #88）
+
+两份并行只读审计（README 事实核对、残留与死代码）加人工复核，结论与处理：
+
+- **README 修正 6 处事实错误**：
+  - 「试读第一章确认协议可用」→ 实际是验证能取到正文，与协议无关；
+  - 「注释不导入正文，也不生成注册」→「注册」一词代码里不存在，应指「注」角标；
+  - 安装位置补上非管理员时降级到 `%LOCALAPPDATA%\Programs`；
+  - CLI 列表漏了 `--probe-chapter` / `--serve` / `--output`，已补全并注明 `--help`；
+  - 「仓库的 pre-push 钩子会扫描」→ 钩子在 `.git/hooks/`，**不随仓库分发**，改成
+    「CI 跑 `weread/privacy_gate.py`；开发机的 pre-push 只是调用同一个脚本」；
+  - 保留「每页 6 本」——审计在引擎里找到 `max_books=6` 判为错误，实际 GUI 有
+    `RESULTS_PER_PAGE = 6`（desktop_app.py:340），原描述是对的。
+- **功能与界面同步译文**：功能列表加「外文书译文」；界面表的「设置」行、
+  「③ 下载到电脑」清单补上译文下拉；已知限制补「译文质量与账号权限」。
+- **截图全部重拍**（旧图是 10-23 的，那时还没有译文下拉）：`01-workflow.png`
+  （搜索＋选中＋译文双语）、`02-shelf.png`（书架与本机已导出）、新增
+  `03-settings.png`（译文说明）。均为 1280×812，与旧图同规格。
+- **清理残留**：删 `docs/notes/dsh-web-notify-local-patch.md`（**另一个项目**的备忘，
+  与本仓库零关联）、删 `assets/weread-web.ico`（网页版下线后的无引用图标）。
+- **修好三个路径已失效的开发脚本**（都还能用，只是仓库搬过家）：
+  `docs/design/capture.py`（`sys.path` 指到 docs/ 而非 `weread/`）、
+  `tools/build_real_epub.py`（`PROJ` 指向不存在的嵌套目录）、
+  `tools/dump_range.py`（在 tools/ 里找 `weread_desktop.py`）。
+- **`.gitignore` 注释与行为对齐**：`docs/design/*.png` 实际是被忽略的，原注释却写
+  「tracked for reference only」；补上 `docs/screenshots/` 是跟踪项；把 oh-my-openagent
+  写进项目根的 `.omo/` 挡掉。
+- **判定为「该留」**：`plugins/weread-importer.koplugin`（实验性但被 README 与文档引用）、
+  `installer/drive.py`（安装向导自动化）、`tests/test_disk_edge_cases.py:139` 的 TODO
+  （记录「ENOSPC 时 .part 会留下」这一现状，不是欠账）。
+
+**教训（本轮真出过一次事故）**：`git reset --hard FETCH_HEAD` 把这份文档里**未提交**的
+39 行改动一起冲掉了（用户自己的路径修正 + 上一条译文条目）。靠 `git fsck` 找到已 drop
+的 stash 提交 `3fdcfe4` 才取回原文。以后对齐远端必须先 `git status` + `git stash push -- <该文件>`。
+
+### 2026-11-02 外文书译文：从"下载了但被藏起来"到可选留哪一半（**Added / Fixed**）
+
+**结论先行**：译文从来不需要新接口，旧版本就已经把它下载进 EPUB 了，只是同时
+照搬了微信读书用来隐藏它的那条 CSS，所以"文件里有、屏幕上没有"。
+
+- **机制（实测确认，非推测）**：翻译不是独立接口、也不是另一本书。译文就在章节
+  正文分片里，每个原文段落后面紧跟一段 `<p class="wr-translation">中文</p>`；
+  随书样式表带 `.wr-translation{display:none!important}`，由阅读器自己的解析开关
+  （`enableTranslate: isTranslationEnabled`）决定保留哪一半。桌面端没有那个开关。
+  - 实测路径：`/web/book/chapter/e_0|e_1|e_3` 三片拼装 + `decode_shards` 解出的
+    XHTML 里直接用正则数 `wr-translation`；书的元数据里另有
+    `otherType[0].translateDone=true` 可作"译本已生成"的旁证。
+  - 排除的假设（都试过，别再走一遍）：加 `bookVersion`/`translateMode`/`transType`/
+    `type`/`format`/`sc`/`st`/`lang` 参数重签名后请求 e_0，服务端一律返回**逐字节
+    相同**的正文——正文接口没有翻译开关。JS 是字符串表混淆的，静态挖不到请求参数
+    构造；公开端点表里与翻译有关的只有 App 端 `/trans/pdfepub`（触发/轮询生成译本）。
+- **新增 `--translation bilingual|translation|original`**（`TRANSLATION_MODES`）：
+  - `bilingual`（默认）两半都留，并去掉样式表里对 `.wr-translation` 的
+    `display:none`（`reveal_translation_style()` 只改这一类选择器）；
+  - `translation` 丢掉"紧随译文的那一段原文"，其余段落（标题、插图、无译文段落）保留；
+  - `original` 丢掉全部译文段落，且**不动样式表**——输出与引入本功能前一致。
+- **取舍放在打包阶段**（`write_epub(..., translation=)`）：`.body` 缓存始终存完整
+  双语，换模式不必重下。实测 120 章的书重打包 ≈ 10 秒。
+- **译文段数在打包时统计**（`write_epub` 返回 `(篇数, 章数)`，回填 `omission_report`）。
+  第一版在下 `download_one` 里数，续传/换模式重打包时整章被跳过 → manifest 谎报
+  `translation_paragraphs: 0`，真机复现后改掉。
+- **GUI**：设置页新增「译文」下拉（`_TRANSLATION_MODES`），值经 `_queue_args()` 用
+  `--translation` 显式下发；`_translation_mode()` 缺控件时回落默认档。
+- **测试**：`tests/test_translation_modes.py` 11 项（过滤三档、无译文书三档均不变、
+  样式解除只动 `.wr-translation`、端到端产物）+ `test_desktop_annotation_modes` 新增
+  1 项（三档都下发到 worker）；两处旧断言补上 `--translation bilingual`。全量 548 通过。
+- **真机验证**（隔离 `LOCALAPPDATA`，不碰真实书架）：Pride and Prejudice 721260，
+  120 章。双语 2092 段译文、118 章带译文、`style.css` 不再隐藏；仅译文只剩中文；
+  仅原文只剩英文且样式表保留隐藏规则。
+- **未做 / 边界**：不自己翻译、不申请翻译权限；译本不完整时「仅译文」保留没有译文
+  的原文段落；`--translation` 对中文书无影响。
+- **状态**：本地提交 `90160b5`，**未推远端**（按铁律 2 等用户批准）。
+
 ### 2026-10-24 v1.0.8：MD5 重试跨坏窗口 + 真机双轮验证（**Fixed / Changed**）
 
 - **MD5 重试退避加宽**：`chapter_html` 的重试节奏从 0.5/1.0/1.5s 改为 2/8/20s。
@@ -738,7 +811,7 @@ EPUB 里的图片再拆：**1569 个条目、686 张唯一图片**，按 CRC 统
 - **分册**：注按 ~3000 条/册拆分（后汉书 36,185 注 → 12 册，0.37–1.32 MB/册），
   想法单独一册（307 KB）——单文件 12.2 MB 实测会卡。
 - **验证**：后汉书 155 章生成 7.8 MB EPUB，正文注角标 36,185 == 附录注条目 36,185；
-  三字经 0 注/34 想法正常。EPUB 在 `想法注释内嵌尝试/测试产物/`。
+  三字经 0 注/34 想法正常。EPUB 在 `各类\Kindle\07_试验区\想法注释内嵌-20261020\测试产物\`（2026-10-25 工作区拆分后迁入）。
 
 **Added**（**中**——把一本书的全部想法收敛到书末一个独立章节，正文只留角标）
 
