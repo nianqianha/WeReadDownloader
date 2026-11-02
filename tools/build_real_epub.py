@@ -20,7 +20,7 @@ import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PROJ = HERE / "weread-downloader"
+PROJ = HERE.parent
 sys.path.insert(0, str(PROJ / "weread"))
 
 def _load(name, path):
