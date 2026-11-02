@@ -10,7 +10,7 @@ import json
 import sys
 from pathlib import Path
 
-SCRIPT = Path(__file__).with_name("weread_desktop.py")
+SCRIPT = Path(__file__).resolve().parent.parent / "weread" / "weread_desktop.py"
 spec = importlib.util.spec_from_file_location("weread_desktop", SCRIPT)
 wd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wd)
