@@ -84,12 +84,26 @@ _ANNOTATION_MODES = (
 _DEFAULT_ANNOTATION_MODE = _ANNOTATION_MODES[0]
 
 # 每个档位在界面上的后果，直接给用户看：附录有多大、会不会要划线。
+# 提示与「译文」下拉同处一行，太长会把下拉挤出卡片右边缘（实测 1280 宽被截成
+# 「双语（原文+译…」），所以这里只留最短能说明问题的说法，细节放到设置页。
 _ANNOTATION_HINTS = {
-    "注释和想法": "正文只留角标，注释与想法收进书末附录（文件明显变大）",
-    "注释": "只在书末附注释，不拉取想法",
-    "想法": "只在书末附想法，注角标保持原样",
-    "纯正文": "不要划线、注释和想法，最快、体积最小",
+    "注释和想法": "角标进正文，注释与想法收书末附录",
+    "注释": "书末只附注释，不拉取想法",
+    "想法": "书末只附想法，注角标照旧",
+    "纯正文": "不要划线、注释和想法，体积最小",
 }
+
+# 译文：微信读书给外文书配的机器翻译就在正文里（每段原文后面跟一段
+# class="wr-translation" 的译文），随书样式表却把它 display:none 藏起来，由
+# 阅读器自己的开关决定显示哪一半。EPUB 没有那个开关，所以要问用户留哪一半。
+# 名称刻意短：这一格与「标注方式」同处一行，宽标签会被自己的下拉框截断
+# （实测「双语（原文＋译文）」在 120px 里显示成「双语（原文+译…」）。
+_TRANSLATION_MODES = (
+    ("双语", "bilingual", "原文与译文都留，译文解除隐藏"),
+    ("仅译文", "translation", "只留译文，丢掉对应的原文段落"),
+    ("仅原文", "original", "只留原文，丢掉译文"),
+)
+_DEFAULT_TRANSLATION = _TRANSLATION_MODES[0]
 
 # 并发固定 1。GUI 上的并发选择器已删：实测 jobs>1 更容易触发 426 限流，而队列是
 # 串行执行的、单本下载也没有并发收益。worker 仍接受 --jobs，只是不再由界面决定。
@@ -2031,6 +2045,15 @@ class DesktopApp:
                                 "每本书下载前都可以在下载卡片里改。",
                      text_color=self.FAINT, anchor="w", font=_font(12),
                      wraplength=560, justify="left").pack(anchor="w", padx=18, pady=(2, 0))
+        ctk.CTkFrame(card, height=1, fg_color=self.HAIRLINE).pack(fill="x", padx=18, pady=(14, 0))
+        ctk.CTkLabel(card, text="译文", text_color=self.INK, anchor="w",
+                     font=_font(13, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
+        ctk.CTkLabel(card, text="微信读书给外文书配的机器翻译就在正文里，每段原文后面跟着译文；"
+                                "随书样式表默认把译文藏起来。导出时留哪一半在下载卡片的"
+                                "「译文」里选（默认双语）；没有译文的书（中文书、未生成译本）"
+                                "不受影响，三种模式结果一致。",
+                     text_color=self.FAINT, anchor="w", font=_font(12),
+                     wraplength=560, justify="left").pack(anchor="w", padx=18, pady=(2, 0))
         btns = ctk.CTkFrame(card, fg_color="transparent")
         btns.pack(fill="x", padx=18, pady=(8, 16))
         self._quiet_button(btns, "登录 / 切换账号", 136, self.open_login).pack(side="left")
@@ -2542,8 +2565,12 @@ class DesktopApp:
         ctk.CTkLabel(export, text="标注方式", text_color=self.FAINT,
                      font=_font(12)).grid(row=0, column=1, sticky="e",
                                           padx=(0, 6), pady=(12, 0))
+        # 提示文字是这个行里唯一可伸缩的东西，给它一个宽度上限让它换行：CI 的
+        # runner 窄（1024），整行固定宽度会把「译文」下拉挤出卡片右边缘（实测
+        # 1120 宽 100% 缩放差 12px、1000 宽差 57px）。封顶后挤的是它自己。
         self.annotations_hint = ctk.CTkLabel(export, text="", text_color=self.FAINT,
-                                             font=_font(11), anchor="w")
+                                             font=_font(11), anchor="w",
+                                             wraplength=132, justify="left")
         self.annotations_hint.grid(row=0, column=3, sticky="w", padx=(10, 12),
                                    pady=(12, 0))
         # 并发选择器去掉了：实测把 jobs 提到 2 以上更容易触发 426 限流，而队列本身
@@ -2555,7 +2582,7 @@ class DesktopApp:
         self.annotations_var = ctk.StringVar(value=_DEFAULT_ANNOTATION_MODE.label)
         self.annotations_box = ctk.CTkComboBox(
             export, values=tuple(mode.label for mode in _ANNOTATION_MODES),
-            variable=self.annotations_var, width=112, height=28, state="readonly",
+            variable=self.annotations_var, width=104, height=28, state="readonly",
             # 与原来「并发」框同一套质感：圆角、卡片底色、下拉列表也用卡片色，
             # 按钮区沿用顶栏的细线色。不设 border_width——CTkComboBox 默认无边框，
             # 加了反而比原来的并发框多一圈描边。
@@ -2574,6 +2601,22 @@ class DesktopApp:
         # 恢复成 readonly——也就是首次下载之前用户根本改不了标注模式，只能用它硬编码
         # 的默认值。既然默认值现在换成了「注释和想法」，这一格必须开机就可选。
         self.annotations_box.configure(state="readonly")
+        # 译文与标注方式并列，放在同一个操作区：选书之后当场决定要不要译文，不用
+        # 跑去设置页。三个档位的名字本身已经说明了后果，这一格不再配提示文字，
+        # 完整解释留在设置页（那里只说明，不再放第二个控件）。
+        ctk.CTkLabel(export, text="译文", text_color=self.FAINT,
+                     font=_font(12)).grid(row=0, column=4, sticky="e",
+                                          padx=(14, 6), pady=(12, 0))
+        self.translation_var = ctk.StringVar(value=_DEFAULT_TRANSLATION[0])
+        self.translation_box = ctk.CTkComboBox(
+            export, values=tuple(label for label, _value, _hint in _TRANSLATION_MODES),
+            variable=self.translation_var, width=96, height=28, state="readonly",
+            corner_radius=6, fg_color=self.CARD, border_color="#D5D9DF",
+            text_color=self.INK, font=_font(12), dropdown_font=_font(12),
+            dropdown_fg_color=self.CARD, dropdown_text_color=self.INK,
+            button_color=self.HAIRLINE, button_hover_color=self.SUNKEN)
+        self.translation_box.grid(row=0, column=5, sticky="e", padx=(0, 12), pady=(12, 0))
+        self._make_combo_keyboard_reachable(self.translation_box)
         self.probe_button = ctk.CTkButton(
             export, text="先检查第一章", command=self.probe, height=36,
             corner_radius=6, fg_color=self.CARD, hover_color=self.SUNKEN,
@@ -4355,6 +4398,14 @@ class DesktopApp:
             flags.extend(["--appendix-scope", mode.appendix_scope])
         return flags
 
+    def _translation_mode(self) -> tuple[str, str, str]:
+        """当前译文档位的 (标签, worker 取值, 说明)。"""
+        label = self.translation_var.get() if hasattr(self, "translation_var") else _DEFAULT_TRANSLATION[0]
+        for option in _TRANSLATION_MODES:
+            if option[0] == label:
+                return option
+        return _DEFAULT_TRANSLATION
+
     def probe(self):
         if not self.selected_id:
             self._ask("showinfo", "先选择一本书", "先搜索并点击左侧的一本书，再进行章节检查。")
@@ -4526,7 +4577,9 @@ class DesktopApp:
         args = [str(book["bookId"]), "--jobs", str(WORKER_JOBS)]
         # appendix=True: 这是唯一真正会写书的地方，"注释和想法" 档把它翻译成
         # --unified-appendix，让书末多出注释分册和想法册（参考 EPUB 的形态）。
-        return args + self._annotation_flags(appendix=True)
+        # 译文档位同理显式下发，不让 worker 猜默认值。
+        return (args + self._annotation_flags(appendix=True)
+                + ["--translation", self._translation_mode()[1]])
 
     def _start_one(self, book: dict) -> None:
         """起一本的下载（队列与单本共用）。不弹确认框，直接跑。"""
@@ -4576,7 +4629,8 @@ class DesktopApp:
         if not self._ask("askyesno",
                 "开始下载",
                 f"准备下载：{self.selected_title}\n作者：{self.selected_author or '暂无信息'}\n\n"
-                f"标注：{mode.label}\n\n"
+                f"标注：{mode.label}\n"
+                f"译文：{self._translation_mode()[0]}\n\n"
                 "已有章节会自动续传。若微信读书返回空章节或无法确认的划线，会记录问题并继续检查其它章节；"
                 "有未解决章节时不会生成不完整 EPUB。继续吗？"):
             return
