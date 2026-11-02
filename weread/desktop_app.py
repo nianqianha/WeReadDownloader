@@ -96,8 +96,10 @@ _ANNOTATION_HINTS = {
 # 译文：微信读书给外文书配的机器翻译就在正文里（每段原文后面跟一段
 # class="wr-translation" 的译文），随书样式表却把它 display:none 藏起来，由
 # 阅读器自己的开关决定显示哪一半。EPUB 没有那个开关，所以要问用户留哪一半。
+# 名称刻意短：这一格与「标注方式」同处一行，宽标签会被自己的下拉框截断
+# （实测「双语（原文＋译文）」在 120px 里显示成「双语（原文+译…」）。
 _TRANSLATION_MODES = (
-    ("双语（原文＋译文）", "bilingual", "两种都留，译文解除隐藏"),
+    ("双语", "bilingual", "原文与译文都留，译文解除隐藏"),
     ("仅译文", "translation", "只留译文，丢掉对应的原文段落"),
     ("仅原文", "original", "只留原文，丢掉译文"),
 )
@@ -2563,8 +2565,12 @@ class DesktopApp:
         ctk.CTkLabel(export, text="标注方式", text_color=self.FAINT,
                      font=_font(12)).grid(row=0, column=1, sticky="e",
                                           padx=(0, 6), pady=(12, 0))
+        # 提示文字是这个行里唯一可伸缩的东西，给它一个宽度上限让它换行：CI 的
+        # runner 窄（1024），整行固定宽度会把「译文」下拉挤出卡片右边缘（实测
+        # 1120 宽 100% 缩放差 12px、1000 宽差 57px）。封顶后挤的是它自己。
         self.annotations_hint = ctk.CTkLabel(export, text="", text_color=self.FAINT,
-                                             font=_font(11), anchor="w")
+                                             font=_font(11), anchor="w",
+                                             wraplength=132, justify="left")
         self.annotations_hint.grid(row=0, column=3, sticky="w", padx=(10, 12),
                                    pady=(12, 0))
         # 并发选择器去掉了：实测把 jobs 提到 2 以上更容易触发 426 限流，而队列本身
@@ -2576,7 +2582,7 @@ class DesktopApp:
         self.annotations_var = ctk.StringVar(value=_DEFAULT_ANNOTATION_MODE.label)
         self.annotations_box = ctk.CTkComboBox(
             export, values=tuple(mode.label for mode in _ANNOTATION_MODES),
-            variable=self.annotations_var, width=112, height=28, state="readonly",
+            variable=self.annotations_var, width=104, height=28, state="readonly",
             # 与原来「并发」框同一套质感：圆角、卡片底色、下拉列表也用卡片色，
             # 按钮区沿用顶栏的细线色。不设 border_width——CTkComboBox 默认无边框，
             # 加了反而比原来的并发框多一圈描边。
@@ -2604,7 +2610,7 @@ class DesktopApp:
         self.translation_var = ctk.StringVar(value=_DEFAULT_TRANSLATION[0])
         self.translation_box = ctk.CTkComboBox(
             export, values=tuple(label for label, _value, _hint in _TRANSLATION_MODES),
-            variable=self.translation_var, width=132, height=28, state="readonly",
+            variable=self.translation_var, width=96, height=28, state="readonly",
             corner_radius=6, fg_color=self.CARD, border_color="#D5D9DF",
             text_color=self.INK, font=_font(12), dropdown_font=_font(12),
             dropdown_fg_color=self.CARD, dropdown_text_color=self.INK,
