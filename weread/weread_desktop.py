@@ -1062,7 +1062,11 @@ def body_fragment(xhtml: str) -> str:
 # 文件里、屏幕上没有」。三种取法由 --translation 选。
 TRANSLATION_MODES = ("bilingual", "translation", "original")
 
-_PARA_BLOCK = re.compile(r"<p\b[^>]*>.*?</p\s*>", re.S | re.I)
+# 译文段落不都是 <p>：实测《英文原版 无人生还》3300198557 的**章节标题**也是
+# <h1 class="wr-translation">，只按 <p> 过滤会漏掉全书 49 条标题译文。这里覆盖
+# 到标题，但不收 <div>/<blockquote>：同类标签可以互相嵌套，非贪婪匹配会在内层
+# 闭合处提前截断，宁可漏掉也不把正文截坏（可预期的那类已在真机验证里确认没有）。
+_BLOCK_BLOCK = re.compile(r"<(p|h[1-6])\b[^>]*>.*?</\1\s*>", re.S | re.I)
 _TRANSLATION_MARK = re.compile(r'\bclass\s*=\s*"[^"]*\bwr-translation\b', re.I)
 
 
@@ -1082,7 +1086,7 @@ def apply_translation_mode(body: str, mode: str) -> tuple[str, int]:
     """
     if mode not in TRANSLATION_MODES:
         raise ValueError(f"Unknown translation mode: {mode}")
-    blocks = list(_PARA_BLOCK.finditer(body))
+    blocks = list(_BLOCK_BLOCK.finditer(body))
     if not blocks:
         return body, 0
     flags = [_is_translation_block(block.group(0)) for block in blocks]

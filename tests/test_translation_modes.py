@@ -43,6 +43,24 @@ class TranslationFilterTests(unittest.TestCase):
         assert body == BODY
         assert count == 2, count
 
+    def test_translated_headings_are_filtered_too(self):
+        """章节标题也带译文：实测《英文原版 无人生还》全是 <h1 class="wr-translation">。
+
+        只按 <p> 过滤会漏掉全书 49 条标题译文，「仅原文」里仍留着中文标题。
+        """
+        body = ('<h1>Chapter 1</h1>'
+                '<h1 class="wr-translation">第一章</h1>'
+                "<p>Text one.</p>"
+                '<p class="wr-translation">正文一。</p>')
+        original, count = wd.apply_translation_mode(body, "original")
+        assert count == 2, count
+        assert "Chapter 1" in original and "第一章" not in original
+        assert "正文一。" not in original
+
+        only, _count = wd.apply_translation_mode(body, "translation")
+        assert "第一章" in only and "Chapter 1" not in only
+        assert "正文一。" in only and "Text one." not in only
+
     def test_original_drops_translation_and_keeps_everything_else(self):
         body, count = wd.apply_translation_mode(BODY, "original")
         assert "wr-translation" not in body
