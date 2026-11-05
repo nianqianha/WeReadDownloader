@@ -59,13 +59,14 @@ with tempfile.TemporaryDirectory() as tmp:
     target.mkdir()
     wd._set_private_acl(target, True)
     # icacls writes the account name in the console codepage (GBK on this box),
-    # not UTF-8, so compare on the SID-stable tail of the ACE instead of the
-    # literal account string.
+    # not UTF-8, so the granted account is compared by name from the current
+    # session rather than any hardcoded identity.
+    account = os.environ.get("USERNAME", "")
     p = subprocess.run(["icacls", str(target)], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     out = p.stdout
     cases.append(("happy path still grants the current user",
-                  ":(OI)(CI)(F)" in out and "<account>" in out))
+                  bool(account) and ":(OI)(CI)(F)" in out and account in out))
     # exactly one ACE line before the summary, i.e. inheritance was dropped
     aces = [l for l in out.splitlines() if ":" in l and "(" in l]
     cases.append(("happy path drops inherited entries", len(aces) == 1))
