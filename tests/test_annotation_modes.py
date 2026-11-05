@@ -19,7 +19,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# 以前这里是写死的绝对路径（C:\Users\asus\Desktop\各类\weread-downloader），
+# 早期版本曾把仓库绝对路径写死在本文件里，导致别人机器/CI 收集阶段就报错，
 # 于是这个文件在别人机器上、在 CI 上都在收集阶段就 FileNotFoundError。仓库里
 # 另外七个测试文件都用 __file__ 定位，这里统一成同一种写法。
 PROJ = Path(__file__).resolve().parent.parent

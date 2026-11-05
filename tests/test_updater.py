@@ -127,7 +127,7 @@ def test_install_location_judgement():
     assert updater._is_installed_under_program_files(
         Path("C:/Program Files/WeReadDownloader/WeReadDesktop/WeReadDesktop.exe")) is True
     assert updater._is_installed_under_program_files(
-        Path("C:/Users/asus/AppData/Local/Programs/WeReadDownloader/WeReadDesktop/WeReadDesktop.exe")) is False
+        Path("C:/Users/<user>/AppData/Local/Programs/WeReadDownloader/WeReadDesktop/WeReadDesktop.exe")) is False
 
 
 # ---------------------------------------------------------------- 多源回退（2026-10-24）
