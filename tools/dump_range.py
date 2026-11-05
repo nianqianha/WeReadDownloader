@@ -8,6 +8,7 @@ guessing anchors, and the "cannot be filled in" conclusion was wrong.
 import importlib.util
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "weread" / "weread_desktop.py"
@@ -52,7 +53,7 @@ if isinstance(rows, list) and rows:
             shapes[type(v).__name__] = shapes.get(type(v).__name__, 0) + 1
     out.append("range shapes: %s" % shapes)
 
-dest = r"C:\Users\<user>\AppData\Local\Temp\opencode\range_shape.txt"
+dest = Path(tempfile.gettempdir()) / "weread-range-shape.txt"
 import io as _io
 _io.open(dest, "w", encoding="utf-8").write("\n".join(out))
 print("\n".join(out[:8]))
