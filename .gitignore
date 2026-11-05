@@ -24,9 +24,9 @@ desktop.ini
 # derived .ico files are tracked; the JPEGs they were built from are not.
 assets/icon-sources/
 
-# 设计期基准截图只留在本机：它们是当时界面的样子，会过期，跟着仓库走只会误导
-# 后来的人（真正的对外截图在 docs/screenshots/，那几张是跟踪的）。
-docs/design/*.png
+# 设计期基准截图与内部笔记不进公开仓：它们已随内部文档迁到私有仓
+# kindle-workspace 的 项目文档/weread-downloader/，这里只挡本机残留。
+docs/design/
 
 # Never publish anything that could carry a session, even by accident.
 weread-live-settings.lua
@@ -38,6 +38,5 @@ credentials.json
 
 # NOTE: these ARE tracked on purpose:
 #   *.spec / installer\*.iss / installer\*.isl  - reproducible build + installer definition
-#   assets\ (icons) / docs\design\ (NOTES.md + capture.py；里面的 PNG 不跟踪)
-#   docs\screenshots\ (README 用的对外截图，需随界面更新)
+#   assets\ (icons) / docs\screenshots\ (README 用的对外截图，需随界面更新)
 #   *.py / *.lua / *.html / *.md                 - source and its tests
