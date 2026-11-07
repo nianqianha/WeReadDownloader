@@ -6,6 +6,10 @@ PyInstaller 自身的 bootloader 采用 GPLv2 或更高版本，但带有明确�
 （special exception），允许使用 PyInstaller 构建和分发专有/闭源程序，因此**不会**
 以任何方式传染（copyleft）本应用的代码。
 
+本应用自身自 2026-11-07 起改用 PolyForm Noncommercial 1.0.0（见 LICENSE 与
+WeReadDownloader#91）。上述第三方库均为宽松许可证，允许以一个更严格的许可证
+再分发本应用；它们的许可文本与署名义务不因本应用换协议而改变。
+
 ================================================================================
 customtkinter —— Creative Commons Zero v1.0 Universal (CC0 1.0)
   公共领域贡献。无署名或其他义务。

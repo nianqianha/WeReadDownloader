@@ -105,9 +105,11 @@ Source: "..\release-fresh\WeReadWorker\*"; DestDir: "{app}\WeReadWorker"; \
 Source: "..\assets\weread-app.ico"; DestDir: "{app}\assets"; \
     Flags: ignoreversion
 
-; 许可证随安装包分发：LICENSE 为本程序自身（MIT），THIRD_PARTY_LICENSES.txt 为
-; 打包进 exe 的第三方库许可声明。自更新拉起的 Setup.exe 装出去也含这两份，
-; 满足 MIT/BSD/Apache 的署名义务，且不与未签名的 SmartScreen 警告产生额外风险。
+; 许可证随安装包分发：LICENSE 为本程序自身（PolyForm Noncommercial 1.0.0，
+; 2026-11-07 经全体版权人同意由 MIT 换入，见 WeReadDownloader#91），
+; THIRD_PARTY_LICENSES.txt 为打包进 exe 的第三方库许可声明。自更新拉起的
+; Setup.exe 装出去也含这两份，满足 MIT/BSD/Apache 的署名义务，
+; 且不与未签名的 SmartScreen 警告产生额外风险。
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_LICENSES.txt"; DestDir: "{app}"; Flags: ignoreversion
 
