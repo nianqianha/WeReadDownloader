@@ -17,6 +17,7 @@ Windows 桌面程序，Tk 图形界面，下载引擎是一个独立的 worker �
 - **断点续传**：章节、图片、划线数据逐章落盘；中断后继续下载不会从头再来。
 - **排队下载**：勾选多本加入队列，按顺序自动下载；可暂停在当前这本、可跳过某本、结束时汇总未完成的书。
 - **四种标注方式**：注释和想法 / 注释 / 想法 / 纯正文。
+- **划线开关**：下载卡片里的「划线」勾选决定正文里画不画划线高亮；关掉不影响注释与想法的收录。
 - **外文书译文**：微信读书自带机器翻译的书，可以选**双语**（原文＋译文）、仅译文或仅原文；默认双语，换档不用重新下载。
 - **统一附录**：注释与想法收进书末分册，正文只留可点的角标。
 - **缺失说明**：书里少了什么（缺图、未定位的划线）写进 `manifest.json`，下载完成时也会提示。
@@ -76,7 +77,7 @@ Windows 桌面程序，Tk 图形界面，下载引擎是一个独立的 worker �
 
 - **① 搜索结果**：搜索结果卡片，可勾选多本加入队列；每页 6 本，用底部翻页条切换。
 - **② 确认书籍**：封面、作者、分类、出版社、出版时间、评分、书籍 ID 和简介。选错版本时看这一栏。
-- **③ 下载到电脑**：标注方式、译文、先检查第一章、开始/继续下载、暂停、退出登录、查看技术日志、打开下载目录。选书时当场定标注与译文档位，确认框会复述这次的选择。
+- **③ 下载到电脑**：标注方式、译文、划线、先检查第一章、开始/继续下载、暂停、退出登录、查看技术日志、打开下载目录。选书时当场定标注与译文档位，确认框会复述这次的选择。
 
 ### 我的书架
 
@@ -119,6 +120,17 @@ Windows 桌面程序，Tk 图形界面，下载引擎是一个独立的 worker �
 | **注释** | 有 | 书末附录 | 无 |
 | **想法** | 有 | 无 | 书末附录 |
 | **纯正文** | 无 | 无 | 无 |
+
+**划线勾选**：上表「划线」一列说的是默认状态。下载卡片「译文」右边的「划线」勾选（默认勾选）与四档正交：
+
+| 勾选 | 效果 |
+|---|---|
+| 勾选（默认） | 划线照常画进正文 |
+| 取消 | 正文不再画划线高亮；注释与想法的收录、想法角标都不受影响 |
+
+- 想法的数据挂在划线接口返回的区间上，所以取消勾选**不会**减少接口请求，只是不画标记；要连数据一起省掉，用「纯正文」档。
+- 取消勾选的书，`manifest.json` 的 `omissions.underline_marks` 为 `false`，此时 `underlines_not_placed` 等划线计数为 0 表示**没有尝试落点**，不是「落点全部成功」。
+- 换勾选会作废这本书的章节缓存并重取——划线在抓取时注入，与换标注方式同一代价。
 
 **附录怎么排**：正文里只保留角标——注是「注」字角标，想法是蓝色 `[N]`——点角标跳到书末对应的条目，条目上的编号可以跳回原文。注按约 3000 条一册分批，想法单独一册，和普通章节一起出现在目录里，不占用阅读位置。
 
@@ -196,6 +208,7 @@ Windows 桌面程序，Tk 图形界面，下载引擎是一个独立的 worker �
 | 字段 | 含义 |
 |---|---|
 | `text_complete` | 正文是否完整（缺章时不会发布 EPUB） |
+| `underline_marks` | 正文里画没画划线（下载卡片「划线」勾选）；`false` 时划线相关计数为 0 表示没有尝试落点 |
 | `images_dropped` / `chapters_with_dropped_images` | 服务端已删除或缺图的图片数与涉及章节 |
 | `images_dropped_note_markers` | 其中属于「注」角标图（note.png）的数量；注文本身已保留 |
 | `underlines_not_placed` / `chapters_with_unplaced_underlines` | 原文里找不到可用位置、被略去的划线条数与章节 |
@@ -311,7 +324,7 @@ pyinstaller --distpath release-fresh --workpath build-fresh-gui packaging/WeRead
 
 产物：`release-installer\WeReadDownloader-Setup.exe`。
 
-命令行（调试用）：`WeReadWorker.exe` 支持 `--search`、`--book-info`、`--shelf`、`--check-auth`、`--probe-book`（配 `--probe-chapter` 指定章）、`--serve`（GUI 的常驻通道），以及带书 ID 的整本导出（`--output`、`--jobs`、`--no-annotations`、`--no-thoughts`、`--unified-appendix`、`--appendix-scope`、`--translation`）。完整列表：`WeReadWorker.exe --help`。
+命令行（调试用）：`WeReadWorker.exe` 支持 `--search`、`--book-info`、`--shelf`、`--check-auth`、`--probe-book`（配 `--probe-chapter` 指定章）、`--serve`（GUI 的常驻通道），以及带书 ID 的整本导出（`--output`、`--jobs`、`--no-annotations`、`--no-thoughts`、`--no-underline-marks`、`--unified-appendix`、`--appendix-scope`、`--translation`）。完整列表：`WeReadWorker.exe --help`。
 
 ---
 

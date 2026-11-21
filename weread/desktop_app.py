@@ -2617,6 +2617,18 @@ class DesktopApp:
             button_color=self.HAIRLINE, button_hover_color=self.SUNKEN)
         self.translation_box.grid(row=0, column=5, sticky="e", padx=(0, 12), pady=(12, 0))
         self._make_combo_keyboard_reachable(self.translation_box)
+        # 划线画不画进正文，与标注方式正交（issue #93：有人只要注释、不要高亮）。
+        # 想法数据寄生在划线接口返回的 range 上，所以关掉勾选仍会取数据、想法
+        # 角标照常落位，只是正文里不再画高亮——这层语义进 README 和确认框，
+        # 控件旁只留名字。
+        self.underline_var = tk.BooleanVar(value=True)
+        self.underline_check = ctk.CTkCheckBox(
+            export, text="划线", variable=self.underline_var, height=28,
+            corner_radius=6, border_width=1, border_color="#D5D9DF",
+            fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            text_color=self.INK, font=_font(12))
+        self.underline_check.grid(row=0, column=6, sticky="e", padx=(10, 18),
+                                  pady=(12, 0))
         self.probe_button = ctk.CTkButton(
             export, text="先检查第一章", command=self.probe, height=36,
             corner_radius=6, fg_color=self.CARD, hover_color=self.SUNKEN,
@@ -4391,6 +4403,10 @@ class DesktopApp:
             flags.append("--no-annotations")
         elif not mode.want_thoughts:
             flags.append("--no-thoughts")
+        if not self._underline_marks():
+            # 纯正文档的 --no-annotations 已隐含不画划线，重复传一个无妨：
+            # worker 侧把两个开关收进同一个 want_underlines 推导。
+            flags.append("--no-underline-marks")
         if appendix and mode.appendix_scope:
             flags.append("--unified-appendix")
             # 四档里只有「注释和想法」是 both；「注释」「想法」各收一类。
@@ -4405,6 +4421,10 @@ class DesktopApp:
             if option[0] == label:
                 return option
         return _DEFAULT_TRANSLATION
+
+    def _underline_marks(self) -> bool:
+        """「划线」勾选框：正文里画不画划线标记（issue #93）。默认画。"""
+        return bool(self.underline_var.get()) if hasattr(self, "underline_var") else True
 
     def probe(self):
         if not self.selected_id:
@@ -4630,7 +4650,8 @@ class DesktopApp:
                 "开始下载",
                 f"准备下载：{self.selected_title}\n作者：{self.selected_author or '暂无信息'}\n\n"
                 f"标注：{mode.label}\n"
-                f"译文：{self._translation_mode()[0]}\n\n"
+                f"译文：{self._translation_mode()[0]}\n"
+                f"划线：{'画进正文' if self._underline_marks() else '不导出'}\n\n"
                 "已有章节会自动续传。若微信读书返回空章节或无法确认的划线，会记录问题并继续检查其它章节；"
                 "有未解决章节时不会生成不完整 EPUB。继续吗？"):
             return

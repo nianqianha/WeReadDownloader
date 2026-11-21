@@ -21,7 +21,7 @@ class DesktopAnnotationModesTests(unittest.TestCase):
         methods = [n for n in app.body if isinstance(n, ast.FunctionDef)
                    and n.name in ("probe", "export", "_start_one", "_queue_args",
                                   "_annotation_mode", "_annotation_flags",
-                                  "_translation_mode")]
+                                  "_translation_mode", "_underline_marks")]
         # The mode table is module-level, so exec of the methods alone would not see
         # it. Pull the class and the two assignments in too rather than importing
         # desktop_app (which drags in customtkinter).
@@ -60,6 +60,10 @@ class DesktopAnnotationModesTests(unittest.TestCase):
         # _queue_args 现在也下发译文档位，同样按需绑定；这个子命名空间没有
         # 真实实例的控件，少了它导出会在参数拼装处 AttributeError。
         self.app._translation_mode = MethodType(namespace["_translation_mode"], self.app)
+        self.app._underline_marks = MethodType(namespace["_underline_marks"], self.app)
+        # 「划线」勾选框：子命名空间没有真实控件，默认按勾选（保留划线）对待；
+        # 旧版本没有这个属性时 _underline_marks 的 hasattr 兜底也是 True。
+        self.app.underline_var = SimpleNamespace(get=lambda: True)
         self.methods = namespace
 
     def test_each_displayed_mode_reaches_both_callbacks_with_correct_flags(self):
@@ -114,6 +118,35 @@ class DesktopAnnotationModesTests(unittest.TestCase):
         self.assertEqual(mode.label, "注释和想法")
         self.assertIn("--unified-appendix", self.app._annotation_flags(appendix=True))
         self.assertNotIn("--unified-appendix", self.app._annotation_flags(appendix=False))
+
+    def test_the_underline_checkbox_reaches_the_worker(self):
+        """划线勾选框与标注方式正交：关掉就下发 --no-underline-marks（issue #93）。"""
+        for checked, expected in ((True, False), (False, True)):
+            for label in ("注释和想法", "想法", "注释", "纯正文"):
+                with self.subTest(checked=checked, label=label):
+                    self.app.annotations_var = SimpleNamespace(
+                        get=lambda label=label: label)
+                    self.app.underline_var = SimpleNamespace(
+                        get=lambda checked=checked: checked)
+                    self.starts.clear()
+                    self.confirmations.clear()
+                    self.methods["export"](self.app)
+                    arguments = self.starts[0][0]
+                    self.assertEqual("--no-underline-marks" in arguments, expected,
+                                     arguments)
+
+    def test_the_confirmation_names_the_underline_choice(self):
+        """确认框必须复述划线的取舍，与标注、译文同等待遇。"""
+        self.app.annotations_var = SimpleNamespace(get=lambda: "注释和想法")
+        self.app.underline_var = SimpleNamespace(get=lambda: False)
+        self.confirmations.clear()
+        self.methods["export"](self.app)
+        text = self.confirmations[0][2]
+        self.assertIn("划线：不导出", text)
+        self.app.underline_var = SimpleNamespace(get=lambda: True)
+        self.confirmations.clear()
+        self.methods["export"](self.app)
+        self.assertIn("划线：画进正文", self.confirmations[0][2])
 
 
 if __name__ == "__main__":

@@ -383,6 +383,17 @@ def strip_thought_bodies(reviews: list[Any]) -> list[Any]:
     return stripped
 
 
+# The audit's "did not run" answer. Nulls mean unmeasured, never clean: an id
+# that reached the page still does not prove the highlight sits on the words
+# WeRead meant. Shared with the marks-off path in download_one, which places no
+# highlights at all and therefore has nothing to grade.
+_AUDIT_UNMEASURED: dict[str, Any] = {
+    "verified_underlines": None, "unverified_underlines": None,
+    "refused_underlines": None, "refused_underline_reasons": None,
+    "quote_mismatch_samples": None,
+}
+
+
 def summarize_underline_audit(lua: LuaRuntime, xhtml: str, underlines: dict[str, Any],
                               reviews: list[dict[str, Any]], book_id: str,
                               chapter_uid: Any) -> dict[str, Any]:
@@ -402,11 +413,7 @@ def summarize_underline_audit(lua: LuaRuntime, xhtml: str, underlines: dict[str,
     error inside it, or a table that does not decode into records must cost the
     measurement, never the chapter and never the export.
     """
-    unmeasured: dict[str, Any] = {
-        "verified_underlines": None, "unverified_underlines": None,
-        "refused_underlines": None, "refused_underline_reasons": None,
-        "quote_mismatch_samples": None,
-    }
+    unmeasured: dict[str, Any] = dict(_AUDIT_UNMEASURED)
     audit = lua.globals()[b"_EXPORT"][b"audit"]
     if audit is None:
         return unmeasured
@@ -2117,12 +2124,28 @@ def resolve_export_workspace(output: Path, book_id: str, package_name: str) -> P
     return exact
 
 
+def _checkpoint_compatible(old: Any, state: dict[str, Any]) -> bool:
+    """断点目录里的 mode 与本次请求一致，旧章节缓存才能续用。
+
+    underline_marks 是后加的维度：旧 state.json 没有这个键，按 True 对待
+    （旧版本总是把划线画进正文），只有本次明确关掉才判不兼容、作废重取。
+    """
+    if not isinstance(old, dict) or old.get("book_id") != state.get("book_id"):
+        return False
+    for key in ("want_thoughts", "want_underlines", "underline_marks"):
+        actual = old.get(key, True if key == "underline_marks" else None)
+        if actual is not state[key]:
+            return False
+    return True
+
+
 def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int = 1,
                 want_thoughts: bool = True,
                 want_underlines: bool = True,
                 unified_appendix: bool = False,
                 appendix_scope: str = "both",
-                translation: str = "bilingual") -> Path:
+                translation: str = "bilingual",
+                underline_marks: bool = True) -> Path:
     if translation not in TRANSLATION_MODES:
         raise RuntimeError(f"Unknown translation mode: {translation}")
     secure_output_directory(output)
@@ -2153,16 +2176,15 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     chapter_uids = [str(chapter["chapterUid"]) for chapter in chapters]
     state = {"version": 1, "book_id": book_id, "title": book.get("title"),
              "total": len(chapters), "chapter_uids": chapter_uids, "completed": 0,
-             "want_thoughts": bool(want_thoughts), "want_underlines": bool(want_underlines)}
+             "want_thoughts": bool(want_thoughts), "want_underlines": bool(want_underlines),
+             "underline_marks": bool(underline_marks)}
     try:
         old = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         old = {}
     # Older states did not distinguish marks from plain text; their mode is
     # unknown, so refresh once instead of silently publishing the wrong book.
-    compatible = (isinstance(old, dict) and old.get("book_id") == book_id
-                  and all(old.get(key) is state[key]
-                          for key in ("want_thoughts", "want_underlines")))
+    compatible = _checkpoint_compatible(old, state)
     # 上一轮跑在"上传书空洞目录"上的断点要作废：它的 total 记的是服务器自动切分出的
     # 节点数（实测 19487），而实际有正文的只有个位数。继续续传会让进度条永远停在
     # 4/19487，最后产出一个上万页的空壳 EPUB。目录层现在已拒绝这种书（见 fetch_book），
@@ -2229,8 +2251,13 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             )
         underlines, reviews = worker_api.annotations(book_id, chapter["chapterUid"], want_thoughts,
                                                      want_underlines)
+        # 划线不进正文时把空表交给 Lua：想法角标的落位只依赖 reviews（区间自带），
+        # 划线数据只喂高亮绘制，不给它就不会画。数据本身照抓——想法的 range
+        # 寄生在划线接口上（issue #93）。
+        inject_underlines = underlines if underline_marks else {
+            "underlines": [], "chapterUid": chapter["chapterUid"]}
         injected_xhtml, annotation_css = worker_lua.globals()[b"_EXPORT"][b"inject"](
-            raw_xhtml.encode("utf-8"), lua_table(worker_lua, underlines),
+            raw_xhtml.encode("utf-8"), lua_table(worker_lua, inject_underlines),
             lua_table(worker_lua, reviews), book_id.encode("utf-8"))
         processed = py_value(injected_xhtml)
         if not re.search(r"<body\b", processed, re.I):
@@ -2240,8 +2267,12 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         # would return an empty record list and read as a clean chapter with no
         # underlines at all. Costs a second placement pass per chapter, on the
         # same HTML, with no second network call.
-        underline_audit = summarize_underline_audit(worker_lua, raw_xhtml, underlines,
-                                                    reviews, book_id, chapter["chapterUid"])
+        # 没画划线就没有落点可核对：审计缺席必须记成 null（未测量），不能
+        # 记成 0（测量过且干净）——这正是审计自己的约定。
+        underline_audit = (summarize_underline_audit(worker_lua, raw_xhtml, underlines,
+                                                     reviews, book_id,
+                                                     chapter["chapterUid"])
+                           if underline_marks else dict(_AUDIT_UNMEASURED))
         # 书籍样式表（_chapter_html_once 恢复出来的）与划线/想法的注入样式都要
         # 进 EPUB。旧写法 `annotation_css or chapter_css` 在注入样式非空时整体
         # 覆盖——那是在书籍样式表被 tuple bug 清空的年代写的兜底，书籍样式修
@@ -2250,7 +2281,9 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         book_css = chapter_css
         annotation_text = py_value(annotation_css) or ""
         chapter_css = "\n".join(part for part in (book_css, annotation_text) if part)
-        underline_rows = underlines.get("underlines", [])
+        # 关掉划线标记时按"没有可落点的东西"计：expected/missing/embedded
+        # 全为 0，omissions 里的 underlines_not_placed 也就不会谎报未落点。
+        underline_rows = underlines.get("underlines", []) if underline_marks else []
         expected_ranges = len({str(row.get("range")) for row in underline_rows if row.get("range")})
         # Measure what actually landed, by identity rather than by arithmetic.
         #
@@ -2320,6 +2353,7 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
         temp_body.write_text(body, encoding="utf-8")
         temp_review.write_text(json.dumps({"chapter_uid": str(chapter["chapterUid"]), "reviews": reviews,
             "annotation_fetch_failures": underlines.get("annotation_fetch_failures", {}),
+            "underline_marks": bool(underline_marks),
             "underline_ranges": expected_ranges, "embedded_markers": embedded_markers,
             # The exact ids that did not land, so the omission can be audited
             # rather than taken on the count's word.
@@ -2543,6 +2577,9 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     omission_report = {
         "text_complete": True,
         "thoughts_requested": bool(want_thoughts),
+        # 本书的划线是否画进了正文（下载卡片的「划线」勾选，issue #93）。关闭时
+        # 下面所有划线计数都是 0：不是"没有落点失败"，是根本没有尝试落点。
+        "underline_marks": bool(underline_marks),
         "annotation_fetch_failures": fetch_failures,
         "chapters_with_annotation_fetch_failures": chapters_with_fetch_failures,
         "underline_ranges_expected": annotation_coverage["underline_ranges"],
@@ -2878,6 +2915,13 @@ def main() -> int:
                              "it is the fastest and smallest of the three modes. Plain "
                              "text only -- the exported EPUB has no highlights. Implies "
                              "--no-thoughts.")
+    parser.add_argument("--no-underline-marks", action="store_true",
+                        help="Paint no underline marks into the text (issue #93: "
+                             "notes without highlights). Thought data rides on the "
+                             "underline ranges, so the annotation calls still happen "
+                             "and [n] badges keep working; only the highlight spans "
+                             "are left out. With --no-thoughts the calls are skipped "
+                             "entirely, like --no-annotations.")
     parser.add_argument("--unified-appendix", action="store_true",
                         help="Append '注释和想法' appendix chapter(s) at the end of the book "
                              "and rewrite the body badges to jump to them. What the appendix "
@@ -2899,8 +2943,12 @@ def main() -> int:
     args = parser.parse_args()
     if args.serve:
         return serve_forever()
+    # 划线标记独立于标注方式（issue #93）：想法数据挂在 /book/underlines 返回的
+    # range 上，所以「不画划线」不等于「不取划线」——想法还要的时候接口照常走，
+    # 只有划线和想法都不要时才两个请求都省掉。
+    underline_marks = not args.no_underline_marks
     want_thoughts = not args.no_thoughts
-    want_underlines = not args.no_annotations
+    want_underlines = (not args.no_annotations) and (underline_marks or want_thoughts)
     if not want_underlines:
         # No underlines means there is nothing for a thought to hang off, so the
         # note-text switch would be meaningless. Say so once rather than letting
@@ -2969,7 +3017,7 @@ def main() -> int:
             return 0
         result = export_book(args.book_id, args.output, settings, args.jobs, want_thoughts,
                        want_underlines, unified_appendix, appendix_scope,
-                       args.translation)
+                       args.translation, underline_marks)
         print("DONE", result, flush=True)
         return 0
     except Exception as exc:

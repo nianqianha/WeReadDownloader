@@ -110,6 +110,34 @@ def test_no_annotations_implies_no_thoughts_on_the_cli():
     assert want_thoughts is False and want_underlines is False
 
 
+@test
+def test_no_underline_marks_keeps_the_fetches_while_thoughts_are_wanted():
+    """--no-underline-marks suppresses painting, not fetching (issue #93).
+
+    想法的 range 寄生在 /book/underlines 的返回里，所以「不画划线」不等于
+    「不取划线」；只有划线和想法都不要时，才等价于 --no-annotations。
+    """
+    import argparse
+
+    def mapping(extra):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--no-thoughts", action="store_true")
+        parser.add_argument("--no-annotations", action="store_true")
+        parser.add_argument("--no-underline-marks", action="store_true")
+        args = parser.parse_args(extra)
+        underline_marks = not args.no_underline_marks
+        want_thoughts = not args.no_thoughts
+        want_underlines = (not args.no_annotations) and (underline_marks or want_thoughts)
+        if not want_underlines:
+            want_thoughts = False
+        return underline_marks, want_thoughts, want_underlines
+
+    assert mapping(["--no-underline-marks"]) == (False, True, True)
+    assert mapping(["--no-underline-marks", "--no-thoughts"]) == (False, False, False)
+    assert mapping(["--no-annotations"]) == (True, False, False)
+    assert mapping([]) == (True, True, True)
+
+
 if __name__ == "__main__":
     for case in ALL_TESTS:
         case()
