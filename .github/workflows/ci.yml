@@ -37,8 +37,10 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
-        # 与 mise.toml / PyInstaller 打包用的解释器保持同一个大版本。
+          python-version: "3.12"
+        # privacy_gate.py 只用标准库，解释器版本不承重。这里不再跟打包用的 3.9
+        # 对齐：ubuntu-latest 已切到 26.04，setup-python 的清单不再提供 3.9，
+        # 挂旧版本只会让这扇门在基础设施更新时自己倒下（2026-11-21 实测）。
 
       - name: 扫描凭证、第三方素材与超大文件
         run: python weread/privacy_gate.py
