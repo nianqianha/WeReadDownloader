@@ -98,8 +98,9 @@ def test_shelf_covers_survive_redraw_and_resize():
         inst._show_shelf(inst._parse_shelf(SHELF_LINE))
         root.update()
         shelf = inst.shelf_frame
-        photo = app.tk.PhotoImage(master=root, width=36, height=46)
-        shelf.set_cover("19398284", photo)
+        # set_cover 收解码原图（issue #94），画布按缩放槽位自己裁照片。
+        image = app.Image.new("RGB", (36, 46), "#3A6")
+        shelf.set_cover("19398284", image)
         root.update()
         before = [i for i in shelf.canvas.find_all() if shelf.canvas.type(i) == "image"]
         assert len(before) == 1, before

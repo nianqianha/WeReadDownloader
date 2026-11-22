@@ -345,6 +345,21 @@ def _font(size: int, weight: str = "normal", family: str = SANS) -> ctk.CTkFont:
     return ctk.CTkFont(family=family, size=size, weight=weight)
 
 
+def _widget_scale(widget) -> float:
+    """CTk 控件实际用的缩放倍率（系统 DPI × 手动 widget_scaling）。
+
+    canvas 自绘内容不走 CTk 的缩放管线：CTkFont 的 size 是「与缩放无关的像素」，
+    只有 CTk 控件绘制自己时才乘这个倍率（scaling_base_class._apply_font_scaling），
+    canvas.create_text 拿到的是未缩放字体，几何常量更是裸整数——这就是 issue #94
+    里画布内容在高 DPI 下偏小偏挤、连文字也偏小的根源。CTk 控件统一用
+    get_widget_scaling 缩自己，画布乘同一个数才与邻居对齐；读不到时按 1.0 画。
+    """
+    try:
+        return float(ctk.ScalingTracker.get_widget_scaling(widget)) or 1.0
+    except Exception:
+        return 1.0
+
+
 def _decode_cover(payload: bytes, box: tuple):
     """Decode a cover at display size, not at source size.
 
@@ -622,7 +637,7 @@ class _ResultCanvas(ctk.CTkFrame):
     background, accent bar, cover, four text lines, checkbox.
     """
 
-    ROW_HEIGHT = 150
+    ROW_HEIGHT = 150  # 基准逻辑像素；显示时乘缩放系数（见 _scale / _row_h）
 
     def __init__(self, parent, app):
         super().__init__(parent, fg_color=app.CARD, corner_radius=0)
@@ -638,12 +653,23 @@ class _ResultCanvas(ctk.CTkFrame):
         self.canvas.configure(yscrollcommand=self._bar.set)
         self.rows: list[dict] = []
         self.items: dict[str, dict] = {}
-        self._photos: dict[str, object] = {}
+        # _covers 存解码原图（PIL），_photo_refs 存按槽位裁出的 PhotoImage：
+        # 缩放系数变了重绘能按新槽位重新裁，高 DPI 不拿旧尺寸小图硬凑（issue #94）。
+        self._covers: dict[str, object] = {}
+        self._photo_refs: dict[str, object] = {}
         self._bid_by_item: dict[int, str] = {}
         self._focus_index = 0
         self.canvas.bind("<Configure>", lambda _e: self.redraw())
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<MouseWheel>", self._on_wheel)
+        # 改系统 DPI / 跨屏拖动不会触发 <Configure>：tk.Canvas 不在 CTk 缩放轮询的
+        # 通知名单里，自己登记回调，系数一变就重画（issue #94）。
+        self._font_cache: dict = {}
+        self._scale_value = _widget_scale(self.canvas)
+        try:
+            ctk.ScalingTracker.add_widget(self._on_scaling_changed, self)
+        except Exception:
+            pass
         for key in ("Up", "Down", "Home", "End", "space", "Return"):
             self.canvas.bind("<" + key + ">", self._on_key)
 
@@ -656,10 +682,49 @@ class _ResultCanvas(ctk.CTkFrame):
         return self._bid_by_item.get(item, "")
 
     def cover_image(self, bid):
-        return self._photos.get(bid)
+        return self._covers.get(bid)
 
     def row_count(self):
         return len(self.rows)
+
+    # -- scaling（issue #94） ---------------------------------------------
+    def destroy(self):
+        try:
+            ctk.ScalingTracker.remove_widget(self._on_scaling_changed, self)
+        except Exception:
+            pass
+        super().destroy()
+
+    def _on_scaling_changed(self, _widget_scaling, _window_scaling):
+        self.redraw()
+
+    def _scale(self) -> float:
+        """取当前缩放倍率并缓存；redraw 每次先刷新，绘图与命中计算共用缓存值。"""
+        self._scale_value = _widget_scale(self.canvas)
+        return self._scale_value
+
+    def _row_h(self) -> int:
+        return max(1, int(round(self.ROW_HEIGHT * self._scale_value)))
+
+    def _scaled_font(self, size, weight="normal"):
+        """画布文字的字体：CTkFont 不随缩放走，转成缩放后的 Tk 字体元组。
+
+        create_scaled_tuple 是 CTk 控件自己绘制时走的同一条路
+        （scaling_base_class._apply_font_scaling）；按 (字号, 粗细, 缩放) 缓存，
+        重绘不反复造字体对象。
+        """
+        key = (size, weight, round(self._scale_value, 3))
+        cached = self._font_cache.get(key)
+        if cached is None:
+            cached = _font(size, weight).create_scaled_tuple(self._scale_value)
+            self._font_cache[key] = cached
+        return cached
+
+    def _cover_slot(self):
+        """封面槽位的缩放后尺寸；画槽位矩形与裁封面共用，两边不得漂移。"""
+        s = self._scale_value
+        return (max(1, int(round((self.app.COVER_W // 2) * s))),
+                max(1, int(round((self.app.COVER_H // 2) * s))))
 
     # -- drawing ---------------------------------------------------------
     def rows_changed(self, rows):
@@ -670,6 +735,7 @@ class _ResultCanvas(ctk.CTkFrame):
 
     def redraw(self):
         canvas = self.canvas
+        self._scale()
         top = canvas.yview()[0] if self.rows else 0.0
         canvas.delete("all")
         self.items.clear()
@@ -677,66 +743,73 @@ class _ResultCanvas(ctk.CTkFrame):
         width = max(canvas.winfo_width(), 200)
         for index, row in enumerate(self.rows):
             self._draw_row(index, row, width)
-        canvas.configure(scrollregion=(0, 0, width, len(self.rows) * self.ROW_HEIGHT))
+        canvas.configure(scrollregion=(0, 0, width, len(self.rows) * self._row_h()))
         if self.rows:
             canvas.yview_moveto(top)
 
     def _draw_row(self, index, row, width):
         app = self.app
         canvas = self.canvas
+        s = self._scale_value
+
+        def px(value):
+            return int(round(value * s))
+
         bid = str(row.get("bookId") or "")
         tag = "row:%s" % bid
         check_tag = "check:%s" % bid
-        y = index * self.ROW_HEIGHT
-        h = self.ROW_HEIGHT
+        h = self._row_h()
+        y = index * h
         selected = bid == app.selected_id
         bg = canvas.create_rectangle(0, y, width, y + h, outline="",
                                      fill=app.GREEN_TINT if selected else app.CARD,
                                      tags=(tag,))
-        bar = canvas.create_rectangle(0, y, 3, y + h, outline="",
+        bar = canvas.create_rectangle(0, y, px(3), y + h, outline="",
                                       fill=app.ACCENT if selected else app.CARD,
                                       tags=(tag,))
-        cover_x, cover_y, cover_w, cover_h = 12, y + 14, self.app.COVER_W // 2, self.app.COVER_H // 2
+        cover_w, cover_h = self._cover_slot()
+        cover_x, cover_y = px(12), y + px(14)
         cover_bg = canvas.create_rectangle(cover_x, cover_y, cover_x + cover_w,
                                            cover_y + cover_h, fill=app.SUNKEN,
                                            outline="", tags=(tag,))
         cover_text = canvas.create_text(cover_x + cover_w // 2, cover_y + cover_h // 2,
-                                        text="暂无封面" if bid in self._photos else "封面",
-                                        fill=app.FAINT, font=_font(10), tags=(tag,))
-        text_x = cover_x + cover_w + 14
-        wrap = max(120, width - text_x - 16)
-        title = canvas.create_text(text_x, y + 10, text=str(row.get("title") or "未命名书籍"),
-                                   anchor="nw", width=wrap, font=_font(13, "bold"),
+                                        text="暂无封面" if bid in self._covers else "封面",
+                                        fill=app.FAINT, font=self._scaled_font(10), tags=(tag,))
+        text_x = cover_x + cover_w + px(14)
+        wrap = max(px(120), width - text_x - px(16))
+        title = canvas.create_text(text_x, y + px(10), text=str(row.get("title") or "未命名书籍"),
+                                   anchor="nw", width=wrap, font=self._scaled_font(13, "bold"),
                                    fill=app.INK, tags=(tag,))
-        author = canvas.create_text(text_x, y + 44, text=str(row.get("author") or "作者未知"),
-                                    anchor="nw", font=_font(11), fill=app.MUTED, tags=(tag,))
+        author = canvas.create_text(text_x, y + px(44), text=str(row.get("author") or "作者未知"),
+                                    anchor="nw", font=self._scaled_font(11), fill=app.MUTED, tags=(tag,))
         category = str(row.get("category") or "").strip()
         if not category:
             category = "暂无信息" if app.search_done else "分类加载中…"
-        cat = canvas.create_text(text_x, y + 66, text="分类：%s" % category, anchor="nw",
-                                 font=_font(11), fill=app.FAINT, tags=(tag,))
+        cat = canvas.create_text(text_x, y + px(66), text="分类：%s" % category, anchor="nw",
+                                 font=self._scaled_font(11), fill=app.FAINT, tags=(tag,))
         raw_rating = row.get("newRating")
         try:
             rated = raw_rating not in (None, "") and float(raw_rating) > 0
         except (TypeError, ValueError):
             rated = False
-        rating = canvas.create_text(text_x, y + 90,
+        rating = canvas.create_text(text_x, y + px(90),
                                     text=card_rating_text(raw_rating, row.get("newRatingCount")),
-                                    anchor="nw", font=_font(11),
+                                    anchor="nw", font=self._scaled_font(11),
                                     fill=app.AMBER if rated else app.FAINT, tags=(tag,))
         check_var = app._card_checks.get(bid)
         checked = bool(check_var.get()) if check_var is not None else False
-        box_x, box_y = text_x, y + 116
-        box = canvas.create_rectangle(box_x, box_y, box_x + 16, box_y + 16, width=2,
-                                      outline=app.ACCENT if checked else app.MUTED,
+        box_size = px(16)
+        box_x, box_y = text_x, y + px(116)
+        box = canvas.create_rectangle(box_x, box_y, box_x + box_size, box_y + box_size,
+                                      width=2, outline=app.ACCENT if checked else app.MUTED,
                                       fill=app.ACCENT if checked else app.CARD,
                                       tags=(tag, check_tag))
         if checked:
-            canvas.create_line(box_x + 3, box_y + 8, box_x + 7, box_y + 12,
-                               box_x + 13, box_y + 4, fill="#FFFFFF", width=2,
+            canvas.create_line(box_x + px(3), box_y + px(8), box_x + px(7), box_y + px(12),
+                               box_x + px(13), box_y + px(4), fill="#FFFFFF", width=2,
                                tags=(tag, check_tag))
-        canvas.create_text(box_x + 24, box_y + 8, text="加入队列", anchor="w",
-                           fill=app.MUTED, font=_font(10), tags=(tag, check_tag))
+        canvas.create_text(box_x + px(24), box_y + px(8), text="加入队列", anchor="w",
+                           fill=app.MUTED, font=self._scaled_font(10), tags=(tag, check_tag))
         canvas.create_line(0, y + h - 1, width, y + h - 1, fill=app.HAIRLINE,
                            tags=(tag,))
         self.items[bid] = {"bg": bg, "bar": bar, "cover_bg": cover_bg,
@@ -744,17 +817,18 @@ class _ResultCanvas(ctk.CTkFrame):
                            "rating": rating, "check": box}
         for item in (bg, bar, cover_bg, cover_text, title, author, cat, rating, box):
             self._bid_by_item[item] = bid
-        if bid in self._photos:
-            self.set_cover(bid, self._photos[bid])
+        if bid in self._covers:
+            self.set_cover(bid, self._covers[bid])
 
     # -- interactions ----------------------------------------------------
     def _row_at(self, event):
-        return int(self.canvas.canvasy(event.y) // self.ROW_HEIGHT)
+        return int(self.canvas.canvasy(event.y) // self._row_h())
 
     def _on_click(self, event):
         x = self.canvas.canvasx(event.x)
         y = self.canvas.canvasy(event.y)
-        index = int(y // self.ROW_HEIGHT)
+        s = self._scale_value
+        index = int(y // self._row_h())
         if not (0 <= index < len(self.rows)):
             return
         self.canvas.focus_set()
@@ -765,7 +839,8 @@ class _ResultCanvas(ctk.CTkFrame):
         box = entry.get("check")
         if box is not None:
             x0, y0, x1, y1 = self.canvas.coords(box)
-            if x0 - 4 <= x <= x0 + 80 and y0 - 6 <= y <= y1 + 6:
+            if (x0 - int(round(4 * s)) <= x <= x0 + int(round(80 * s))
+                    and y0 - int(round(6 * s)) <= y <= y1 + int(round(6 * s))):
                 self._toggle_check(bid)
                 return
         self.app._select_book(dict(row))
@@ -793,7 +868,8 @@ class _ResultCanvas(ctk.CTkFrame):
         if event.keysym == "space":
             self._toggle_check(str(row.get("bookId") or ""))
         top = self.canvas.canvasy(0)
-        if index * self.ROW_HEIGHT < top or (index + 1) * self.ROW_HEIGHT > top + self.canvas.winfo_height():
+        row_h = self._row_h()
+        if index * row_h < top or (index + 1) * row_h > top + self.canvas.winfo_height():
             self.canvas.yview_moveto(index / len(self.rows))
         return "break"
 
@@ -814,19 +890,28 @@ class _ResultCanvas(ctk.CTkFrame):
         if entry is not None:
             self.canvas.itemconfigure(entry["category"], text=text)
 
-    def set_cover(self, book_id, photo):
+    def set_cover(self, book_id, image):
+        """缓存解码原图，并按当前缩放槽位裁出照片画上（issue #94）。
+
+        存原图而不是成品照片：缩放系数变了（跨屏、改系统 DPI）重绘时能按新槽位
+        重新裁，不会拿旧尺寸的小图硬凑。thumbnail 只缩不放，宽高比不破坏。
+        """
         entry = self.items.get(book_id)
-        if entry is None:
-            return
-        self._photos[book_id] = photo
-        previous = entry.pop("cover_image", None)
+        self._covers[book_id] = image
+        previous = entry.pop("cover_image", None) if entry is not None else None
         if previous is not None:
             self.canvas.delete(previous)
             self._bid_by_item.pop(previous, None)
-        if photo is None:
+        if entry is None:
+            return
+        if image is None:
             self.canvas.itemconfigure(entry["cover_text"], text="暂无封面")
             return
         x0, y0, _x1, _y1 = self.canvas.coords(entry["cover_bg"])
+        scaled = image.copy()
+        scaled.thumbnail(self._cover_slot(), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(scaled)
+        self._photo_refs[book_id] = photo
         item = self.canvas.create_image(x0, y0, anchor="nw", image=photo,
                                         tags=("row:%s" % book_id,))
         entry["cover_image"] = item
@@ -837,6 +922,11 @@ class _ResultCanvas(ctk.CTkFrame):
         entry = self.items.get(book_id)
         if entry is None:
             return
+        s = self._scale_value
+
+        def px(value):
+            return int(round(value * s))
+
         check_var = self.app._card_checks.get(book_id)
         checked = bool(check_var.get()) if check_var is not None else False
         x0, y0, x1, y1 = self.canvas.coords(entry["check"])
@@ -847,7 +937,8 @@ class _ResultCanvas(ctk.CTkFrame):
             if self.canvas.type(item) == "line":
                 self.canvas.delete(item)
         if checked:
-            self.canvas.create_line(x0 + 3, y0 + 8, x0 + 7, y0 + 12, x0 + 13, y0 + 4,
+            self.canvas.create_line(x0 + px(3), y0 + px(8), x0 + px(7), y0 + px(12),
+                                    x0 + px(13), y0 + px(4),
                                     fill="#FFFFFF", width=2,
                                     tags=("row:%s" % book_id, "check:%s" % book_id))
 
@@ -855,7 +946,9 @@ class _ResultCanvas(ctk.CTkFrame):
 class _ShelfCanvas(ctk.CTkFrame):
     """WeRead shelf drawn as canvas items (same reason as _ResultCanvas)."""
 
-    ROW_HEIGHT = 62
+    ROW_HEIGHT = 62  # 基准逻辑像素；显示时乘缩放系数（见 _scale / _row_h）
+    COVER_W, COVER_H = 36, 46
+    DECODE_H = 48  # 解码框略高于槽位，给横竖比不合适的封面留余量
 
     def __init__(self, parent, app):
         super().__init__(parent, fg_color=app.SUNKEN, corner_radius=8)
@@ -870,11 +963,56 @@ class _ShelfCanvas(ctk.CTkFrame):
         self.canvas.configure(yscrollcommand=self._bar.set)
         self.rows: list[dict] = []
         self.items: dict[str, dict] = {}
-        self._photos: dict[str, object] = {}
+        # 与 _ResultCanvas 同一套（issue #94）：存解码原图，按缩放槽位裁照片。
+        self._covers: dict[str, object] = {}
+        self._photo_refs: dict[str, object] = {}
         self._empty = ""
         self.canvas.bind("<Configure>", lambda _e: self.redraw())
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<MouseWheel>", self._on_wheel)
+        self._font_cache: dict = {}
+        self._scale_value = _widget_scale(self.canvas)
+        try:
+            ctk.ScalingTracker.add_widget(self._on_scaling_changed, self)
+        except Exception:
+            pass
+
+    def destroy(self):
+        try:
+            ctk.ScalingTracker.remove_widget(self._on_scaling_changed, self)
+        except Exception:
+            pass
+        super().destroy()
+
+    def _on_scaling_changed(self, _widget_scaling, _window_scaling):
+        self.redraw()
+
+    def _scale(self) -> float:
+        self._scale_value = _widget_scale(self.canvas)
+        return self._scale_value
+
+    def _row_h(self) -> int:
+        return max(1, int(round(self.ROW_HEIGHT * self._scale_value)))
+
+    def _scaled_font(self, size, weight="normal"):
+        """与 _ResultCanvas._scaled_font 同一条路；注释见那边。"""
+        key = (size, weight, round(self._scale_value, 3))
+        cached = self._font_cache.get(key)
+        if cached is None:
+            cached = _font(size, weight).create_scaled_tuple(self._scale_value)
+            self._font_cache[key] = cached
+        return cached
+
+    def _cover_slot(self):
+        s = self._scale_value
+        return (max(1, int(round(self.COVER_W * s))),
+                max(1, int(round(self.COVER_H * s))))
+
+    def cover_decode_box(self):
+        """封面解码框：跟随缩放，槽位画多大图就解多大，高 DPI 不发虚。"""
+        s = self._scale_value
+        return (max(1, int(round(self.COVER_W * s))),
+                max(1, int(round(self.DECODE_H * s))))
 
     @property
     def content(self):
@@ -895,66 +1033,79 @@ class _ShelfCanvas(ctk.CTkFrame):
 
     def redraw(self):
         canvas = self.canvas
+        s = self._scale()
+
+        def px(value):
+            return int(round(value * s))
+
         top = canvas.yview()[0] if self.rows else 0.0
         canvas.delete("all")
         self.items.clear()
         width = max(canvas.winfo_width(), 200)
         if not self.rows:
-            canvas.create_text(width // 2, max(60, canvas.winfo_height() // 2),
+            canvas.create_text(width // 2, max(px(60), canvas.winfo_height() // 2),
                                text=self._empty, fill=self.app.FAINT,
-                               font=_font(12), justify="center", width=max(200, width - 40))
+                               font=self._scaled_font(12), justify="center",
+                               width=max(px(200), width - px(40)))
             canvas.configure(scrollregion=(0, 0, width, max(1, canvas.winfo_height())))
             return
         for index, book in enumerate(self.rows):
             self._draw_row(index, book, width)
-        total = len(self.rows) * self.ROW_HEIGHT
+        total = len(self.rows) * self._row_h()
         canvas.configure(scrollregion=(0, 0, width, total))
         canvas.yview_moveto(top)
 
     def _draw_row(self, index, book, width):
         app = self.app
         canvas = self.canvas
+        s = self._scale_value
+
+        def px(value):
+            return int(round(value * s))
+
         bid = str(book.get("bookId") or "")
         tag = "shelf:%s" % bid
-        y = index * self.ROW_HEIGHT
-        x0, y0 = 4, y + 3
-        x1, y1 = width - 6, y + self.ROW_HEIGHT - 3
+        h = self._row_h()
+        y = index * h
+        x0, y0 = px(4), y + px(3)
+        x1, y1 = width - px(6), y + h - px(3)
         canvas.create_rectangle(x0, y0, x1, y1, fill=app.CARD, outline=app.HAIRLINE,
                                 tags=(tag,))
-        cover_x, cover_y, cw, ch = x0 + 10, y0 + 5, 36, 46
+        cw, ch = self._cover_slot()
+        cover_x, cover_y = x0 + px(10), y0 + px(5)
         cover_bg = canvas.create_rectangle(cover_x, cover_y, cover_x + cw, cover_y + ch,
                                            fill=app.SUNKEN, outline="", tags=(tag,))
         cover_text = canvas.create_text(cover_x + cw // 2, cover_y + ch // 2, text="",
-                                        fill=app.FAINT, font=_font(9), tags=(tag,))
-        text_x = cover_x + cw + 10
-        button_w = 64
-        wrap = max(80, x1 - button_w - 24 - text_x)
-        title = canvas.create_text(text_x, y0 + 10, text=str(book.get("title") or "未命名书籍"),
-                                   anchor="nw", width=wrap, font=_font(13, "bold"),
+                                        fill=app.FAINT, font=self._scaled_font(9), tags=(tag,))
+        text_x = cover_x + cw + px(10)
+        button_w = px(64)
+        wrap = max(px(80), x1 - button_w - px(24) - text_x)
+        title = canvas.create_text(text_x, y0 + px(10), text=str(book.get("title") or "未命名书籍"),
+                                   anchor="nw", width=wrap, font=self._scaled_font(13, "bold"),
                                    fill=app.INK, tags=(tag,))
         author = str(book.get("author") or "").strip() or "作者未知"
         category = str(book.get("category") or "").strip()
         meta = author + (" · " + category if category else "")
-        meta_item = canvas.create_text(text_x, y0 + 32, text=meta, anchor="nw", width=wrap,
-                                       font=_font(11), fill=app.FAINT, tags=(tag,))
-        bx1 = x1 - 12
+        meta_item = canvas.create_text(text_x, y0 + px(32), text=meta, anchor="nw", width=wrap,
+                                       font=self._scaled_font(11), fill=app.FAINT, tags=(tag,))
+        bx1 = x1 - px(12)
         bx0 = bx1 - button_w
-        by0, by1 = y0 + 13, y0 + 43
+        by0, by1 = y0 + px(13), y0 + px(43)
         canvas.create_rectangle(bx0, by0, bx1, by1, fill=app.ACCENT, outline="",
                                 tags=(tag, "dl:%s" % bid))
         canvas.create_text((bx0 + bx1) // 2, (by0 + by1) // 2, text="下载", fill="#FFFFFF",
-                           font=_font(12), tags=(tag, "dl:%s" % bid))
+                           font=self._scaled_font(12), tags=(tag, "dl:%s" % bid))
         self.items[bid] = {"cover_bg": cover_bg, "cover_text": cover_text,
                            "title": title, "meta": meta_item, "button": (bx0, by0, bx1, by1),
                            "button_ids": [i for i in canvas.find_withtag("dl:%s" % bid)]}
         # 重绘（resize/maximize）会删掉所有 canvas item；已缓存封面必须在这里补回，
         # 否则书架页一拖窗口封面就全没了（搜索结果列表已在 #68 修过同样的坑）。
-        if bid in self._photos:
-            self.set_cover(bid, self._photos[bid])
+        if bid in self._covers:
+            self.set_cover(bid, self._covers[bid])
 
     def _on_click(self, event):
         y = self.canvas.canvasy(event.y)
-        index = int(y // self.ROW_HEIGHT)
+        index = int(y // self._row_h())
         if not (0 <= index < len(self.rows)):
             return
         book = self.rows[index]
@@ -966,18 +1117,23 @@ class _ShelfCanvas(ctk.CTkFrame):
     def _on_wheel(self, event):
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
 
-    def set_cover(self, book_id, photo):
+    def set_cover(self, book_id, image):
+        """存解码原图并按当前缩放槽位裁照片；注释见 _ResultCanvas.set_cover。"""
         entry = self.items.get(book_id)
-        if entry is None:
-            return
-        self._photos[book_id] = photo
-        previous = entry.pop("cover_image", None)
+        self._covers[book_id] = image
+        previous = entry.pop("cover_image", None) if entry is not None else None
         if previous is not None:
             self.canvas.delete(previous)
-        if photo is None:
+        if entry is None:
+            return
+        if image is None:
             self.canvas.itemconfigure(entry["cover_text"], text="暂无封面")
             return
         x0, y0, _x1, _y1 = self.canvas.coords(entry["cover_bg"])
+        scaled = image.copy()
+        scaled.thumbnail(self._cover_slot(), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(scaled)
+        self._photo_refs[book_id] = photo
         entry["cover_image"] = self.canvas.create_image(
             x0, y0, anchor="nw", image=photo, tags=("shelf:%s" % book_id,))
         self.canvas.itemconfigure(entry["cover_text"], text="")
@@ -1806,13 +1962,16 @@ class DesktopApp:
 
     def _request_shelf_cover(self, book_id, url):
         """Load a cover in the background; failures leave the placeholder."""
+        # 解码框跟随缩放：槽位画多大图就解多大，高 DPI 不拿 1x 小图放大发虚（#94）。
+        box = self.shelf_frame.cover_decode_box()
+
         def fetch():
             image = None
             try:
                 response = requests.get(url, timeout=(5, 15))
                 response.raise_for_status()
                 if len(response.content) <= 8 * 1024 * 1024:
-                    image = _decode_cover(response.content, (36, 48))
+                    image = _decode_cover(response.content, box)
             except Exception:
                 image = None
             self.events.put(("shelf-cover", (book_id, image)))
@@ -3231,11 +3390,10 @@ class DesktopApp:
             widget["image"] = None
             return
         try:
-            slot = (self.COVER_W // 2, self.COVER_H // 2)
-            photo = ImageTk.PhotoImage(image.resize(slot))
-            self._image_refs.append(photo)
-            widget["image"] = photo
-            self.results.set_cover(book_id, photo)
+            # 画布自己按缩放后的槽位裁图（issue #94）：这里只转发解码原图，
+            # 缩放系数变了重绘时画布会重新裁，不会拿 1x 小图凑。
+            self.results.set_cover(book_id, image)
+            widget["image"] = image
         except Exception:
             self.results.set_cover(book_id, None)
 
@@ -3251,13 +3409,14 @@ class DesktopApp:
         return rows if isinstance(rows, list) else None
 
     def _apply_shelf_cover(self, book_id, image):
-        """Put a fetched cover onto a shelf row; failures keep the placeholder."""
+        """Put a fetched cover onto a shelf row; failures keep the placeholder.
+
+        画布自己按缩放后的槽位裁图（issue #94），这里只转发解码原图。
+        """
+        if image is None:
+            return
         try:
-            if image is None:
-                return
-            photo = ImageTk.PhotoImage(image)
-            self._image_refs.append(photo)
-            self.shelf_frame.set_cover(book_id, photo)
+            self.shelf_frame.set_cover(book_id, image)
         except Exception:
             pass
 

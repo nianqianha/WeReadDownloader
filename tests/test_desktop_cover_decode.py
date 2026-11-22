@@ -71,8 +71,10 @@ def test_cached_result_cover_survives_redraw_and_window_restore():
         instance._request_card_cover = lambda *args: None
         instance._add_book_card({"bookId": "123", "title": "Synthetic", "cover": ""})
         root.update()
-        photo = app.tk.PhotoImage(master=root, width=20, height=30)
-        instance.results.set_cover("123", photo)
+        # set_cover 现在收解码原图（issue #94）：画布按缩放槽位自己裁照片，
+        # 重绘时会重新裁，所以这里只断言 image item 一直存在、占位文字清空。
+        image = app.Image.new("RGB", (20, 30), "#3A6")
+        instance.results.set_cover("123", image)
         for action in (instance.results.redraw, lambda: root.state("zoomed"),
                        lambda: root.state("normal"), instance.results.redraw):
             action()
@@ -80,7 +82,6 @@ def test_cached_result_cover_survives_redraw_and_window_restore():
             entry = instance.results.items["123"]
             item = entry["cover_image"]
             assert instance.results.canvas.type(item) == "image"
-            assert instance.results.canvas.itemcget(item, "image") == str(photo)
             assert instance.results.canvas.itemcget(entry["cover_text"], "text") == ""
         assert len([i for i in instance.results.canvas.find_all() if instance.results.canvas.type(i) == "image"]) == 1
     finally:
@@ -94,7 +95,7 @@ def test_failed_cover_placeholder_and_replacement_survive_redraw():
         instance._add_book_card({"bookId": "123", "title": "Synthetic", "cover": ""})
         root.update()
         results = instance.results
-        results.set_cover("123", app.tk.PhotoImage(master=root, width=20, height=30))
+        results.set_cover("123", app.Image.new("RGB", (20, 30), "#3A6"))
         results.set_cover("123", None)
         results.redraw()
         assert "cover_image" not in results.items["123"]

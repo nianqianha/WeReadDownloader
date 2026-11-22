@@ -279,11 +279,11 @@ def test_the_translation_dropdown_sits_inside_the_download_card():
     """
     import customtkinter as ctk
 
-    probe = ctk.CTk()
-    try:
-        default_scaling = ctk.ScalingTracker.get_widget_scaling(probe)
-    finally:
-        probe.destroy()
+    # 保存/恢复必须用 ScalingTracker 上的手动倍率：get_widget_scaling 返回的是
+    # 「系统 DPI × 手动倍率」的总数，回写进 set_widget_scaling 会在 125% 机器上
+    # 留下 1.25 的手动倍率，污染之后所有测试（2026-11-22 组合运行实测）。
+    saved_widget = ctk.ScalingTracker.widget_scaling
+    saved_window = ctk.ScalingTracker.window_scaling
     for scaling in (1.0, 1.25):
         ctk.set_widget_scaling(scaling)
         ctk.set_window_scaling(scaling)
@@ -305,8 +305,8 @@ def test_the_translation_dropdown_sits_inside_the_download_card():
                         % (scaling, width, name, box_right, right))
             finally:
                 root.destroy()
-    ctk.set_widget_scaling(default_scaling)
-    ctk.set_window_scaling(default_scaling)
+    ctk.set_widget_scaling(saved_widget)
+    ctk.set_window_scaling(saved_window)
 
 
 if __name__ == "__main__":
