@@ -260,6 +260,35 @@ def parse_book_info_message(value: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def prefs_path() -> Path:
+    """本机界面偏好的落点（issue #97 起才有内容）。
+
+    每次调用现算：测试把 weread_core.PRIVATE 指到临时目录后，偏好也必须跟着走。
+    """
+    return PRIVATE / "ui-prefs.json"
+
+
+def load_ui_prefs() -> dict:
+    """读界面偏好；文件缺失/损坏一律当空偏好，不能让界面启动失败。"""
+    try:
+        data = json.loads(prefs_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_ui_prefs(prefs: dict) -> None:
+    """整份覆盖写；原子替换，写盘失败只丢偏好，不影响正在进行的导出。"""
+    target = prefs_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_suffix(".json.part")
+        temp.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp, target)
+    except OSError:
+        pass
+
+
 def worker_command(args: list[str]) -> list[str] | None:
     """Resolve the hidden worker process; None means the bundle is incomplete."""
     if not FROZEN:

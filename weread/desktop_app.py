@@ -129,11 +129,13 @@ from weread_core import (  # noqa: E402
     card_rating_text,
     friendly_error,
     is_first_instance,
+    load_ui_prefs,
     parse_book_info_message,
     parse_search_meta,
     parse_search_row,
     rating_text,
     redact_secrets,
+    save_ui_prefs,
     worker_command,
 )
 
@@ -1321,6 +1323,10 @@ class DesktopApp:
         self.job_seq = 0
         self.last_failure = False
         self.last_unresolved = False
+        # 界面偏好（issue #97 起）：目前只有「下载完成后定位成品」。
+        self._prefs = load_ui_prefs()
+        # 引擎最后一次报的成品路径（DONE 行），完成后用它定位文件。
+        self._last_artifact = ""
         # What the last finished book is missing. A degraded download is only
         # better than a failed one if the reader is told what went missing.
         self.omissions = None
@@ -2219,6 +2225,24 @@ class DesktopApp:
         self._quiet_button(btns, "检查登录状态", 118, self.check_auth).pack(side="left", padx=(8, 0))
         self._quiet_button(btns, "准备下载凭证", 118,
                            lambda: self._switch_page("下载工坊")).pack(side="left", padx=(8, 0))
+        ctk.CTkFrame(card, height=1, fg_color=self.HAIRLINE).pack(fill="x", padx=18, pady=(14, 0))
+        ctk.CTkLabel(card, text="下载完成", text_color=self.INK, anchor="w",
+                     font=_font(13, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
+        # issue #97：完成后直接在资源管理器里定位成品 EPUB。默认关闭——自动弹
+        # 窗口对批量下载是打扰，只有明确勾选的人才需要。
+        self.open_when_done_var = ctk.BooleanVar(
+            value=bool(self._prefs.get("open_output_when_done")))
+        self.open_when_done_box = ctk.CTkCheckBox(
+            card, text="下载完成后在资源管理器里定位成品 EPUB",
+            variable=self.open_when_done_var, height=28,
+            corner_radius=6, border_width=1, border_color="#D5D9DF",
+            fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            text_color=self.INK, font=_font(12),
+            command=self._save_open_when_done)
+        self.open_when_done_box.pack(anchor="w", padx=18, pady=(8, 4))
+        ctk.CTkLabel(card, text="队列下载在整个队列结束后定位一次，不会每本都弹。",
+                     text_color=self.FAINT, anchor="w", font=_font(11),
+                     wraplength=560, justify="left").pack(anchor="w", padx=18, pady=(0, 8))
         ctk.CTkFrame(card, height=1, fg_color=self.HAIRLINE).pack(fill="x", padx=18, pady=(14, 0))
         ctk.CTkLabel(card, text="版本与更新", text_color=self.INK, anchor="w",
                      font=_font(13, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
@@ -3421,6 +3445,10 @@ class DesktopApp:
             pass
 
     def _handle_line(self, value: str):
+        if value.startswith("DONE "):
+            # 引擎最后一行是成品路径；完成回调靠它定位 EPUB（issue #97）。
+            # 这行同时会进日志，所以不在这里重复 _persist_log。
+            self._last_artifact = value[5:].strip()
         info = parse_book_info_message(value)
         if info is not None:
             self._persist_log("Book metadata received.")
@@ -3587,6 +3615,9 @@ class DesktopApp:
                             self._show_notice("下载成功（附说明）", notice)
                     else:
                         self.status.set("下载完成，这本已收工。换下一本：在左侧搜索另一本书并点击即可。")
+                    # 单本完成即定位成品（issue #97）；队列模式统一在队尾开一次。
+                    if not self.queue_running and self._open_when_done():
+                        self._reveal_output(self._last_artifact)
                 elif self.last_unresolved:
                     self.status.set("扫描到末尾，但有章节数据不完整；没有生成不完整 EPUB。点击“查看技术日志”查看具体章节。")
                 else:
@@ -3646,6 +3677,9 @@ class DesktopApp:
                         else:
                             self.status.set("队列已全部完成（%d 本）。"
                                             % len(self.queue_results))
+                        # 队列收尾只定位一次，定位最后完成的那本（issue #97）。
+                        if self._open_when_done():
+                            self._reveal_output(self._last_artifact)
         finally:
             if action == "export":
                 self._pause_requested = False
@@ -4763,6 +4797,7 @@ class DesktopApp:
     def _start_one(self, book: dict) -> None:
         """起一本的下载（队列与单本共用）。不弹确认框，直接跑。"""
         self.progress.set(0)
+        self._last_artifact = ""
         self._queue_book = {"bookId": str(book.get("bookId") or ""),
                             "title": book.get("title") or "",
                             "author": book.get("author") or ""}
@@ -5021,6 +5056,32 @@ class DesktopApp:
     def open_output(self):
         OUTPUT.mkdir(parents=True, exist_ok=True)
         os.startfile(str(OUTPUT))
+
+    def _open_when_done(self) -> bool:
+        """当前是否要在下载完成后定位成品（以界面上的勾选为准）。"""
+        if hasattr(self, "open_when_done_var"):
+            return bool(self.open_when_done_var.get())
+        return bool(self._prefs.get("open_output_when_done"))
+
+    def _save_open_when_done(self):
+        """把「完成后定位成品」写进界面偏好（issue #97）。"""
+        self._prefs["open_output_when_done"] = bool(self.open_when_done_var.get())
+        save_ui_prefs(self._prefs)
+
+    def _reveal_output(self, artifact: str = ""):
+        """打开导出目录；有成品文件时在资源管理器里选中它。
+
+        explorer /select 只认一个参数（逗号后跟完整路径），路径里的空格由
+        参数整体传递处理；Popen 返回码不可靠（explorer 常返回 1），不看它。
+        """
+        target = Path(artifact) if artifact else None
+        try:
+            if target is not None and target.is_file():
+                subprocess.Popen(["explorer", "/select,%s" % target])
+                return
+        except Exception:
+            pass
+        self.open_output()
 
     def open_logs(self):
         LOG_DIR.mkdir(parents=True, exist_ok=True)
