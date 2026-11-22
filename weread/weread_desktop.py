@@ -1549,6 +1549,21 @@ def _drop_unresolved_images(xhtml: str, mapping: dict[str, str]) -> tuple[str, i
     return result, removed
 
 
+# 微信读书 CDN 对同一张封面给多个尺寸前缀：s_(70×100) / t3_(143×205) /
+# t6_(250×360) / t7_(285×411) / t9_(428×616)。book["cover"] 给的是 t6_，
+# 成品 EPUB 里就是 250×360，这是封面看着模糊的原因（issue #95）。
+_COVER_SIZE_PREFIX = re.compile(r"/(?:s_|t\d+_)([^/]+)$")
+
+
+def hd_cover_url(url: str) -> str:
+    """同一张封面的高清变体（t9_）URL；改不出来时原样返回。
+
+    只替换文件名前那一节尺寸前缀，query 串（若有）保持原样——签名参数不能动。
+    """
+    head, sep, query = url.partition("?")
+    return _COVER_SIZE_PREFIX.sub(r"/t9_\1", head) + sep + query
+
+
 def _cover_extension(data: bytes) -> tuple[str, str] | None:
     ext = _image_extension(data[:12])
     mime = {".jpg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
@@ -2658,18 +2673,25 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
     cover_path = None
     if book.get("cover"):
         cover_path = workspace / "cover.image"
-        try:
-            response = api.http.get(book["cover"], timeout=(10, 30), stream=True)
-            response.raise_for_status()
-            with cover_path.open("wb") as target:
-                total = 0
-                for chunk in response.iter_content(64 * 1024):
-                    if not chunk: continue
-                    total += len(chunk)
-                    if total > IMAGE_LIMIT: raise RuntimeError("cover exceeds image size limit")
-                    target.write(chunk)
-            if not _cover_extension(cover_path.read_bytes()[:12]): cover_path.unlink(missing_ok=True); cover_path = None
-        except requests.RequestException:
+        # 先取 t9_ 高清变体，取不到再回退原 URL（issue #95）。两个都失败才放弃
+        # 封面；取到但不是图片的响应不算成功，继续下一个候选。
+        for url in dict.fromkeys((hd_cover_url(book["cover"]), book["cover"])):
+            try:
+                response = api.http.get(url, timeout=(10, 30), stream=True)
+                response.raise_for_status()
+                with cover_path.open("wb") as target:
+                    total = 0
+                    for chunk in response.iter_content(64 * 1024):
+                        if not chunk: continue
+                        total += len(chunk)
+                        if total > IMAGE_LIMIT: raise RuntimeError("cover exceeds image size limit")
+                        target.write(chunk)
+                if _cover_extension(cover_path.read_bytes()[:12]):
+                    break
+                cover_path.unlink(missing_ok=True)
+            except requests.RequestException:
+                continue
+        if not cover_path.is_file():
             cover_path = None
     epub_path = package_dir / (stem + ".epub")
     if want_thoughts and any(fetch_failures.values()) and (package_dir / "manifest.json").is_file():
@@ -2721,6 +2743,14 @@ def export_book(book_id: str, output: Path, settings: dict[str, Any], jobs: int 
             appendix_bodies[uid] = body_copy
         appendix_arg = (appendix_files, appendix_bodies)
     omission_report["notes_in_appendix"] = bool(appendix_manifest.get("appendix", {}).get("notes"))
+    # 注角标是内嵌位图（issue #96）：附录里真有注条目时才把它放进 assets，
+    # 没有注的书不多带一张无用图；上一次打包留下的旧图要清掉。
+    badge_asset = workspace_images / "note-badge.png"
+    if appendix_manifest.get("appendix", {}).get("notes"):
+        from unified_appendix import NOTE_BADGE_PNG
+        badge_asset.write_bytes(NOTE_BADGE_PNG)
+    elif badge_asset.is_file():
+        badge_asset.unlink()
     translated_paragraphs, chapters_with_translation = write_epub(
         epub_path, book, chapters, chapter_paths, css, workspace_images, cover_path,
         appendix_arg, translation)

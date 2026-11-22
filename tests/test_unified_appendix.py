@@ -210,7 +210,9 @@ class TestBuildAppendix(unittest.TestCase):
         self.assertNotIn("qqreader-footnote", body_out)
         self.assertIn('href="appendix-notes-01.xhtml#note-222-1"', body_out)
         self.assertIn("wr-fn-mark", body_out)
-        self.assertIn(">注</a>", body_out)
+        # issue #96：角标改成内嵌位图，alt 保留「注」给丢图的阅读器兜底。
+        self.assertIn('src="../images/note-badge.png"', body_out)
+        self.assertIn('alt="注"', body_out)
 
     def test_note_alt_hex_entities_decoded(self):
         # 真实语料里 alt 是 HTML 字符引用（&#x82E5; = 若），必须 unescape。
