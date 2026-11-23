@@ -29,7 +29,14 @@ def _make_gui():
     import customtkinter as ctk
     root = ctk.CTk()
     root.withdraw()
-    return root, app.DesktopApp(root)
+    instance = app.DesktopApp(root)
+    # 档位现在从 ui-prefs.json 恢复（issue #98）。队列测试断言的是默认档
+    # 「注释和想法」的参数，显式钉死，避免同进程里别的偏好测试串档位
+    # （曾导致全量里拿到 --no-annotations）。
+    instance.annotations_var.set("注释和想法")
+    instance.translation_var.set("双语")
+    instance.underline_var.set(True)
+    return root, instance
 
 
 def _spy_start(instance, calls, accept=True):
