@@ -4707,9 +4707,16 @@ class DesktopApp:
             print("[FIRST_RUN] credential panel failed: %s: %s"
                   % (type(exc).__name__, exc), file=sys.stderr)
             self.status.set("凭证还没配好：点「登录 / 切换账号」填写后即可下载。")
-        # issue #98：启动后静默查一次登录，只更新右上角角标，不弹提示、不抢状态栏。
-        # 凭证根本没配好时没必要发请求；常驻 worker 未热也不额外等它——用一次性
-        # 子进程，和手动「检查登录状态」走同一条 worker 通道。
+        # 静默登录检查只在 main() 真正启动时调（start_silent_auth_check），
+        # 不在本方法里：大量 GUI 测试直接构造 DesktopApp 而不走 main()，
+        # 在这里发 --check-auth 会给每个测试留一个真实子进程，拖垮全量套件（#98 实测）。
+
+    def start_silent_auth_check(self):
+        """启动后静默查一次登录：只改右上角角标，不弹提示、不抢状态栏（issue #98）。
+
+        由 main() 调用，测试直接构造 DesktopApp 时不触发——避免每个 GUI 测试
+        都留下一个真实 --check-auth 子进程。凭证没配好时不发请求。
+        """
         if not self._credentials_ready_for_check():
             return
         try:
@@ -5394,6 +5401,10 @@ def main() -> int:
     app = DesktopApp(root)
     try:
         app.check_credentials_on_start()
+        # issue #98：启动静默检查登录（只改角标）。放在 main() 而非
+        # check_credentials_on_start 里，避免每个直接构造 DesktopApp 的 GUI
+        # 测试都起一个真实 --check-auth 子进程、拖垮全量测试。
+        app.start_silent_auth_check()
     except Exception as exc:
         # A credential check must never stop the window from opening. Logged and
         # carried on: the panel's own state tells the user what to do next.

@@ -49,7 +49,13 @@ class PlainLineTests(unittest.TestCase):
 
 class RunLogPanelTests(unittest.TestCase):
     def setUp(self):
+        from unittest.mock import patch
         import customtkinter as ctk
+        # 启动静默检查会起真实 --check-auth 子进程；GUI 测试里禁用。
+        ready = patch.object(app.DesktopApp, "_credentials_ready_for_check",
+                             lambda self: False)
+        ready.start()
+        self.addCleanup(ready.stop)
         self.root = ctk.CTk()
         self.instance = app.DesktopApp(self.root)
         self.root.update()

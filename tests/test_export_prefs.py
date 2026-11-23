@@ -34,6 +34,12 @@ class ExportPrefsTests(unittest.TestCase):
         self.core_patch.start()
         self.addCleanup(self.core_patch.stop)
         import customtkinter as ctk
+        # 启动静默检查（issue #98）会起真实 --check-auth 子进程；GUI 测试里禁用，
+        # 否则 root 销毁后 worker 残留会卡住同进程里后续测试（本机全量实测）。
+        self.ready_patch = patch.object(app.DesktopApp, "_credentials_ready_for_check",
+                                        lambda self: False)
+        self.ready_patch.start()
+        self.addCleanup(self.ready_patch.stop)
         self.root = ctk.CTk()
         self.instance = app.DesktopApp(self.root)
         self.root.update()

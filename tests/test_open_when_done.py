@@ -48,6 +48,12 @@ class CompletionOpenTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         import customtkinter as ctk
+        # 启动静默检查会起真实 --check-auth 子进程；GUI 测试里禁用，
+        # 避免 root 销毁后 worker 残留阻塞后续测试。
+        ready = patch.object(app.DesktopApp, "_credentials_ready_for_check",
+                             lambda self: False)
+        ready.start()
+        self.addCleanup(ready.stop)
         self.ctk = ctk
         self.root = ctk.CTk()
         self.instance = app.DesktopApp(self.root)
