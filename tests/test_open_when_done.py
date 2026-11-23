@@ -83,19 +83,35 @@ class CompletionOpenTests(unittest.TestCase):
         self.instance._handle_line("DONE " + artifact)
         self.assertEqual(self.instance._last_artifact, artifact)
 
-    def test_reveal_selects_the_file_when_it_exists(self):
-        epub = self.root_dir / "书 - full.epub"
+    def test_reveal_passes_select_and_path_as_separate_arguments(self):
+        """issue #100：合成一个字符串会被 explorer 在空格处截断、跳到「文档」库。"""
+        epub = self.root_dir / "书 - full.epub"   # 路径含空格，正是触发条件
         epub.write_bytes(b"x")
         calls = []
         with patch.object(app.subprocess, "Popen", lambda argv: calls.append(argv)):
             self.instance._reveal_output(str(epub))
-        self.assertEqual(calls, [["explorer", "/select,%s" % epub]])
+        # 必须是三个 argv：explorer /select, <path>；不是两个（/select,<path>）
+        self.assertEqual(calls, [["explorer", "/select,", str(epub)]])
+        self.assertNotIn("/select,%s" % epub, calls[0])
 
-    def test_reveal_falls_back_to_the_export_folder(self):
+    def test_reveal_falls_back_to_the_file_folder_then_export_root(self):
+        """定位失败时先开成品所在目录，最后才退回导出根目录。"""
+        artifact_dir = self.root_dir / "book dir"
+        artifact_dir.mkdir(exist_ok=True)
+        missing = artifact_dir / "missing.epub"
         opened = []
-        with patch.object(self.instance, "open_output", lambda: opened.append(True)):
-            self.instance._reveal_output(str(self.root_dir / "missing.epub"))
-        self.assertEqual(opened, [True])
+        with patch.object(app.subprocess, "Popen", side_effect=OSError("fail")), \
+                patch.object(app.os, "startfile", lambda p: opened.append(p)), \
+                patch.object(self.instance, "open_output",
+                             lambda: opened.append("ROOT")):
+            # 文件不存在时走 parent.is_dir() 分支
+            self.instance._reveal_output(str(missing))
+            self.assertEqual(opened, [str(artifact_dir)])
+        # 父目录也不存在时最后退回导出根目录
+        opened.clear()
+        with patch.object(self.instance, "open_output", lambda: opened.append("ROOT")):
+            self.instance._reveal_output(str(self.root_dir / "no" / "such.epub"))
+        self.assertEqual(opened, ["ROOT"])
 
 
 if __name__ == "__main__":
