@@ -469,6 +469,55 @@ def describe_omissions(report, compact: bool = False) -> str:
             + "正文没有受影响。成品位置：点下方「打开下载目录」。")
 
 
+# 运行记录面板：把 worker 的技术行翻成大白话（issue #99）。
+# 规则按前缀/关键字匹配，命不中的行不通上屏——技术细节只留在日志文件里。
+# 顺序重要：先判更具体的行（如 THROTTLED 失败），再判通用前缀。
+_RUN_LOG_RULES = (
+    ("AUTH_OK", lambda v: "登录状态正常，可以搜索书籍。"),
+    ("SHELF\t", lambda v: "已读取微信书架。"),
+    ("[RESUME]", lambda v: "已找到本地进度：" + v[len("[RESUME]"):].strip()),
+    ("[SPAWN]", lambda v: "正在启动下载组件…"),
+    ("[SERVICE]", lambda v: None),          # 耗时统计，纯技术
+    ("[CSS]", lambda v: None),
+    ("[ACL]", lambda v: None),
+    ("[THROTTLED]", lambda v: "微信读书的访问频率限制还没解除，部分章节没取到；断点已保留，稍后点“继续下载”即可。"),
+    ("[THROTTLE]", lambda v: "微信读书触发了访问频率限制，程序已自动降速并退避重试。"),
+    ("[RETRY]", lambda v: ("微信读书触发了访问频率限制，程序正在自动降速并退避重试。"
+                           if any(t in v for t in ("426", "429", "Too Many Requests", "rate limit"))
+                           else "某个章节读取失败，程序正在自动重试；已完成的章节不受影响。")),
+    ("[IMAGE]", lambda v: "有插图在微信读书上已不存在，已略去，正文没受影响。"),
+    ("[ANNOTATION]", lambda v: "部分划线未能嵌入正文，已保留原文。"),
+    ("[UNRESOLVED]", lambda v: "有一章的正文或划线无法安全确认，已记录并继续检查其它章节。"),
+    ("[INCOMPLETE]", lambda v: "扫描完成，但仍有章节需要处理，没有生成不完整的 EPUB。"),
+    ("[APPENDIX]", lambda v: "附录生成中…"),
+    ("[CHECKPOINT]", lambda v: "本地进度已更新。"),
+    ("PROBE_OK;", lambda v: "首章检查通过，可以开始下载。"),
+    ("DONE ", lambda v: "下载完成，成品已放到导出目录。"),
+    ("FAILED ", lambda v: "本次操作未完成：" + friendly_error(v)),
+    ("OMISSIONS ", lambda v: "下载完成，成品已放到导出目录；缺失说明见完成提示。"),
+    ("EPUB ", lambda v: None),
+)
+
+
+def _plain_run_line(value: str) -> str:
+    """技术行 → 用户看得懂的一句话；不该上屏的行返回空串。
+
+    先做结构化进度行 `[n/total] ...`，再按规则表匹配前缀。所有内容都先按
+    「不泄露」处理：文案由规则生成，不把原始接口返回直接展示。
+    """
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    # 章节进度：[12/155] ... 由引擎逐章打印
+    match = re.match(r"^\[(\d+)/(\d+)\]", value)
+    if match:
+        return "正在下载第 %s/%s 章，本地断点会自动复用。" % match.groups()
+    for prefix, render in _RUN_LOG_RULES:
+        if value.startswith(prefix):
+            text = render(value)
+            return text.strip() if isinstance(text, str) else ""
+    return ""
+
+
 def _tidy_reason(reason) -> str:
     """A short failure reason for a dialog line.
 
@@ -912,7 +961,10 @@ class _ResultCanvas(ctk.CTkFrame):
         x0, y0, _x1, _y1 = self.canvas.coords(entry["cover_bg"])
         scaled = image.copy()
         scaled.thumbnail(self._cover_slot(), Image.LANCZOS)
-        photo = ImageTk.PhotoImage(scaled)
+        # master 必须显式绑当前画布：ImageTk 默认关联"第一个创建的 Tk root"，
+        # 全量测试里前面的 root 销毁后，新 PhotoImage 会挂到死 root 上，报
+        # "image pyimageNNN doesn't exist"（issue #94 实测）。
+        photo = ImageTk.PhotoImage(scaled, master=self.canvas)
         self._photo_refs[book_id] = photo
         item = self.canvas.create_image(x0, y0, anchor="nw", image=photo,
                                         tags=("row:%s" % book_id,))
@@ -1134,7 +1186,10 @@ class _ShelfCanvas(ctk.CTkFrame):
         x0, y0, _x1, _y1 = self.canvas.coords(entry["cover_bg"])
         scaled = image.copy()
         scaled.thumbnail(self._cover_slot(), Image.LANCZOS)
-        photo = ImageTk.PhotoImage(scaled)
+        # master 必须显式绑当前画布：ImageTk 默认关联"第一个创建的 Tk root"，
+        # 全量测试里前面的 root 销毁后，新 PhotoImage 会挂到死 root 上，报
+        # "image pyimageNNN doesn't exist"（issue #94 实测）。
+        photo = ImageTk.PhotoImage(scaled, master=self.canvas)
         self._photo_refs[book_id] = photo
         entry["cover_image"] = self.canvas.create_image(
             x0, y0, anchor="nw", image=photo, tags=("shelf:%s" % book_id,))
@@ -1327,6 +1382,11 @@ class DesktopApp:
         self._prefs = load_ui_prefs()
         # 引擎最后一次报的成品路径（DONE 行），完成后用它定位文件。
         self._last_artifact = ""
+        # 启动静默检查登录进行中：只更新角标，不改状态栏、不弹提示（issue #98）。
+        self._silent_auth_pending = False
+        # 运行记录面板的有界缓存（issue #99）：切页不丢，最多留 200 条。
+        self._run_log: list[str] = []
+        self._run_log_box = None
         # What the last finished book is missing. A degraded download is only
         # better than a failed one if the reader is told what went missing.
         self.omissions = None
@@ -1754,6 +1814,7 @@ class DesktopApp:
         builders = {
             "我的书架": self._create_bookshelf_page,
             "下载记录": self._create_download_history_page,
+            "运行记录": self._create_run_log_page,
             "存储占用": self._create_statistics_page,
             "设置": self._create_settings_page,
         }
@@ -2125,6 +2186,65 @@ class DesktopApp:
             ctk.CTkLabel(row, text=line, text_color=self.MUTED, anchor="w",
                          font=_font(12)).pack(side="left", fill="x", expand=True)
 
+    def _record_run_line(self, value: str):
+        """把一条 worker 行翻成大白话后追加到运行记录（issue #99）。
+
+        只有翻得出来的行才上屏；技术细节照旧由 _log 落盘。缓存封顶 200 条，
+        切页后从缓存重建，不丢内容、也不会无限吃内存。
+        """
+        text = _plain_run_line(value)
+        if not text:
+            return
+        stamp = time.strftime("%H:%M:%S")
+        self._run_log.append("[%s] %s" % (stamp, text))
+        if len(self._run_log) > 200:
+            del self._run_log[:-200]
+        self._refresh_run_log_box()
+
+    def _refresh_run_log_box(self):
+        """运行记录页可见才刷新文本框；不可见时只更新缓存，切回来再重建。"""
+        box = getattr(self, "_run_log_box", None)
+        if box is None or not box.winfo_exists():
+            return
+        try:
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            if self._run_log:
+                box.insert("end", "\n".join(self._run_log) + "\n")
+            else:
+                box.insert("end", "还没有运行记录。开始一次下载后，这里会实时显示进度。")
+            box.configure(state="disabled")
+            box.see("end")
+        except Exception:
+            pass
+
+    def _create_run_log_page(self, host):
+        """运行记录：worker 消息的「大白话」实时视图（issue #99）。
+
+        与技术日志分开：这里只说人话，原始日志（[SERVICE]/堆栈/接口返回）
+        仍由「查看技术日志」打开的文件保留，供排查问题。
+        """
+        page, card = self._page_scaffold(self.page_host, "运行记录")
+        holder = ctk.CTkFrame(card, fg_color=self.CARD)
+        holder.pack(fill="both", expand=True, padx=12, pady=(10, 4))
+        box = tk.Text(holder, wrap="word", height=20, bd=0,
+                      fg=self.INK, bg=self.SUNKEN, insertbackground=self.INK,
+                      font=_font(12, family=MONO), spacing1=2, spacing3=2)
+        box.pack(side="left", fill="both", expand=True)
+        bar = ctk.CTkScrollbar(holder, orientation="vertical", command=box.yview,
+                               button_color=self.HAIRLINE,
+                               button_hover_color=self.ACCENT_TINT,
+                               fg_color="transparent")
+        bar.pack(side="right", fill="y")
+        box.configure(yscrollcommand=bar.set)
+        box.configure(state="disabled")
+        self._run_log_box = box
+        self._refresh_run_log_box()
+        ctk.CTkLabel(card, text="这里只显示看得懂的进度；排查问题请点下载卡片里的「查看技术日志」。",
+                     text_color=self.FAINT, anchor="w", font=_font(11),
+                     wraplength=560, justify="left").pack(anchor="w", padx=12, pady=(0, 10))
+        # 页面被重建（切走再切回）时旧文本框失效，缓存里的内容会在上面重建出来。
+
     def _create_statistics_page(self, host):
         """存储占用：exports 目录占了多少、能回收多少。
 
@@ -2433,6 +2553,8 @@ class DesktopApp:
                                                     command=lambda: self._switch_page("我的书架"))
         self.nav_items["下载记录"] = self._nav_item(nav, "下载记录", "↺",
                                                     command=lambda: self._switch_page("下载记录"))
+        self.nav_items["运行记录"] = self._nav_item(nav, "运行记录", "≡",
+                                                    command=lambda: self._switch_page("运行记录"))
         self.nav_items["存储占用"] = self._nav_item(nav, "存储占用", "▥",
                                                     command=lambda: self._switch_page("存储占用"))
 
@@ -2762,7 +2884,13 @@ class DesktopApp:
         # 标注有四档，不是两个开关：注释和想法（两样都进书末附录）/ 注释 / 想法 /
         # 纯正文。用一张模块级表派生选项、默认值和 worker 参数——三处各写一份字面量
         # 漂移过，就是 W3 那次下载按钮崩溃的成因。
-        self.annotations_var = ctk.StringVar(value=_DEFAULT_ANNOTATION_MODE.label)
+        # issue #98：用户上次选的档位在启动时恢复，改动即写回 ui-prefs.json。
+        # 三个键都先在 _prefs 里读；值非法时 _annotation_mode/_translation_mode
+        # 自带回退，不合法的标签不会让导出崩（W3 的教训）。
+        saved_annotation = self._prefs.get("annotation_mode")
+        if saved_annotation not in tuple(mode.label for mode in _ANNOTATION_MODES):
+            saved_annotation = _DEFAULT_ANNOTATION_MODE.label
+        self.annotations_var = ctk.StringVar(value=saved_annotation)
         self.annotations_box = ctk.CTkComboBox(
             export, values=tuple(mode.label for mode in _ANNOTATION_MODES),
             variable=self.annotations_var, width=104, height=28, state="readonly",
@@ -2777,8 +2905,10 @@ class DesktopApp:
         self.annotations_hint.configure(
             text=_ANNOTATION_HINTS.get(self.annotations_var.get(), ""))
         self.annotations_var.trace_add(
-            "write", lambda *_a: self.annotations_hint.configure(
-                text=_ANNOTATION_HINTS.get(self.annotations_var.get(), "")))
+            "write", lambda *_a: (
+                self.annotations_hint.configure(
+                    text=_ANNOTATION_HINTS.get(self.annotations_var.get(), "")),
+                self._save_export_pref("annotation_mode", self.annotations_var.get())))
         self._make_combo_keyboard_reachable(self.annotations_box)
         # 这里以前是 configure(state="disabled")，而全文件只有 _handle_done() 会把它
         # 恢复成 readonly——也就是首次下载之前用户根本改不了标注模式，只能用它硬编码
@@ -2790,7 +2920,10 @@ class DesktopApp:
         ctk.CTkLabel(export, text="译文", text_color=self.FAINT,
                      font=_font(12)).grid(row=0, column=4, sticky="e",
                                           padx=(14, 6), pady=(12, 0))
-        self.translation_var = ctk.StringVar(value=_DEFAULT_TRANSLATION[0])
+        saved_translation = self._prefs.get("translation_mode")
+        if saved_translation not in tuple(option[0] for option in _TRANSLATION_MODES):
+            saved_translation = _DEFAULT_TRANSLATION[0]
+        self.translation_var = ctk.StringVar(value=saved_translation)
         self.translation_box = ctk.CTkComboBox(
             export, values=tuple(label for label, _value, _hint in _TRANSLATION_MODES),
             variable=self.translation_var, width=96, height=28, state="readonly",
@@ -2800,11 +2933,14 @@ class DesktopApp:
             button_color=self.HAIRLINE, button_hover_color=self.SUNKEN)
         self.translation_box.grid(row=0, column=5, sticky="e", padx=(0, 12), pady=(12, 0))
         self._make_combo_keyboard_reachable(self.translation_box)
+        self.translation_var.trace_add(
+            "write", lambda *_a: self._save_export_pref(
+                "translation_mode", self.translation_var.get()))
         # 划线画不画进正文，与标注方式正交（issue #93：有人只要注释、不要高亮）。
         # 想法数据寄生在划线接口返回的 range 上，所以关掉勾选仍会取数据、想法
         # 角标照常落位，只是正文里不再画高亮——这层语义进 README 和确认框，
         # 控件旁只留名字。
-        self.underline_var = tk.BooleanVar(value=True)
+        self.underline_var = tk.BooleanVar(value=bool(self._prefs.get("underline_marks", True)))
         self.underline_check = ctk.CTkCheckBox(
             export, text="划线", variable=self.underline_var, height=28,
             corner_radius=6, border_width=1, border_color="#D5D9DF",
@@ -2812,6 +2948,9 @@ class DesktopApp:
             text_color=self.INK, font=_font(12))
         self.underline_check.grid(row=0, column=6, sticky="e", padx=(10, 18),
                                   pady=(12, 0))
+        self.underline_var.trace_add(
+            "write", lambda *_a: self._save_export_pref(
+                "underline_marks", bool(self.underline_var.get())))
         self.probe_button = ctk.CTkButton(
             export, text="先检查第一章", command=self.probe, height=36,
             corner_radius=6, fg_color=self.CARD, hover_color=self.SUNKEN,
@@ -3445,6 +3584,9 @@ class DesktopApp:
             pass
 
     def _handle_line(self, value: str):
+        # 运行记录面板：先翻成大白话再追加（issue #99）。原始技术行照旧落盘，
+        # 两者互不影响；这是唯一的追加点，所有 return 之前都走到。
+        self._record_run_line(value)
         if value.startswith("DONE "):
             # 引擎最后一行是成品路径；完成回调靠它定位 EPUB（issue #97）。
             # 这行同时会进日志，所以不在这里重复 _persist_log。
@@ -3582,9 +3724,14 @@ class DesktopApp:
             elif action == "auth":
                 if code == 0:
                     self.auth_badge.configure(text="登录有效", text_color=self.GREEN)
-                    self.status.set("登录状态正常，可以搜索书籍。")
+                    if not getattr(self, "_silent_auth_pending", False):
+                        self.status.set("登录状态正常，可以搜索书籍。")
+                elif getattr(self, "_silent_auth_pending", False):
+                    # 静默检查：只把角标标成需登录，不弹说明、不抢状态栏（issue #98）。
+                    self.auth_badge.configure(text="需要登录", text_color=self.RED)
                 else:
                     self._report_login_problem()
+                self._silent_auth_pending = False
             elif action == "shelf" and code != 0:
                 self._show_shelf_error()
             elif action == "probe":
@@ -4560,11 +4707,37 @@ class DesktopApp:
             print("[FIRST_RUN] credential panel failed: %s: %s"
                   % (type(exc).__name__, exc), file=sys.stderr)
             self.status.set("凭证还没配好：点「登录 / 切换账号」填写后即可下载。")
+        # issue #98：启动后静默查一次登录，只更新右上角角标，不弹提示、不抢状态栏。
+        # 凭证根本没配好时没必要发请求；常驻 worker 未热也不额外等它——用一次性
+        # 子进程，和手动「检查登录状态」走同一条 worker 通道。
+        if not self._credentials_ready_for_check():
+            return
+        try:
+            # 状态栏传当前值：_start_worker 无条件 set(status)，传空串会清掉
+            # 「凭证还没配好」这类启动提示。静默只改角标，不动状态栏。
+            self._silent_auth_pending = True
+            if not self._start_worker(["--check-auth"], "auth", self.status.get()):
+                self._silent_auth_pending = False
+                return
+            self.auth_badge.configure(text="检查中…", text_color=self.MUTED)
+        except Exception as exc:
+            # 静默检查失败不能影响窗口或用户操作，只记日志。
+            self._silent_auth_pending = False
+            self._persist_log("[SILENT-AUTH] 启动检查未发出：%s: %s"
+                              % (type(exc).__name__, exc))
+
+    def _credentials_ready_for_check(self) -> bool:
+        """凭证文件齐备才发静默检查；新用户首次打开不会看到一次必然的失败。"""
+        try:
+            return bool(_credentials_usable())
+        except Exception:
+            return False
 
     def check_auth(self):
         if self._is_busy():
             self.status.set("当前有任务正在运行，等它结束再检查登录。")
             return
+        self._silent_auth_pending = False
         self.auth_badge.configure(text="正在检查…", text_color=self.MUTED)
         if not self._start_worker(["--check-auth"], "auth", "正在安全检查本机登录状态…"):
             self.auth_badge.configure(text="检查失败", text_color=self.RED)
@@ -5068,19 +5241,35 @@ class DesktopApp:
         self._prefs["open_output_when_done"] = bool(self.open_when_done_var.get())
         save_ui_prefs(self._prefs)
 
+    def _save_export_pref(self, key: str, value):
+        """下载卡片的档位变化即时写回偏好（issue #98）。"""
+        if self._prefs.get(key) == value:
+            return
+        self._prefs[key] = value
+        save_ui_prefs(self._prefs)
+
     def _reveal_output(self, artifact: str = ""):
         """打开导出目录；有成品文件时在资源管理器里选中它。
 
-        explorer /select 只认一个参数（逗号后跟完整路径），路径里的空格由
-        参数整体传递处理；Popen 返回码不可靠（explorer 常返回 1），不看它。
+        issue #100：`/select,` 与路径必须分成两个 argv。合成一个字符串时，含空格
+        的路径会被 Python 整体加引号，explorer 不认这层引号、在空格处截断，最后
+        定位失败并回退到「文档」库（本机实测：合并写法完全不开窗，拆分写法正确
+        开窗并选中）。Popen 返回码不可靠——explorer 成功也常返回 1，不看它。
+        选中失败时退回成品所在目录，最后才开导出根目录。
         """
         target = Path(artifact) if artifact else None
-        try:
-            if target is not None and target.is_file():
-                subprocess.Popen(["explorer", "/select,%s" % target])
+        if target is not None and target.is_file():
+            try:
+                subprocess.Popen(["explorer", "/select,", str(target)])
                 return
-        except Exception:
-            pass
+            except Exception as exc:
+                self._persist_log("[REVEAL] 定位成品失败：%s" % exc)
+        if target is not None and target.parent.is_dir():
+            try:
+                os.startfile(str(target.parent))
+                return
+            except Exception as exc:
+                self._persist_log("[REVEAL] 打开成品目录失败：%s" % exc)
         self.open_output()
 
     def open_logs(self):

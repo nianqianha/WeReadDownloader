@@ -109,7 +109,7 @@ def test_every_nav_row_is_a_single_clickable_button():
     """Every row must be one CTkButton each: nothing stacked over a child."""
     root, inst = _make_instance()
     try:
-        expected = ("下载工坊", "我的书架", "下载记录",
+        expected = ("下载工坊", "我的书架", "下载记录", "运行记录",
                     "存储占用", "设置")
         assert set(inst.nav_items) == set(expected), sorted(inst.nav_items)
         for name, item in inst.nav_items.items():
