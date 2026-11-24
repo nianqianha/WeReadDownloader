@@ -73,9 +73,26 @@ jobs:
         # 清单曾是从 import 反推的，版本不锁时上游一个发版就能让 CI 无故变红/
         # 变绿。版本实测可用后才写进该文件（见文件内注释）。
 
-      - name: 跑测试
-        run: python -m pytest -q -m "not local_corpus"
+      - name: 跑测试（分批，每批独立进程）
+        # 单个 pytest 进程跑完 595 个用例时，Tk 窗口反复创建/销毁会让进程越跑越慢：
+        # 本机实测单进程 12-15 分钟还没到一半，CI 上更是 32 分钟后被平台取消
+        # （不是测试失败，faulthandler 只打印栈）。分批后每批进程退出即释放 Tk/CTk
+        # 全局状态，本机 6 批全部通过（589 passed / 6 skipped）。
         # 真实导出语料验收在有本机语料的环境单独运行：pytest -m local_corpus。
+        shell: bash
+        run: |
+          set -e
+          files=(tests/test_*.py)
+          batch_size=12
+          total=${#files[@]}
+          batch=0
+          while [ $((batch * batch_size)) -lt $total ]; do
+            from=$((batch * batch_size))
+            chunk=("${files[@]:$from:$batch_size}")
+            echo "=== batch $batch: ${#chunk[@]} files ==="
+            python -m pytest -q -m "not local_corpus" "${chunk[@]}"
+            batch=$((batch + 1))
+          done
         # 收集规则来自仓库根目录的 pytest.ini。那里的 python_functions = test_*
         # 不是可有可无的：测试文件用名为 `test` 的装饰器自我登记，pytest 默认
         # 规则 `test*` 会把这个装饰器本身也当用例收集，然后在三十来个文件里各报
